@@ -28,6 +28,8 @@
   (is (clojure.string/includes? prompt/system-prompt "Call FINAL only after enough observations have been inspected"))
   (is (clojure.string/includes? prompt/system-prompt "Use map-lm when the same semantic operation applies independently"))
   (is (clojure.string/includes? prompt/system-prompt "Use map-rlm when several independent lanes can run in parallel"))
+  (is (clojure.string/includes? prompt/system-prompt "Default decomposition posture"))
+  (is (clojure.string/includes? prompt/system-prompt "do not inspect them one by one in the root loop"))
   (is (clojure.string/includes? prompt/system-prompt "Children should use lm and map-lm aggressively"))
   (is (clojure.string/includes? prompt/system-prompt "Bind large values with def"))
   (doseq [example ["- lm:" "- map-lm:" "- rlm:" "- map-rlm:"]]
@@ -36,7 +38,7 @@
   (is (clojure.string/includes? prompt/child-prompt "Do not solve the parent task globally"))
   (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
   (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
-  (is (= 3 (:prompt/version prompt/prompt-metadata))))
+  (is (= 4 (:prompt/version prompt/prompt-metadata))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -60,9 +62,21 @@
     (doseq [file ["session.edn" "messages.edn" "turns.edn" "evals.edn" "calls.edn"
                   "events.edn" "snapshots.edn" "usage.edn" "tree.edn"]]
       (is (some? (artifacts/read-edn-file (artifacts/path dir file) nil)) file))
+    (is (not (.exists (java.io.File. dir "blobs"))))
     (let [session-text (slurp (str (artifacts/path dir "session.edn")))]
       (is (clojure.string/includes? session-text "\n "))
       (is (> (count (clojure.string/split-lines session-text)) 3)))))
+
+(deftest chat-reader-accepts-multi-paragraph-message
+  (is (= "first paragraph\nstill first message\n\nsecond paragraph"
+         (with-in-str "first paragraph\nstill first message\n\nsecond paragraph\n/send\n"
+           (cli/read-chat-message))))
+  (is (= :quit
+         (with-in-str "/exit\n"
+           (cli/read-chat-message))))
+  (is (= "unterminated but real"
+         (with-in-str "unterminated but real\n"
+           (cli/read-chat-message)))))
 
 (deftest simple-final-loop
   (let [dir (tmp-dir "simple")
@@ -438,8 +452,8 @@
           turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])]
       (is (= :stopped (:session/status session-row)))
       (is (= 1 (count turns)))))
-  (testing "chat processes two stdin lines in one session"
-    (let [out (with-in-str "first\nsecond\n"
+  (testing "chat processes two submitted messages in one session"
+    (let [out (with-in-str "first\n/send\nsecond\n/send\n"
                 (with-out-str
                   (cli/chat-command {:fake-script "multi-turn-chat"})))
           dir (second (re-find #"Session: (.+)" out))
@@ -494,7 +508,7 @@
     (is (= {:ok 1} (get-in result [:final-value :results 0 :value])))
     (is (= false (get-in result [:final-value :results 1 :ok])))))
 
-(deftest snapshot-blobs-large-vars-and-marks-unresumable
+(deftest snapshot-keeps-large-vars-inline-and-marks-unresumable
   (let [dir (tmp-dir "snapshot")
         result (process/run-process!
                 (scripted-cfg ["```clojure\n(def big (vec (range 5000)))\n(def proc (Object.))\n(FINAL :done)\n```"])
@@ -502,5 +516,6 @@
         snapshots (artifacts/read-edn-file (artifacts/path dir "snapshots.edn") [])
         last-snapshot (last snapshots)]
     (is (= :done (:final-value result)))
-    (is (= :blob (get-in last-snapshot [:snapshot/vars 'big :value/kind])))
+    (is (= :inline (get-in last-snapshot [:snapshot/vars 'big :value/kind])))
+    (is (= 5000 (count (get-in last-snapshot [:snapshot/vars 'big :value]))))
     (is (= :not-edn (get-in last-snapshot [:snapshot/unresumable 'proc :reason])))))

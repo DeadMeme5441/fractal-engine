@@ -87,12 +87,11 @@ runs/<session-id>/
   final.edn
   usage.edn
   tree.edn
-  blobs/
   children/
 ```
 
 Canonical files are `session.edn`, `messages.edn`, `turns.edn`, `evals.edn`,
-`calls.edn`, `events.edn`, `snapshots.edn`, `blobs/`, and `children/`.
+`calls.edn`, `events.edn`, `snapshots.edn`, and `children/`.
 
 `final.edn`, `usage.edn`, and `tree.edn` are derived views.
 
@@ -127,6 +126,9 @@ inspect
 resume
 fork
 ```
+
+`chat` accepts multi-paragraph messages. Finish a message with `/send` on its
+own line; enter `/exit` on an empty prompt to stop the session.
 
 It does not define workflows or product-specific behavior.
 

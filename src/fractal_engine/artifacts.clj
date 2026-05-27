@@ -9,14 +9,11 @@
   (:import [java.io PushbackReader]
            [java.nio.charset StandardCharsets]
            [java.nio.file Files Path StandardCopyOption]
-           [java.security MessageDigest]
            [java.util UUID]))
 
 (def artifact-version 1)
 (def surface-version 1)
 (def surface '[FINAL lm map-lm rlm map-rlm])
-(def inline-limit 8192)
-
 (defn session-id []
   (str "session-" (UUID/randomUUID)))
 
@@ -65,10 +62,6 @@
         (edn/read {:eof default} r))
       default)))
 
-(defn sha256 [^bytes bytes]
-  (let [digest (.digest (MessageDigest/getInstance "SHA-256") bytes)]
-    (apply str (map #(format "%02x" (bit-and % 0xff)) digest))))
-
 (defn value-summary [value]
   (cond
     (nil? value) {:kind :nil}
@@ -109,36 +102,13 @@
             :preview (try (pr-str value)
                           (catch Throwable _ (str value)))})))
 
-(defn write-blob! [dir value]
-  (let [edn-str (binding [*print-dup* false *print-readably* true] (pr-str value))
-        bytes (.getBytes edn-str StandardCharsets/UTF_8)
-        hex (sha256 bytes)
-        rel (str "blobs/sha256/" (subs hex 0 2) "/" (subs hex 2 4) "/" hex ".edn")
-        p (path dir rel)]
-    (when-not (Files/exists p (make-array java.nio.file.LinkOption 0))
-      (Files/createDirectories (.getParent p) (make-array java.nio.file.attribute.FileAttribute 0))
-      (atomic-spit! p value))
-    {:value/kind :blob
-     :blob/id (str "sha256:" hex)
-     :value/type :edn
-     :value/summary (value-summary value)}))
-
-(defn blob-path [dir blob-id]
-  (let [hex (str/replace blob-id #"^sha256:" "")]
-    (path dir "blobs" "sha256" (subs hex 0 2) (subs hex 2 4) (str hex ".edn"))))
-
 (defn read-ref [dir ref]
   (case (:value/kind ref)
     :inline (:value ref)
-    :blob (read-edn-file (blob-path dir (:blob/id ref)) ::missing)
     ::missing))
 
 (defn value-ref! [dir value]
-  (let [s (try (binding [*print-dup* false *print-readably* true] (pr-str value))
-               (catch Throwable _ nil))]
-    (if (and s (<= (count (.getBytes s StandardCharsets/UTF_8)) inline-limit))
-      {:value/kind :inline :value value}
-      (write-blob! dir value))))
+  {:value/kind :inline :value value})
 
 (def root-call-types #{:root})
 (def leaf-call-types #{:leaf :leaf-batch-item})
@@ -334,7 +304,7 @@
 
 (defn flush! [state]
   (let [{:keys [dir session messages turns evals calls events snapshots]} @state]
-    (doseq [sub ["blobs" "children"]]
+    (doseq [sub ["children"]]
       (ensure-dir! (path dir sub)))
     (atomic-spit! (path dir "session.edn") session)
     (atomic-spit! (path dir "messages.edn") messages)
@@ -464,7 +434,6 @@
 (defn new-state!
   [{:keys [dir id kind provider parent resumed-from forked-from cache-id]}]
   (ensure-dir! dir)
-  (ensure-dir! (path dir "blobs"))
   (ensure-dir! (path dir "children"))
   (let [created (time/now-str)
         sid (or id (session-id))

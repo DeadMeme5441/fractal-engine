@@ -140,7 +140,7 @@
     (doseq [[sym ref] (:snapshot/vars snapshot)]
       (let [value (artifacts/read-ref (:dir @state) ref)]
         (if (= ::artifacts/missing value)
-          (swap! skipped conj {:var sym :reason :missing-blob})
+          (swap! skipped conj {:var sym :reason :missing-value})
           (do (intern (the-ns ns-sym) sym value)
               (swap! restored conj sym)))))
     (doseq [[sym info] (:snapshot/unresumable snapshot)]

@@ -93,23 +93,35 @@
     (session/resume-session! (cfg-from-opts opts) dir)
     (session/start-session! (cfg-from-opts opts))))
 
+(def quit-commands #{".quit" ":quit" "/quit" "/exit"})
+
+(defn read-chat-message []
+  (loop [lines []]
+    (if-let [line (read-line)]
+      (let [trimmed (str/trim line)]
+        (cond
+          (and (empty? lines) (contains? quit-commands trimmed)) :quit
+          (= "/send" trimmed) (str/join "\n" lines)
+          :else (recur (conj lines line))))
+      (when (seq lines)
+        (str/join "\n" lines)))))
+
 (defn chat-command [opts]
   (let [s (chat-session opts)]
     (println "Session:" (str (:dir s)))
+    (println "Enter a message, finish with /send on its own line. Use /exit on an empty prompt to quit.")
     (loop []
-      (if-let [line (read-line)]
-        (if (#{".quit" ":quit" "/quit" "/exit"} (str/trim line))
-          (session/stop-session! s)
-          (do
-            (let [trimmed (str/trim line)]
-              (when-not (empty? trimmed)
-                (let [result (session/run-turn! s trimmed)]
-                  (println "Turn:" (:turn-id result))
-                  (if (= :error (:status result))
-                    (println "Error:" (pr-str (:error result)))
-                    (println "Final:" (pr-str (:final-value result)))))))
-            (recur)))
-        (session/stop-session! s)))))
+      (let [message (read-chat-message)]
+        (cond
+          (nil? message) (session/stop-session! s)
+          (= :quit message) (session/stop-session! s)
+          :else (do
+                  (let [result (session/run-turn! s message)]
+                    (println "Turn:" (:turn-id result))
+                    (if (= :error (:status result))
+                      (println "Error:" (pr-str (:error result)))
+                      (println "Final:" (pr-str (:final-value result)))))
+                  (recur)))))))
 
 (defn resume-command [opts]
   (if (:chat opts)
@@ -122,7 +134,7 @@
 (defn usage []
   (println "fractal-engine commands:")
   (println "  run --question TEXT [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
-  (println "  chat [--dir runs/session-id] [--fake-script multi-turn-chat]")
+  (println "  chat [--dir runs/session-id] [--fake-script multi-turn-chat]  # /send submits a message")
   (println "  inspect --dir runs/session-id")
   (println "  resume --dir runs/session-id --question TEXT [--fake-script resume-use]")
   (println "  fork --dir runs/session-id --new-dir runs/session-fork --question TEXT")
