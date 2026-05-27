@@ -135,6 +135,10 @@
         (.shutdownNow executor)
         (.awaitTermination executor 5 TimeUnit/SECONDS)))))
 
+(defn session-cache-id [state]
+  (or (get-in @state [:session :session/cache-id])
+      (get-in @state [:session :session/id])))
+
 (defn make-ops [state cfg ns-sym]
   (letfn [(leaf-call [call-type input query mode extra]
             (let [call (merge {:call/type call-type
@@ -145,7 +149,7 @@
                                :call/query query
                                :call/mode mode
                                :request (leaf-request input query
-                                                      (cache/request-cache (:session/id (:session @state)) :leaf))}
+                                                      (cache/request-cache (session-cache-id state) :leaf))}
                               extra)
                   {:keys [call-id response]} (call-provider! state cfg :leaf call)
                   text (provider/response-text response)
@@ -185,20 +189,25 @@
                   cid (artifacts/child-id child-num)
                   child-rel (str "children/" cid)
                   child-dir (artifacts/path (:dir @state) child-rel)
+                  parent-cache-id (session-cache-id state)
+                  child-cache-id (str parent-cache-id "/" child-rel)
                   call-row (artifacts/add-call! state (merge {:call/type call-type
                                                               :call/turn-id runtime/*current-turn-id*
                                                               :edge/type :spawned
                                                               :call/parent-eval-id runtime/*current-eval-id*
                                                               :child/session-id cid
+                                                              :child/cache-id child-cache-id
                                                               :child/dir child-rel}
                                                              extra))
                   parent {:parent/session-id (:session/id (:session @state))
+                          :parent/cache-id parent-cache-id
                           :parent/call-id (:call/id call-row)
                           :parent/eval-id runtime/*current-eval-id*
                           :parent/relative-dir ".."}]
               (try
                 (let [result (run-process! cfg {:dir child-dir
                                                 :id cid
+                                                :cache-id child-cache-id
                                                 :kind :child
                                                 :parent parent
                                                 :task task})
@@ -323,7 +332,7 @@
           (finish-turn-error! state turn-id err)
           {:status :error :error err :dir (:dir @state) :turn-id turn-id})
         (let [request (provider-request (:messages @state)
-                                        (cache/request-cache (:session/id (:session @state)) :agent))
+                                        (cache/request-cache (session-cache-id state) :agent))
               step (try
                      (let [{:keys [call-id response]} (call-provider!
                                                        state cfg :root
@@ -395,12 +404,13 @@
     cfg))
 
 (defn run-process!
-  [cfg {:keys [dir id kind parent task messages resume-state ns-sym] :as opts}]
+  [cfg {:keys [dir id kind parent task messages resume-state ns-sym cache-id] :as opts}]
   (let [cfg (config cfg)
         effective-cfg (child-root-config cfg kind)
         state (or resume-state
                   (artifacts/new-state! {:dir dir
                                          :id id
+                                         :cache-id cache-id
                                          :kind (or kind :root)
                                          :provider (provider-shape effective-cfg)
                                          :parent parent}))

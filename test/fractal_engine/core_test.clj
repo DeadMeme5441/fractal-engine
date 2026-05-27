@@ -206,9 +206,54 @@
     (is (.exists (java.io.File. dir "children/child-0002/turns.edn")))
     (is (.exists (java.io.File. dir "children/child-0003/session.edn")))
     (is (.exists (java.io.File. dir "children/child-0003/turns.edn")))
-    (let [calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])]
+    (let [calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+          child-calls (filter #(#{:child :child-batch-item} (:call/type %)) calls)
+          child-session (artifacts/read-edn-file (artifacts/path dir "children/child-0001/session.edn") {})
+          child-root-calls (artifacts/read-edn-file (artifacts/path dir "children/child-0001/calls.edn") [])]
       (is (= 1 (count (filter #(= :child (:call/type %)) calls))))
-      (is (= 2 (count (filter #(= :child-batch-item (:call/type %)) calls)))))))
+      (is (= 2 (count (filter #(= :child-batch-item (:call/type %)) calls))))
+      (is (= #{"root/children/child-0001"
+               "root/children/child-0002"
+               "root/children/child-0003"}
+             (set (map :child/cache-id child-calls))))
+      (is (= "child-0001" (:session/id child-session)))
+      (is (= "root/children/child-0001" (:session/cache-id child-session)))
+      (is (= "fractal:root/children/child-0001:agent"
+             (get-in child-session [:session/cache :agent-scope])))
+      (is (= #{"fractal:root/children/child-0001:agent"}
+             (set (map :call/cache-scope child-root-calls)))))))
+
+(deftest child-cache-scopes-do-not-collide-across-parent-sessions
+  (let [response-fn (fn [request]
+                      (let [content (:message/content (last (:request/messages request)))]
+                        (if (clojure.string/includes? content "spawn child")
+                          "```clojure\n(FINAL (rlm \"child task\"))\n```"
+                          "```clojure\n(FINAL :child)\n```")))
+        run (fn [root-id]
+              (let [dir (tmp-dir root-id)]
+                (process/run-process!
+                 (process/config {:scripted/response-fn response-fn})
+                 {:dir dir :id root-id :kind :root :task "spawn child"})
+                {:dir dir
+                 :child-session (artifacts/read-edn-file
+                                 (artifacts/path dir "children/child-0001/session.edn")
+                                 {})
+                 :child-call (first (filter #(= :child (:call/type %))
+                                            (artifacts/read-edn-file
+                                             (artifacts/path dir "calls.edn")
+                                             [])))}))
+        a (run "parent-a")
+        b (run "parent-b")]
+    (is (= "child-0001" (get-in a [:child-session :session/id])))
+    (is (= "child-0001" (get-in b [:child-session :session/id])))
+    (is (= "parent-a/children/child-0001"
+           (get-in a [:child-session :session/cache-id])
+           (get-in a [:child-call :child/cache-id])))
+    (is (= "parent-b/children/child-0001"
+           (get-in b [:child-session :session/cache-id])
+           (get-in b [:child-call :child/cache-id])))
+    (is (not= (get-in a [:child-session :session/cache])
+              (get-in b [:child-session :session/cache])))))
 
 (deftest usage-rollup-known-unknown-partial-and-children
   (let [dir (tmp-dir "usage")

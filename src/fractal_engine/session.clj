@@ -22,13 +22,14 @@
 
 (defn start-session!
   ([cfg] (start-session! cfg {}))
-  ([cfg {:keys [dir id kind parent]}]
+  ([cfg {:keys [dir id kind parent cache-id]}]
    (let [cfg (process/config cfg)
          effective-cfg (process/child-root-config cfg kind)
          sid (or id (artifacts/session-id))
          dir (or dir (artifacts/path (:runs-dir cfg) sid))
          state (artifacts/new-state! {:dir dir
                                       :id sid
+                                      :cache-id cache-id
                                       :kind (or kind :root)
                                       :provider (process/provider-shape effective-cfg)
                                       :parent parent})
@@ -105,4 +106,3 @@
                                  :fork/source-dir (str old-dir)})
     (artifacts/flush! state)
     (session-handle state cfg ns-sym ops)))
-

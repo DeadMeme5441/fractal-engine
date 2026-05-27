@@ -462,12 +462,13 @@
   (add-event! state {:event/type :session-error :error error}))
 
 (defn new-state!
-  [{:keys [dir id kind provider parent resumed-from forked-from]}]
+  [{:keys [dir id kind provider parent resumed-from forked-from cache-id]}]
   (ensure-dir! dir)
   (ensure-dir! (path dir "blobs"))
   (ensure-dir! (path dir "children"))
   (let [created (time/now-str)
         sid (or id (session-id))
+        cache-id' (or cache-id sid)
         kind' (or kind :root)
         prompt-metadata (if (= :child kind') prompt/child-prompt-metadata prompt/prompt-metadata)
         state (atom {:dir (path dir)
@@ -481,7 +482,8 @@
                                :session/surface surface
                                :session/prompt prompt-metadata
                                :session/provider provider
-                               :session/cache (cache/session-cache sid)
+                               :session/cache-id cache-id'
+                               :session/cache (cache/session-cache cache-id')
                                :session/turn-count 0
                                :session/latest-turn-id nil
                                :session/parent parent
