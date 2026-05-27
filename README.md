@@ -9,7 +9,11 @@ The loop is intentionally simple:
 2. the model emits fenced Clojure
 3. the host evaluates that Clojure in a persistent namespace
 4. the host appends projected observations as messages
-5. the loop repeats until `(FINAL value)`
+5. the current user turn repeats until `(FINAL value)`
+
+A session is long-lived. `(FINAL value)` completes the current user turn; it
+does not end the session. The same message history, REPL namespace, and cache
+scope remain available to later turns.
 
 The only model-facing host functions are:
 
@@ -69,12 +73,13 @@ ignored `.env` file can also be used by this CLI. Do not commit secrets.
 
 ## Artifacts
 
-Each process writes a session directory:
+Each session writes a directory:
 
 ```text
 runs/<session-id>/
   session.edn
   messages.edn
+  turns.edn
   evals.edn
   calls.edn
   events.edn
@@ -86,13 +91,15 @@ runs/<session-id>/
   children/
 ```
 
-Canonical files are `session.edn`, `messages.edn`, `evals.edn`, `calls.edn`,
-`events.edn`, `snapshots.edn`, `blobs/`, and `children/`.
+Canonical files are `session.edn`, `messages.edn`, `turns.edn`, `evals.edn`,
+`calls.edn`, `events.edn`, `snapshots.edn`, `blobs/`, and `children/`.
 
 `final.edn`, `usage.edn`, and `tree.edn` are derived views.
 
-Child RLM processes use the same shape under `children/child-0001/`,
-`children/child-0002/`, and so on.
+Child RLM sessions use the same shape under `children/child-0001/`,
+`children/child-0002/`, and so on. `rlm` and `map-rlm` run child sessions for
+one turn by default; after a successful one-turn child result, the child session
+is marked `:stopped` and its latest turn remains `:final`.
 
 ## Resume
 
@@ -138,4 +145,3 @@ The core runtime does not include:
 - hidden convenience functions
 
 Those belong in layers around the kernel, not in the kernel.
-

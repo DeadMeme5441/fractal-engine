@@ -64,6 +64,7 @@
     (cond-> (assoc call
                    :call/provider (:provider model-cfg)
                    :call/model (:model model-cfg)
+                   :call/turn-id (or (:call/turn-id call) runtime/*current-turn-id*)
                    :call/request-ref (artifacts/value-ref! (:dir @state) request)
                    :call/request-message-count (count (:request/messages request))
                    :call/request-system-hash (request-system-hash request)
@@ -137,6 +138,7 @@
 (defn make-ops [state cfg ns-sym]
   (letfn [(leaf-call [call-type input query mode extra]
             (let [call (merge {:call/type call-type
+                               :call/turn-id runtime/*current-turn-id*
                                :call/parent-eval-id runtime/*current-eval-id*
                                :call/status :running
                                :call/input-ref (artifacts/value-ref! (:dir @state) input)
@@ -184,6 +186,7 @@
                   child-rel (str "children/" cid)
                   child-dir (artifacts/path (:dir @state) child-rel)
                   call-row (artifacts/add-call! state (merge {:call/type call-type
+                                                              :call/turn-id runtime/*current-turn-id*
                                                               :edge/type :spawned
                                                               :call/parent-eval-id runtime/*current-eval-id*
                                                               :child/session-id cid
@@ -256,12 +259,17 @@
                                   :results (vec (sort-by :index results))}))))))]
     {:lm lm :map-lm map-lm :rlm rlm :map-rlm map-rlm}))
 
-(defn eval-assistant! [state cfg ns-sym assistant-message]
+(defn add-observation! [state turn-id content]
+  (let [message (artifacts/add-message! state :observation content turn-id)]
+    (artifacts/add-turn-id! state turn-id :turn/observation-message-ids (:message/id message))
+    message))
+
+(defn eval-assistant! [state cfg ns-sym turn-id assistant-message]
   (let [blocks (runtime/extract-clojure-blocks (:message/content assistant-message))]
     (if (empty? blocks)
       (do
-        (artifacts/add-message! state :observation
-                                "No fenced Clojure block found. Please respond with a fenced ```clojure block.")
+        (add-observation! state turn-id
+                          "No fenced Clojure block found. Please respond with a fenced ```clojure block.")
         {:status :continue})
       (loop [idx 0 rows []]
         (if-let [code (nth blocks idx nil)]
@@ -269,11 +277,16 @@
                 placeholder-id (inc (get-in @state [:counters :eval]))
                 result (binding [runtime/*current-eval-id* placeholder-id]
                          (runtime/eval-code ns-sym code))
+                final-ref (when (= :final (:eval/status result))
+                            (artifacts/value-ref! (:dir @state) (:eval/raw-final-value result)))
                 row (artifacts/add-eval!
                      state
                      (merge (dissoc result :eval/raw-value :eval/raw-final-value)
+                            (when final-ref
+                              {:eval/final-ref final-ref})
                             {:eval/message-id (:message/id assistant-message)
                              :eval/call-id (:message/call-id assistant-message)
+                             :eval/turn-id turn-id
                              :eval/block-index idx
                              :eval/code code
                              :eval/started-at (:eval/started-at result started)}))
@@ -282,35 +295,54 @@
             (if (= :final (:eval/status result))
               (do
                 (artifacts/mark-final! state (:eval/raw-final-value result))
-                (artifacts/add-message! state :observation (runtime/observation rows'))
-                {:status :final :value (:eval/raw-final-value result)})
+                (add-observation! state turn-id (runtime/observation rows'))
+                {:status :final :value (:eval/raw-final-value result) :final-ref final-ref})
               (if (= :error (:eval/status result))
                 (do
-                  (artifacts/add-message! state :observation (runtime/observation rows'))
+                  (add-observation! state turn-id (runtime/observation rows'))
                   {:status :continue})
                 (recur (inc idx) rows'))))
           (do
-            (artifacts/add-message! state :observation (runtime/observation rows))
+            (add-observation! state turn-id (runtime/observation rows))
             {:status :continue}))))))
 
-(defn run-loop! [state cfg ns-sym]
-  (loop [turn 0]
-    (if (>= turn (:max-turns cfg))
-      (let [err {:error/type :fractal/max-turns :max-turns (:max-turns cfg)}]
-        (artifacts/mark-error! state err)
-        {:status :error :error err :dir (:dir @state)})
-      (let [request (provider-request (:messages @state)
-                                      (cache/request-cache (:session/id (:session @state)) :agent))]
-        (let [step (try
+(defn finish-turn-error! [state turn-id err]
+  (artifacts/update-turn! state turn-id assoc
+                          :turn/status :error
+                          :turn/ended-at (time/now-str)
+                          :turn/error err
+                          :turn/usage (artifacts/derive-usage (:dir @state) (:calls @state)))
+  (artifacts/add-event! state {:event/type :turn-error :turn/id turn-id :error err})
+  (artifacts/mark-error! state err))
+
+(defn run-loop! [state cfg ns-sym turn-id]
+  (binding [runtime/*current-turn-id* turn-id]
+    (loop [step-n 0]
+      (if (>= step-n (:max-turns cfg))
+        (let [err {:error/type :fractal/max-turns :max-turns (:max-turns cfg)}]
+          (finish-turn-error! state turn-id err)
+          {:status :error :error err :dir (:dir @state) :turn-id turn-id})
+        (let [request (provider-request (:messages @state)
+                                        (cache/request-cache (:session/id (:session @state)) :agent))
+              step (try
                      (let [{:keys [call-id response]} (call-provider!
                                                        state cfg :root
                                                        {:call/type :root
+                                                        :call/turn-id turn-id
                                                         :call/message-ids (mapv :message/id (:messages @state))
                                                         :request request})
                            content (provider/response-text response)
-                           assistant (assoc (artifacts/add-message! state :assistant content)
-                                            :message/call-id call-id)]
-                       (eval-assistant! state cfg ns-sym assistant))
+                           assistant (artifacts/add-message! state :assistant content turn-id)]
+                       (swap! state update :messages
+                              (fn [messages]
+                                (mapv (fn [m]
+                                        (if (= (:message/id m) (:message/id assistant))
+                                          (assoc m :message/call-id call-id)
+                                          m))
+                                      messages)))
+                       (artifacts/flush! state)
+                       (artifacts/add-turn-id! state turn-id :turn/assistant-message-ids (:message/id assistant))
+                       (eval-assistant! state cfg ns-sym turn-id (assoc assistant :message/call-id call-id)))
                      (catch clojure.lang.ExceptionInfo e
                        (if (= :provider/failed (:error/type (ex-data e)))
                          {:status :provider-error :error (ex-data e)}
@@ -318,20 +350,44 @@
           (cond
             (= :provider-error (:status step))
             (let [err (:error step)]
-              (artifacts/mark-error! state err)
+              (finish-turn-error! state turn-id err)
               {:status :error
                :error err
                :dir (:dir @state)
-               :session-id (:session/id (:session @state))})
+               :session-id (:session/id (:session @state))
+               :turn-id turn-id})
 
             (= :final (:status step))
-            {:status :final
-             :final-value (:value step)
-             :dir (:dir @state)
-             :session-id (:session/id (:session @state))}
+            (let [usage (artifacts/derive-usage (:dir @state) (:calls @state))
+                  final-ref (or (:final-ref step)
+                                (artifacts/value-ref! (:dir @state) (:value step)))]
+              (artifacts/update-turn! state turn-id assoc
+                                      :turn/status :final
+                                      :turn/ended-at (time/now-str)
+                                      :turn/final-ref final-ref
+                                      :turn/final-preview (artifacts/project-value (:value step))
+                                      :turn/usage usage)
+              (artifacts/add-event! state {:event/type :turn-final :turn/id turn-id})
+              (artifacts/flush! state)
+              {:status :final
+               :final-value (:value step)
+               :dir (:dir @state)
+               :session-id (:session/id (:session @state))
+               :turn-id turn-id})
 
             :else
-            (recur (inc turn))))))))
+            (recur (inc step-n))))))))
+
+(defn prepare-turn! [state user-message]
+  (let [turn (artifacts/add-turn! state {})
+        message (artifacts/add-message! state :user user-message (:turn/id turn))]
+    (artifacts/update-turn! state (:turn/id turn) assoc
+                            :turn/user-message-id (:message/id message))
+    (:turn/id turn)))
+
+(defn run-turn-on-state! [state cfg ns-sym user-message]
+  (let [turn-id (prepare-turn! state user-message)]
+    (run-loop! state cfg ns-sym turn-id)))
 
 (defn child-root-config [cfg kind]
   (if (= :child kind)
@@ -353,11 +409,18 @@
         ops (make-ops state effective-cfg ns-sym)]
     (runtime/ensure-ns! ns-sym ops)
     (when-not resume-state
-      (artifacts/add-message! state :system (if (= :child kind) prompt/child-prompt prompt/system-prompt))
-      (artifacts/add-message! state :user task))
+      (artifacts/add-message! state :system (if (= :child kind) prompt/child-prompt prompt/system-prompt)))
     (doseq [m messages]
-      (artifacts/add-message! state (:role m) (:content m)))
-    (run-loop! state effective-cfg ns-sym)))
+      (artifacts/add-message! state (:role m) (:content m) (:turn-id m)))
+    (let [result (if task
+                   (run-turn-on-state! state effective-cfg ns-sym task)
+                   (throw (ex-info "run-process! requires :task for one-turn execution"
+                                   {:error/type :fractal/missing-task})))]
+      (when (= :child kind)
+        (artifacts/update-status! state (if (= :error (:status result)) :error :stopped))
+        (artifacts/add-event! state {:event/type :session-stopped
+                                     :session/id (:session/id (:session @state))}))
+      result)))
 
 (defn run-task!
   ([task] (run-task! (config) task))

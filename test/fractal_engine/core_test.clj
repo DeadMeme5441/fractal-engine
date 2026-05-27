@@ -6,7 +6,8 @@
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.runtime :as runtime]
-            [fractal-engine.resume :as resume]))
+            [fractal-engine.resume :as resume]
+            [fractal-engine.session :as session]))
 
 (defn tmp-dir [name]
   (let [dir (java.nio.file.Files/createTempDirectory
@@ -31,11 +32,11 @@
   (is (clojure.string/includes? prompt/system-prompt "Bind large values with def"))
   (doseq [example ["- lm:" "- map-lm:" "- rlm:" "- map-rlm:"]]
     (is (clojure.string/includes? prompt/system-prompt example)))
-  (is (clojure.string/includes? prompt/child-prompt "Child process boundary"))
+  (is (clojure.string/includes? prompt/child-prompt "Child session boundary"))
   (is (clojure.string/includes? prompt/child-prompt "Do not solve the parent task globally"))
   (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
   (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
-  (is (= 2 (:prompt/version prompt/prompt-metadata))))
+  (is (= 3 (:prompt/version prompt/prompt-metadata))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -56,7 +57,7 @@
                                 :eval/code "42"
                                 :eval/status :ok
                                 :eval/value 42})
-    (doseq [file ["session.edn" "messages.edn" "evals.edn" "calls.edn"
+    (doseq [file ["session.edn" "messages.edn" "turns.edn" "evals.edn" "calls.edn"
                   "events.edn" "snapshots.edn" "usage.edn" "tree.edn"]]
       (is (some? (artifacts/read-edn-file (artifacts/path dir file) nil)) file))
     (let [session-text (slurp (str (artifacts/path dir "session.edn")))]
@@ -71,8 +72,52 @@
                 {:dir dir :id "root" :kind :root :task "define x then final"})]
     (is (= :final (:status result)))
     (is (= {:answer 42} (:final-value result)))
+    (is (= 1 (count (artifacts/read-edn-file (artifacts/path dir "turns.edn") []))))
+    (is (= :running (:session/status (artifacts/read-edn-file (artifacts/path dir "session.edn") {}))))
     (is (= 2 (count (artifacts/read-edn-file (artifacts/path dir "evals.edn") []))))
-    (is (= :final (:final/status (artifacts/read-edn-file (artifacts/path dir "final.edn") {}))))))
+    (is (= :running (:final/status (artifacts/read-edn-file (artifacts/path dir "final.edn") {}))))))
+
+(deftest session-turn-chat-semantics
+  (let [dir (tmp-dir "session")
+        requests (atom [])
+        root-count (atom 0)
+        cfg (process/config
+             {:scripted/response-fn
+              (fn [request]
+                (swap! requests conj request)
+                (case (swap! root-count inc)
+                  1 "```clojure\n(def x 42)\n(FINAL {:saved x})\n```"
+                  2 "```clojure\n(FINAL {:restored x})\n```"))})
+        s (session/start-session! cfg {:dir dir :id "root"})
+        turn1 (session/run-turn! s "save x")
+        turn2 (session/run-turn! s "use x")
+        state @(:state s)
+        messages (artifacts/read-edn-file (artifacts/path dir "messages.edn") [])
+        turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])
+        evals (artifacts/read-edn-file (artifacts/path dir "evals.edn") [])
+        calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+        final (artifacts/read-edn-file (artifacts/path dir "final.edn") {})
+        usage (artifacts/read-edn-file (artifacts/path dir "usage.edn") {})]
+    (is (= {:saved 42} (:final-value turn1)))
+    (is (= {:restored 42} (:final-value turn2)))
+    (is (= :running (get-in state [:session :session/status])))
+    (is (= 1 (count (filter #(= :system (:message/role %)) messages))))
+    (is (= 2 (count turns)))
+    (is (= [:final :final] (mapv :turn/status turns)))
+    (is (= [nil 1 1 1 2 2 2] (mapv :message/turn-id messages)))
+    (is (every? :eval/turn-id evals))
+    (is (every? :call/turn-id calls))
+    (is (= :running (:final/status final)))
+    (is (= 2 (:final/latest-turn-id final)))
+    (is (= {:restored 42} (:final/latest-value-preview final)))
+    (is (= usage (:final/usage final)))
+    (is (= #{"fractal:root:agent"} (set (map :call/cache-scope calls))))
+    (is (= [1 2 3 4 5] (:call/request-message-ids (second calls))))
+    (is (= 2 (count @requests)))
+    (is (= (:request/messages (first @requests))
+           (take 2 (:request/messages (second @requests)))))
+    (session/stop-session! s)
+    (is (= :stopped (:session/status (artifacts/read-edn-file (artifacts/path dir "session.edn") {}))))))
 
 (deftest no-fence-repair-and-eval-error-recovery
   (let [dir (tmp-dir "repair")
@@ -156,8 +201,11 @@
                 {:dir dir :id "root" :kind :root :task "children"})]
     (is (= {:one {:child 1} :many [:a :b]} (:final-value result)))
     (is (.exists (java.io.File. dir "children/child-0001/session.edn")))
+    (is (.exists (java.io.File. dir "children/child-0001/turns.edn")))
     (is (.exists (java.io.File. dir "children/child-0002/session.edn")))
+    (is (.exists (java.io.File. dir "children/child-0002/turns.edn")))
     (is (.exists (java.io.File. dir "children/child-0003/session.edn")))
+    (is (.exists (java.io.File. dir "children/child-0003/turns.edn")))
     (let [calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])]
       (is (= 1 (count (filter #(= :child (:call/type %)) calls))))
       (is (= 2 (count (filter #(= :child-batch-item (:call/type %)) calls)))))))
@@ -224,12 +272,15 @@
                                                            (throw (ex-info "boom" {:why :test})))})
                   {:dir dir :id "root" :kind :root :task "fail"})
           calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+          turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])
           events (artifacts/read-edn-file (artifacts/path dir "events.edn") [])
           final (artifacts/read-edn-file (artifacts/path dir "final.edn") {})]
       (is (= :error (:status result)))
       (is (= :provider/failed (get-in result [:error :error/type])))
       (is (= :error (:final/status final)))
       (is (= :provider/failed (get-in final [:final/error :error/type])))
+      (is (= :error (:turn/status (first turns))))
+      (is (= :provider/failed (get-in (first turns) [:turn/error :error/type])))
       (is (= :error (:call/status (first calls))))
       (is (some #(= :provider-failed (:event/type %)) events))))
   (testing "leaf provider failure can be caught by model code"
@@ -326,6 +377,53 @@
                 "use saved")]
     (is (= :final (:status result)))
     (is (= {:restored 99} (:final-value result)))))
+
+(deftest run-chat-resume-and-fork-use-session-turns
+  (testing "run is a stopped one-turn session wrapper"
+    (let [out (with-out-str
+                (cli/run-command {:fake-script "simple" :question "define x"}))
+          dir (second (re-find #"Session: (.+)" out))
+          session-row (artifacts/read-edn-file (artifacts/path dir "session.edn") {})
+          turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])]
+      (is (= :stopped (:session/status session-row)))
+      (is (= 1 (count turns)))))
+  (testing "chat processes two stdin lines in one session"
+    (let [out (with-in-str "first\nsecond\n"
+                (with-out-str
+                  (cli/chat-command {:fake-script "multi-turn-chat"})))
+          dir (second (re-find #"Session: (.+)" out))
+          session-row (artifacts/read-edn-file (artifacts/path dir "session.edn") {})
+          messages (artifacts/read-edn-file (artifacts/path dir "messages.edn") [])
+          turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])
+          calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])]
+      (is (= :stopped (:session/status session-row)))
+      (is (= 2 (count turns)))
+      (is (= 1 (count (filter #(= :system (:message/role %)) messages))))
+      (is (= #{"fractal:"} (set (map #(subs (:call/cache-scope %) 0 8) calls))))))
+  (testing "resume adds another turn to existing history"
+    (let [dir (tmp-dir "resume-command")
+          s (session/start-session! (scripted-cfg ["```clojure\n(def saved 99)\n(FINAL {:saved saved})\n```"])
+                                    {:dir dir :id "root"})
+          _ (session/run-turn! s "save")
+          _ (session/stop-session! s)
+          result (resume/resume! (scripted-cfg ["```clojure\n(FINAL {:restored saved})\n```"])
+                                 dir
+                                 "restore")
+          turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])]
+      (is (= {:restored 99} (:final-value result)))
+      (is (= 2 (count turns)))))
+  (testing "fork creates an independent live session with restored vars"
+    (let [dir (tmp-dir "fork-source")
+          fork-dir (tmp-dir "fork-target")
+          s (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\n(FINAL {:saved x})\n```"])
+                                    {:dir dir :id "root"})
+          _ (session/run-turn! s "save")
+          forked (session/fork-session! (scripted-cfg ["```clojure\n(FINAL {:forked x})\n```"])
+                                        dir
+                                        fork-dir)
+          result (session/run-turn! forked "use forked")]
+      (is (= {:forked 42} (:final-value result)))
+      (is (not= (str (:dir s)) (str (:dir forked)))))))
 
 (deftest map-lm-partial-failure-keeps-successes
   (let [dir (tmp-dir "leaf-failure")

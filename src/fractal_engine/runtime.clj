@@ -7,6 +7,7 @@
 
 (def special-symbols '#{FINAL lm map-lm rlm map-rlm})
 (def ^:dynamic *current-eval-id* nil)
+(def ^:dynamic *current-turn-id* nil)
 
 (defn session-ns-symbol [session-id]
   (symbol (str "fractal.session." (str/replace session-id #"[^A-Za-z0-9_]" "_"))))
@@ -125,6 +126,7 @@
                  {:vars {} :unresumable {}}
                  vars)]
     {:snapshot/status :complete
+     :snapshot/after-turn-id *current-turn-id*
      :snapshot/after-message-id (apply max 0 (map :message/id (:messages @state)))
      :snapshot/after-eval-id (apply max 0 (map :eval/id (:evals @state)))
      :snapshot/ns ns-sym
@@ -147,4 +149,3 @@
      :resume/skipped-vars @skipped
      :resume/messages (count (:messages @state))
      :resume/snapshot-id (:snapshot/id snapshot)}))
-

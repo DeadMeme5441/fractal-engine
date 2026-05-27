@@ -301,15 +301,22 @@
         vec)})
 
 (defn rebuild-derived! [state]
-  (let [{:keys [dir session messages evals calls final-value error]} @state
-        final-ref (when (contains? @state :final-value)
-                    (value-ref! dir final-value))
+  (let [{:keys [dir session messages turns evals calls final-value error]} @state
+        latest-turn (last turns)
+        latest-final-ref (:turn/final-ref latest-turn)
+        latest-final-preview (:turn/final-preview latest-turn)
+        final-ref (or latest-final-ref
+                      (when (contains? @state :final-value)
+                        (value-ref! dir final-value)))
         tree (derive-tree dir session calls)
         usage (derive-usage dir calls)]
     (atomic-spit! (path dir "final.edn")
                   (cond-> {:final/session-id (:session/id session)
                            :final/status (:session/status session)
-                           :final/turn-count (count (filter #(= :assistant (:message/role %)) messages))
+                           :final/turn-count (count turns)
+                           :final/latest-turn-id (:turn/id latest-turn)
+                           :final/latest-turn-ref (when latest-turn
+                                                    {:turn/id (:turn/id latest-turn)})
                            :final/eval-count (count evals)
                            :final/call-count (count calls)
                            :final/child-count (count (filter #(#{:child :child-batch-item} (:call/type %)) calls))
@@ -317,16 +324,21 @@
                            :final/tree-ref "tree.edn"}
                     error (assoc :final/error error)
                     final-ref (assoc :final/value-ref final-ref
-                                     :final/value-preview (project-value final-value))))
+                                     :final/latest-value-preview (or latest-final-preview
+                                                                     (project-value final-value))
+                                     ;; Kept for older inspectors/tests that read this key.
+                                     :final/value-preview (or latest-final-preview
+                                                              (project-value final-value)))))
     (atomic-spit! (path dir "usage.edn") usage)
     (atomic-spit! (path dir "tree.edn") tree)))
 
 (defn flush! [state]
-  (let [{:keys [dir session messages evals calls events snapshots]} @state]
+  (let [{:keys [dir session messages turns evals calls events snapshots]} @state]
     (doseq [sub ["blobs" "children"]]
       (ensure-dir! (path dir sub)))
     (atomic-spit! (path dir "session.edn") session)
     (atomic-spit! (path dir "messages.edn") messages)
+    (atomic-spit! (path dir "turns.edn") turns)
     (atomic-spit! (path dir "evals.edn") evals)
     (atomic-spit! (path dir "calls.edn") calls)
     (atomic-spit! (path dir "events.edn") events)
@@ -344,12 +356,57 @@
     (flush! state)
     id))
 
-(defn add-message! [state role content]
-  (let [id (next-counter! state :message)
-        msg {:message/id id :message/role role :message/content content}]
-    (swap! state update :messages conj msg)
-    (add-event! state {:event/type :message-added :message/id id})
-    msg))
+(defn add-message!
+  ([state role content] (add-message! state role content nil))
+  ([state role content turn-id]
+   (let [id (next-counter! state :message)
+         msg (cond-> {:message/id id :message/role role :message/content content}
+               turn-id (assoc :message/turn-id turn-id))]
+     (swap! state update :messages conj msg)
+     (add-event! state (cond-> {:event/type :message-added :message/id id}
+                         turn-id (assoc :turn/id turn-id)))
+     msg)))
+
+(defn add-turn! [state turn]
+  (let [id (next-counter! state :turn)
+        row (merge {:turn/id id
+                    :turn/status :running
+                    :turn/assistant-message-ids []
+                    :turn/observation-message-ids []
+                    :turn/eval-ids []
+                    :turn/call-ids []
+                    :turn/started-at (time/now-str)
+                    :turn/ended-at nil
+                    :turn/error nil
+                    :turn/usage nil}
+                   turn)]
+    (swap! state update :turns conj row)
+    (swap! state update :session assoc
+           :session/turn-count (count (:turns @state))
+           :session/latest-turn-id id)
+    (add-event! state {:event/type :turn-started :turn/id id})
+    row))
+
+(defn update-turn! [state turn-id f & args]
+  (swap! state update :turns
+         (fn [turns]
+           (mapv (fn [t] (if (= turn-id (:turn/id t))
+                           (apply f t args)
+                           t))
+                 turns)))
+  (flush! state)
+  (first (filter #(= turn-id (:turn/id %)) (:turns @state))))
+
+(defn current-turn [state turn-id]
+  (first (filter #(= turn-id (:turn/id %)) (:turns @state))))
+
+(defn add-turn-id! [state turn-id k value]
+  (when turn-id
+    (update-turn! state turn-id update k (fnil conj []) value)))
+
+(defn add-turn-ids! [state turn-id k values]
+  (when turn-id
+    (update-turn! state turn-id update k #(vec (concat (or % []) values)))))
 
 (defn add-call! [state call]
   (let [id (next-counter! state :call)
@@ -358,6 +415,7 @@
                       :call/started-at (time/now-str)}
                      call)]
     (swap! state update :calls conj call')
+    (add-turn-id! state (:call/turn-id call') :turn/call-ids id)
     (add-event! state {:event/type :call-started :call/id id})
     call'))
 
@@ -376,7 +434,9 @@
   (let [id (next-counter! state :eval)
         row (assoc eval-row :eval/id id)]
     (swap! state update :evals conj row)
-    (add-event! state {:event/type :eval-ended :eval/id id :eval/status (:eval/status row)})
+    (add-turn-id! state (:eval/turn-id row) :turn/eval-ids id)
+    (add-event! state (cond-> {:event/type :eval-ended :eval/id id :eval/status (:eval/status row)}
+                        (:eval/turn-id row) (assoc :turn/id (:eval/turn-id row))))
     row))
 
 (defn add-snapshot! [state snapshot]
@@ -394,13 +454,12 @@
 
 (defn mark-final! [state value]
   (swap! state assoc :final-value value)
-  (update-status! state :final)
-  (add-event! state {:event/type :process-final}))
+  (flush! state))
 
 (defn mark-error! [state error]
   (swap! state assoc :error error)
   (update-status! state :error)
-  (add-event! state {:event/type :process-error :error error}))
+  (add-event! state {:event/type :session-error :error error}))
 
 (defn new-state!
   [{:keys [dir id kind provider parent resumed-from forked-from]}]
@@ -423,21 +482,25 @@
                                :session/prompt prompt-metadata
                                :session/provider provider
                                :session/cache (cache/session-cache sid)
+                               :session/turn-count 0
+                               :session/latest-turn-id nil
                                :session/parent parent
                                :session/resumed-from resumed-from
                                :session/forked-from forked-from}
                      :messages []
+                     :turns []
                      :evals []
                      :calls []
                      :events []
                      :snapshots []
-                     :counters {:message 0 :eval 0 :call 0 :event 0 :snapshot 0 :child 0}})]
+                     :counters {:message 0 :turn 0 :eval 0 :call 0 :event 0 :snapshot 0 :child 0}})]
     (flush! state)
     (add-event! state {:event/type :session-started :session/id (:session/id (:session @state))})
     state))
 
 (defn load-state! [dir]
   (let [messages (read-edn-file (path dir "messages.edn") [])
+        turns (read-edn-file (path dir "turns.edn") [])
         evals (read-edn-file (path dir "evals.edn") [])
         calls (read-edn-file (path dir "calls.edn") [])
         events (read-edn-file (path dir "events.edn") [])
@@ -446,11 +509,13 @@
     (atom {:dir (path dir)
            :session (assoc session :session/status :running :session/ended-at nil)
            :messages messages
+           :turns turns
            :evals evals
            :calls calls
            :events events
            :snapshots snapshots
            :counters {:message (apply max 0 (map :message/id messages))
+                      :turn (apply max 0 (map :turn/id turns))
                       :eval (apply max 0 (map :eval/id evals))
                       :call (apply max 0 (map :call/id calls))
                       :event (apply max 0 (map :event/id events))

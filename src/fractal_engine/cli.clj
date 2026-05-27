@@ -2,7 +2,8 @@
   (:require [clojure.string :as str]
             [fractal-engine.inspect :as inspect]
             [fractal-engine.process :as process]
-            [fractal-engine.resume :as resume]))
+            [fractal-engine.resume :as resume]
+            [fractal-engine.session :as session]))
 
 (defn arg-map [args]
   (loop [xs args m {}]
@@ -29,6 +30,8 @@
                "```clojure\n(FINAL 2)\n```"]
     "resume-setup" ["```clojure\n(def saved 99)\n(FINAL {:saved saved})\n```"]
     "resume-use" ["```clojure\n(FINAL {:restored saved})\n```"]
+    "multi-turn-chat" ["```clojure\n(def x 42)\n(FINAL {:saved x})\n```"
+                       "```clojure\n(FINAL {:restored x})\n```"]
     ["```clojure\n(FINAL :ok)\n```"]))
 
 (defn response-fn-for [name]
@@ -73,15 +76,45 @@
 
 (defn print-result [result]
   (println "Session:" (str (:dir result)))
+  (when (:turn-id result)
+    (println "Turn:" (:turn-id result)))
   (println "Status:" (:status result))
   (when (contains? result :final-value)
     (println "Final:" (pr-str (:final-value result)))))
 
 (defn run-command [opts]
-  (print-result (process/run-task! (cfg-from-opts opts) (or (:question opts) "Return a compact final value."))))
+  (let [s (session/start-session! (cfg-from-opts opts))
+        result (session/run-turn! s (or (:question opts) "Return a compact final value."))]
+    (session/stop-session! s)
+    (print-result result)))
+
+(defn chat-session [opts]
+  (if-let [dir (:dir opts)]
+    (session/resume-session! (cfg-from-opts opts) dir)
+    (session/start-session! (cfg-from-opts opts))))
+
+(defn chat-command [opts]
+  (let [s (chat-session opts)]
+    (println "Session:" (str (:dir s)))
+    (loop []
+      (if-let [line (read-line)]
+        (if (#{".quit" ":quit" "/quit" "/exit"} (str/trim line))
+          (session/stop-session! s)
+          (do
+            (let [trimmed (str/trim line)]
+              (when-not (empty? trimmed)
+                (let [result (session/run-turn! s trimmed)]
+                  (println "Turn:" (:turn-id result))
+                  (if (= :error (:status result))
+                    (println "Error:" (pr-str (:error result)))
+                    (println "Final:" (pr-str (:final-value result)))))))
+            (recur)))
+        (session/stop-session! s)))))
 
 (defn resume-command [opts]
-  (print-result (resume/resume! (cfg-from-opts opts) (:dir opts) (or (:question opts) "Continue and call FINAL."))))
+  (if (:chat opts)
+    (chat-command opts)
+    (print-result (resume/resume! (cfg-from-opts opts) (:dir opts) (or (:question opts) "Continue and call FINAL.")))))
 
 (defn inspect-command [opts]
   (print (inspect/summary-string (:dir opts))))
@@ -89,7 +122,7 @@
 (defn usage []
   (println "fractal-engine commands:")
   (println "  run --question TEXT [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
-  (println "  chat --question TEXT")
+  (println "  chat [--dir runs/session-id] [--fake-script multi-turn-chat]")
   (println "  inspect --dir runs/session-id")
   (println "  resume --dir runs/session-id --question TEXT [--fake-script resume-use]")
   (println "  fork --dir runs/session-id --new-dir runs/session-fork --question TEXT")
@@ -101,7 +134,7 @@
         opts (arg-map rest)]
     (case cmd
       "run" (run-command opts)
-      "chat" (run-command opts)
+      "chat" (chat-command opts)
       "inspect" (inspect-command opts)
       "resume" (resume-command opts)
       "fork" (print-result (resume/fork! (cfg-from-opts opts) (:dir opts) (:new-dir opts) (or (:question opts) "Continue.")))
