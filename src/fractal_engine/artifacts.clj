@@ -3,6 +3,8 @@
             [clojure.java.io :as io]
             [clojure.pprint :as pp]
             [clojure.string :as str]
+            [fractal-engine.cache :as cache]
+            [fractal-engine.prompt :as prompt]
             [fractal-engine.time :as time])
   (:import [java.io PushbackReader]
            [java.nio.charset StandardCharsets]
@@ -138,18 +140,133 @@
       {:value/kind :inline :value value}
       (write-blob! dir value))))
 
-(defn empty-usage []
-  {:usage/own-root {:usage/status :unknown}
-   :usage/own-leaf {:usage/status :unknown}
-   :usage/children {:usage/status :unknown}
-   :usage/total-tree {:usage/status :unknown}})
+(def root-call-types #{:root})
+(def leaf-call-types #{:leaf :leaf-batch-item})
+(def child-call-types #{:child :child-batch-item})
+(def provider-call-types (into root-call-types leaf-call-types))
+
+(defn- first-number [m ks]
+  (some (fn [k]
+          (let [v (get m k)]
+            (when (number? v) v)))
+        ks))
+
+(defn- numeric-rollup [calls field-fn]
+  (let [values (map field-fn calls)
+        known (filter number? values)
+        known-count (count known)
+        unknown-count (- (count calls) known-count)]
+    (cond
+      (zero? (count calls)) {:status :unknown :call/count 0}
+      (zero? known-count) {:status :unknown :call/count (count calls)}
+      (zero? unknown-count) {:status :known :known (reduce + known) :call/count (count calls)}
+      :else {:status :partial
+             :known (reduce + known)
+             :unknown-calls unknown-count
+             :call/count (count calls)})))
+
+(defn- aggregate-status [& statuses]
+  (let [statuses (set (remove nil? statuses))]
+    (cond
+      (empty? statuses) :unknown
+      (= statuses #{:known}) :known
+      (= statuses #{:unknown}) :unknown
+      :else :partial)))
+
+(defn- usage-rollup [calls]
+  (let [summary {:call/count (count calls)
+                 :tokens/input (numeric-rollup calls #(first-number (:call/usage %) [:usage/input-tokens :usage/prompt-tokens :input-tokens :prompt-tokens]))
+                 :tokens/output (numeric-rollup calls #(first-number (:call/usage %) [:usage/output-tokens :usage/completion-tokens :output-tokens :completion-tokens]))
+                 :tokens/total (numeric-rollup calls #(first-number (:call/usage %) [:usage/total-tokens :total-tokens]))
+                 :tokens/cached (numeric-rollup calls #(first-number (:call/usage %) [:usage/cached-tokens :usage/cached-input-tokens :cached-tokens :cached-input-tokens]))}]
+    (assoc summary :usage/status (aggregate-status (get-in summary [:tokens/input :status])
+                                                   (get-in summary [:tokens/output :status])
+                                                   (get-in summary [:tokens/total :status])))))
+
+(defn- cost-rollup [calls]
+  (let [summary {:call/count (count calls)
+                 :cost/usd (numeric-rollup calls #(first-number (:call/cost %) [:cost/usd :usd]))}]
+    (assoc summary :cost/status (get-in summary [:cost/usd :status]))))
+
+(defn- cache-rollup [calls]
+  (let [cacheable (filterv #(or (contains? % :call/cache-request)
+                                (contains? % :call/cache))
+                           calls)
+        statuses (map #(get-in % [:call/cache :cache/status] :unknown) cacheable)
+        status-counts (frequencies statuses)
+        cached-tokens (numeric-rollup cacheable #(or (first-number (:call/cache %) [:cache/cached-tokens :cache/cached-input-tokens :cached-tokens :cached-input-tokens])
+                                                     (first-number (:call/usage %) [:usage/cached-tokens :usage/cached-input-tokens :cached-tokens :cached-input-tokens])))]
+    {:call/count (count cacheable)
+     :cache/status (cond
+                     (zero? (count cacheable)) :unknown
+                     (and (seq statuses) (every? #(not= :unknown %) statuses)) :known
+                     (some #(not= :unknown %) statuses) :partial
+                     :else :unknown)
+     :cache/hit-count (get status-counts :hit 0)
+     :cache/miss-count (get status-counts :miss 0)
+     :cache/unknown-count (+ (get status-counts :unknown 0)
+                             (get status-counts nil 0))
+     :tokens/cached cached-tokens}))
+
+(defn- call-group [calls pred]
+  (filterv pred calls))
+
+(defn- child-call? [call]
+  (contains? child-call-types (:call/type call)))
+
+(defn- read-child-calls [dir call]
+  (let [rel (:child/dir call)]
+    (when rel
+      (let [child-dir (path dir rel)
+            child-calls (read-edn-file (path child-dir "calls.edn") [])]
+        (mapcat (fn [c]
+                  (cons c (read-child-calls child-dir c)))
+                child-calls)))))
+
+(defn- tree-calls [dir calls]
+  (vec (concat calls (mapcat #(read-child-calls dir %) calls))))
+
+(defn derive-usage [dir calls]
+  (let [root-calls (call-group calls #(contains? root-call-types (:call/type %)))
+        leaf-calls (call-group calls #(contains? leaf-call-types (:call/type %)))
+        child-calls (call-group calls child-call?)
+        all-tree-calls (tree-calls dir calls)
+        provider-tree-calls (call-group all-tree-calls #(contains? provider-call-types (:call/type %)))
+        child-summaries (mapv (fn [call]
+                                (let [child-dir (path dir (:child/dir call))
+                                      child-usage (read-edn-file (path child-dir "usage.edn") {:usage/status :unknown})]
+                                  {:call/id (:call/id call)
+                                   :child/session-id (:child/session-id call)
+                                   :child/dir (:child/dir call)
+                                   :child/status (:call/status call)
+                                   :child/usage child-usage}))
+                              child-calls)]
+    {:usage/status (aggregate-status (:usage/status (usage-rollup provider-tree-calls)))
+     :usage/root (usage-rollup root-calls)
+     :usage/leaf (usage-rollup leaf-calls)
+     :usage/child-calls {:call/count (count child-calls)}
+     :usage/children {:child/count (count child-summaries)
+                      :children child-summaries}
+     :usage/total-tree (assoc (usage-rollup provider-tree-calls)
+                              :call/total-tree-count (count all-tree-calls))
+     :cost/root (cost-rollup root-calls)
+     :cost/leaf (cost-rollup leaf-calls)
+     :cost/total-tree (cost-rollup provider-tree-calls)
+     :cache/root (cache-rollup root-calls)
+     :cache/leaf (cache-rollup leaf-calls)
+     :cache/total-tree (cache-rollup provider-tree-calls)}))
 
 (defn- child-tree [child-dir]
   (let [session (read-edn-file (path child-dir "session.edn") {})
         calls (read-edn-file (path child-dir "calls.edn") [])
+        evals (read-edn-file (path child-dir "evals.edn") [])
+        usage (read-edn-file (path child-dir "usage.edn") nil)
         final (read-edn-file (path child-dir "final.edn") nil)]
     {:tree/session-id (:session/id session)
      :tree/status (:session/status session)
+     :call/count (count calls)
+     :eval/count (count evals)
+     :tree/usage usage
      :tree/final-preview (:final/value-preview final)
      :tree/children
      (->> calls
@@ -168,6 +285,7 @@
 (defn derive-tree [dir session calls]
   {:tree/session-id (:session/id session)
    :tree/status (:session/status session)
+   :call/count (count calls)
    :tree/children
    (->> calls
         (keep (fn [call]
@@ -183,11 +301,11 @@
         vec)})
 
 (defn rebuild-derived! [state]
-  (let [{:keys [dir session messages evals calls final-value]} @state
+  (let [{:keys [dir session messages evals calls final-value error]} @state
         final-ref (when (contains? @state :final-value)
                     (value-ref! dir final-value))
         tree (derive-tree dir session calls)
-        usage (empty-usage)]
+        usage (derive-usage dir calls)]
     (atomic-spit! (path dir "final.edn")
                   (cond-> {:final/session-id (:session/id session)
                            :final/status (:session/status session)
@@ -197,6 +315,7 @@
                            :final/child-count (count (filter #(#{:child :child-batch-item} (:call/type %)) calls))
                            :final/usage usage
                            :final/tree-ref "tree.edn"}
+                    error (assoc :final/error error)
                     final-ref (assoc :final/value-ref final-ref
                                      :final/value-preview (project-value final-value))))
     (atomic-spit! (path dir "usage.edn") usage)
@@ -289,18 +408,21 @@
   (ensure-dir! (path dir "blobs"))
   (ensure-dir! (path dir "children"))
   (let [created (time/now-str)
+        sid (or id (session-id))
+        kind' (or kind :root)
+        prompt-metadata (if (= :child kind') prompt/child-prompt-metadata prompt/prompt-metadata)
         state (atom {:dir (path dir)
-                     :session {:session/id (or id (session-id))
-                               :session/kind (or kind :root)
+                     :session {:session/id sid
+                               :session/kind kind'
                                :session/status :running
                                :session/created-at created
                                :session/ended-at nil
                                :session/artifact-version artifact-version
                                :session/surface-version surface-version
                                :session/surface surface
+                               :session/prompt prompt-metadata
                                :session/provider provider
-                               :session/cache {:enabled? true
-                                               :scope-id (or id "pending")}
+                               :session/cache (cache/session-cache sid)
                                :session/parent parent
                                :session/resumed-from resumed-from
                                :session/forked-from forked-from}
@@ -310,7 +432,6 @@
                      :events []
                      :snapshots []
                      :counters {:message 0 :eval 0 :call 0 :event 0 :snapshot 0 :child 0}})]
-    (swap! state assoc-in [:session :session/cache :scope-id] (:session/id (:session @state)))
     (flush! state)
     (add-event! state {:event/type :session-started :session/id (:session/id (:session @state))})
     state))

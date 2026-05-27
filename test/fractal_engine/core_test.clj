@@ -1,6 +1,8 @@
 (ns fractal-engine.core-test
   (:require [clojure.test :refer [deftest is testing]]
             [fractal-engine.artifacts :as artifacts]
+            [fractal-engine.cache :as cache]
+            [fractal-engine.cli :as cli]
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.runtime :as runtime]
@@ -19,7 +21,21 @@
   (doseq [sym ["FINAL" "lm" "map-lm" "rlm" "map-rlm"]]
     (is (clojure.string/includes? prompt/system-prompt sym)))
   (is (not (clojure.string/includes? prompt/system-prompt "context")))
-  (is (clojure.string/includes? prompt/system-prompt "bounded")))
+  (doseq [forbidden ["product" "storage" "workflow"]]
+    (is (not (clojure.string/includes? (clojure.string/lower-case prompt/system-prompt) forbidden))))
+  (is (clojure.string/includes? prompt/system-prompt "observations"))
+  (is (clojure.string/includes? prompt/system-prompt "Call FINAL only after enough observations have been inspected"))
+  (is (clojure.string/includes? prompt/system-prompt "Use map-lm when the same semantic operation applies independently"))
+  (is (clojure.string/includes? prompt/system-prompt "Use map-rlm when several independent lanes can run in parallel"))
+  (is (clojure.string/includes? prompt/system-prompt "Children should use lm and map-lm aggressively"))
+  (is (clojure.string/includes? prompt/system-prompt "Bind large values with def"))
+  (doseq [example ["- lm:" "- map-lm:" "- rlm:" "- map-rlm:"]]
+    (is (clojure.string/includes? prompt/system-prompt example)))
+  (is (clojure.string/includes? prompt/child-prompt "Child process boundary"))
+  (is (clojure.string/includes? prompt/child-prompt "Do not solve the parent task globally"))
+  (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
+  (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
+  (is (= 2 (:prompt/version prompt/prompt-metadata))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -94,6 +110,32 @@
       (is (= 1 (count (filter #(= :leaf (:call/type %)) calls))))
       (is (= 2 (count (filter #(= :leaf-batch-item (:call/type %)) calls)))))))
 
+(deftest prompt-cache-and-request-artifacts
+  (let [dir (tmp-dir "cache")
+        result (process/run-process!
+                (scripted-cfg ["```clojure\n(def x 1)\nx\n```"
+                               "```clojure\n(def y (lm {:x x} \"return label\"))\n(FINAL y)\n```"
+                               "label"])
+                {:dir dir :id "root" :kind :root :task "cache"})
+        session (artifacts/read-edn-file (artifacts/path dir "session.edn") {})
+        calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+        root-calls (filter #(= :root (:call/type %)) calls)
+        leaf-calls (filter #(= :leaf (:call/type %)) calls)
+        first-root (first root-calls)]
+    (is (= :final (:status result)))
+    (is (= prompt/prompt-metadata (:session/prompt session)))
+    (is (= "fractal:root:agent" (get-in session [:session/cache :agent-scope])))
+    (is (= "fractal:root:leaf" (get-in session [:session/cache :leaf-scope])))
+    (is (= #{"fractal:root:agent"} (set (map :call/cache-scope root-calls))))
+    (is (= #{"fractal:root:leaf"} (set (map :call/cache-scope leaf-calls))))
+    (is (= {:enabled? true :scope-id "fractal:root:agent"} (:call/cache-request first-root)))
+    (is (= [1 2 3 4] (:call/request-message-ids (second root-calls))))
+    (is (= 4 (:call/request-message-count (second root-calls))))
+    (is (= (:prompt/hash (:session/prompt session)) (:call/request-system-hash first-root)))
+    (is (= (:request (first root-calls))
+           (artifacts/read-ref dir (:call/request-ref (first root-calls)))))
+    (is (= :scripted (:response/provider (artifacts/read-ref dir (:call/response-ref first-root)))))))
+
 (deftest child-and-map-child
   (let [dir (tmp-dir "child")
         response-fn (fn [request]
@@ -119,6 +161,158 @@
     (let [calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])]
       (is (= 1 (count (filter #(= :child (:call/type %)) calls))))
       (is (= 2 (count (filter #(= :child-batch-item (:call/type %)) calls)))))))
+
+(deftest usage-rollup-known-unknown-partial-and-children
+  (let [dir (tmp-dir "usage")
+        child-dir (str (artifacts/path dir "children" "child-0001"))
+        child-state (artifacts/new-state! {:dir child-dir
+                                           :id "child-0001"
+                                           :kind :child
+                                           :provider {}})
+        parent-state (artifacts/new-state! {:dir dir
+                                            :id "root"
+                                            :kind :root
+                                            :provider {}})]
+    (artifacts/add-call! child-state {:call/type :root
+                                      :call/status :ok
+                                      :call/usage {:usage/input-tokens 7
+                                                   :usage/output-tokens 3
+                                                   :usage/total-tokens 10}
+                                      :call/cost {:cost/usd 0.02}
+                                      :call/cache {:cache/status :hit
+                                                   :cache/cached-tokens 5}})
+    (artifacts/add-call! parent-state {:call/type :root
+                                       :call/status :ok
+                                       :call/usage {:usage/input-tokens 10
+                                                    :usage/output-tokens 5
+                                                    :usage/total-tokens 15}
+                                       :call/cost {:cost/usd 0.03}
+                                       :call/cache {:cache/status :miss}})
+    (artifacts/add-call! parent-state {:call/type :leaf
+                                       :call/status :ok
+                                       :call/usage {:usage/input-tokens 4}
+                                       :call/cost {:cost/usd :unknown}
+                                       :call/cache {:cache/status :unknown}})
+    (artifacts/add-call! parent-state {:call/type :leaf-batch-item
+                                       :call/status :ok
+                                       :call/usage {:usage/status :unknown}
+                                       :call/cache {:cache/status :hit
+                                                    :cache/cached-tokens 2}})
+    (artifacts/add-call! parent-state {:call/type :child
+                                       :call/status :final
+                                       :child/session-id "child-0001"
+                                       :child/dir "children/child-0001"})
+    (let [usage (artifacts/read-edn-file (artifacts/path dir "usage.edn") {})
+          final (artifacts/read-edn-file (artifacts/path dir "final.edn") {})]
+      (is (= :known (get-in usage [:usage/root :usage/status])))
+      (is (= 15 (get-in usage [:usage/root :tokens/total :known])))
+      (is (= :partial (get-in usage [:usage/leaf :usage/status])))
+      (is (= 1 (get-in usage [:usage/leaf :tokens/input :unknown-calls])))
+      (is (= 4 (get-in usage [:usage/total-tree :call/count])))
+      (is (= 5 (get-in usage [:usage/total-tree :call/total-tree-count])))
+      (is (= 1 (get-in usage [:usage/children :child/count])))
+      (is (= 2 (get-in usage [:cache/total-tree :cache/hit-count])))
+      (is (= 1 (get-in usage [:cache/total-tree :cache/miss-count])))
+      (is (= 1 (get-in usage [:cache/total-tree :cache/unknown-count])))
+      (is (= usage (:final/usage final))))))
+
+(deftest provider-failure-finalizes-root-and-leaf-failures-remain-model-visible
+  (testing "root provider failure returns structured error artifacts"
+    (let [dir (tmp-dir "root-provider-failure")
+          result (process/run-process!
+                  (process/config {:scripted/response-fn (fn [_]
+                                                           (throw (ex-info "boom" {:why :test})))})
+                  {:dir dir :id "root" :kind :root :task "fail"})
+          calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+          events (artifacts/read-edn-file (artifacts/path dir "events.edn") [])
+          final (artifacts/read-edn-file (artifacts/path dir "final.edn") {})]
+      (is (= :error (:status result)))
+      (is (= :provider/failed (get-in result [:error :error/type])))
+      (is (= :error (:final/status final)))
+      (is (= :provider/failed (get-in final [:final/error :error/type])))
+      (is (= :error (:call/status (first calls))))
+      (is (some #(= :provider-failed (:event/type %)) events))))
+  (testing "leaf provider failure can be caught by model code"
+    (let [dir (tmp-dir "leaf-provider-caught")
+          response-fn (fn [request]
+                        (let [content (:message/content (last (:request/messages request)))]
+                          (cond
+                            (clojure.string/includes? content "catch leaf")
+                            "```clojure\n(FINAL (try (lm {:x 1} \"fail\") (catch Exception e (select-keys (ex-data e) [:error/type :error/provider :error/model]))))\n```"
+                            (clojure.string/includes? content "fail")
+                            (throw (ex-info "leaf boom" {:why :leaf})))))
+          result (process/run-process!
+                  (process/config {:scripted/response-fn response-fn})
+                  {:dir dir :id "root" :kind :root :task "catch leaf"})]
+      (is (= {:error/type :provider/failed
+              :error/provider :scripted
+              :error/model "scripted"}
+             (:final-value result)))))
+  (testing "uncaught leaf provider failure becomes eval error and allows repair"
+    (let [dir (tmp-dir "leaf-provider-uncaught")
+          root-count (atom 0)
+          response-fn (fn [request]
+                        (let [content (:message/content (last (:request/messages request)))
+                              scope (get-in request [:request/cache :scope-id])]
+                          (cond
+                            (clojure.string/ends-with? scope ":agent")
+                            (case (swap! root-count inc)
+                              1 "```clojure\n(lm {:x 1} \"fail\")\n```"
+                              "```clojure\n(FINAL :repaired)\n```")
+                            (and (clojure.string/ends-with? scope ":leaf")
+                                 (clojure.string/includes? content "fail"))
+                            (throw (ex-info "leaf boom" {:why :leaf}))
+                            :else
+                            "```clojure\n(FINAL :repaired)\n```")))
+          result (process/run-process!
+                  (process/config {:scripted/response-fn response-fn})
+                  {:dir dir :id "root" :kind :root :task "uncaught leaf"})
+          evals (artifacts/read-edn-file (artifacts/path dir "evals.edn") [])]
+      (is (= :repaired (:final-value result)))
+      (is (some #(= :error (:eval/status %)) evals)))))
+
+(deftest independent-role-model-config
+  (let [root-only (cli/cfg-from-opts {:provider "openai" :model "root-model"})
+        full (cli/cfg-from-opts {:provider "openai"
+                                 :model "root-model"
+                                 :leaf-provider "anthropic"
+                                 :leaf-model "leaf-model"
+                                 :child-provider "openrouter"
+                                 :child-model "child-model"})]
+    (is (= {:root {:provider :openai :model "root-model"}
+            :leaf {:provider :openai :model "root-model"}
+            :child {:provider :openai :model "root-model"}}
+           (select-keys (:models root-only) [:root :leaf :child])))
+    (is (= {:root {:provider :openai :model "root-model"}
+            :leaf {:provider :anthropic :model "leaf-model"}
+            :child {:provider :openrouter :model "child-model"}}
+           (select-keys (:models full) [:root :leaf :child]))))
+  (let [dir (tmp-dir "child-model")
+        result (process/run-process!
+                (process/config {:models {:root {:provider :scripted :model "root-model"}
+                                          :leaf {:provider :scripted :model "leaf-model"}
+                                          :child {:provider :scripted :model "child-model"}}
+                                 :scripted/response-fn
+                                 (fn [request]
+                                   (let [content (:message/content (last (:request/messages request)))]
+                                     (cond
+                                       (clojure.string/includes? content "spawn child")
+                                       "```clojure\n(def child (rlm \"child task\"))\n(FINAL child)\n```"
+                                       (clojure.string/includes? content "child task")
+                                       "```clojure\n(FINAL {:child true})\n```")))})
+                {:dir dir :id "root" :kind :root :task "spawn child"})
+        child-session (artifacts/read-edn-file (artifacts/path dir "children/child-0001/session.edn") {})
+        child-calls (artifacts/read-edn-file (artifacts/path dir "children/child-0001/calls.edn") [])]
+    (is (= {:child true} (:final-value result)))
+    (is (= "child-model" (get-in child-session [:session/provider :root :model])))
+    (is (= "child-model" (:call/model (first child-calls))))
+    (is (thrown? clojure.lang.ArityException
+                 ((:rlm (process/make-ops (atom {:dir (java.nio.file.Paths/get dir (into-array String []))
+                                                 :session {:session/id "root"}})
+                                          (process/config)
+                                          'fractal.test))
+                  "task"
+                  {:model "forbidden"})))))
 
 (deftest resume-restores-var
   (let [dir (tmp-dir "resume")

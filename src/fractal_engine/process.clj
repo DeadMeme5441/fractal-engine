@@ -3,6 +3,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
+            [fractal-engine.cache :as cache]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.provider :as provider]
             [fractal-engine.runtime :as runtime]
@@ -14,11 +15,13 @@
 (defn config
   ([] (config {}))
   ([m]
-   (merge {:runs-dir "runs"
-           :max-turns 25
-           :models provider/default-models
-           :retry nil}
-          m)))
+   (let [base {:runs-dir "runs"
+               :max-turns 25
+               :models provider/default-models
+               :retry nil}
+         models (merge-with merge provider/default-models (:models m))]
+     (assoc (merge (dissoc base :models) (dissoc m :models))
+            :models models))))
 
 (defn provider-shape [cfg]
   {:root (get-in cfg [:models :root])
@@ -32,39 +35,70 @@
                         (str "Observation:\n" (:message/content message))
                         (:message/content message))}))
 
-(defn provider-request [messages cache-scope]
+(defn provider-request [messages cache-request]
   {:request/messages (mapv wire-message messages)
-   :request/cache {:enabled? true :scope-id cache-scope}})
+   :request/cache cache-request})
 
-(defn leaf-request [input query cache-scope]
+(def leaf-system-prompt
+  "Return only the answer requested by the user. For EDN mode, return exactly one EDN value.")
+
+(defn leaf-request [input query cache-request]
   {:request/messages [{:message/role :system
-                       :message/content "Return only the answer requested by the user. For EDN mode, return exactly one EDN value."}
+                       :message/content leaf-system-prompt}
                       {:message/role :user
                        :message/content (str "Input EDN:\n" (pr-str input)
                                              "\n\nQuery:\n" query)}]
-   :request/cache {:enabled? true :scope-id cache-scope}})
+   :request/cache cache-request})
+
+(defn request-system-hash [request]
+  (when-let [content (some (fn [message]
+                             (when (= :system (:message/role message))
+                               (:message/content message)))
+                           (:request/messages request))]
+    (cache/sha256-string content)))
+
+(defn enrich-call [state cfg role call]
+  (let [request (:request call)
+        cache-request (:request/cache request)
+        model-cfg (get-in cfg [:models role])]
+    (cond-> (assoc call
+                   :call/provider (:provider model-cfg)
+                   :call/model (:model model-cfg)
+                   :call/request-ref (artifacts/value-ref! (:dir @state) request)
+                   :call/request-message-count (count (:request/messages request))
+                   :call/request-system-hash (request-system-hash request)
+                   :call/cache-scope (:scope-id cache-request)
+                   :call/cache-request cache-request)
+      (:call/message-ids call) (assoc :call/request-message-ids (:call/message-ids call)))))
 
 (defn call-provider! [state cfg role call]
-  (let [call-row (artifacts/add-call! state call)
+  (let [call-row (artifacts/add-call! state (enrich-call state cfg role call))
         call-id (:call/id call-row)
         request (:request call)
         response (try
                    (provider/complete cfg role request)
                    (catch Throwable t
-                     (let [err {:error/type :provider/failed
+                     (let [model-cfg (get-in cfg [:models role])
+                           err {:error/type :provider/failed
                                 :error/message (.getMessage t)
                                 :error/data (ex-data t)
+                                :error/provider (:provider model-cfg)
+                                :error/model (:model model-cfg)
+                                :error/role role
                                 :error/retryable? false}]
                        (artifacts/update-call! state call-id assoc
                                                :call/status :error
                                                :call/error err
+                                               :call/usage {:usage/status :unknown}
+                                               :call/cost {:cost/status :unknown}
+                                               :call/cache {:cache/status :unknown}
                                                :call/ended-at (time/now-str))
+                       (artifacts/add-event! state {:event/type :provider-failed
+                                                    :call/id call-id
+                                                    :error err})
                        (throw (ex-info "Provider call failed" err t)))))]
     (artifacts/update-call! state call-id assoc
                             :call/status :ok
-                            :call/provider (get-in cfg [:models role :provider])
-                            :call/model (get-in cfg [:models role :model])
-                            :call/request-ref (artifacts/value-ref! (:dir @state) request)
                             :call/response-ref (artifacts/value-ref! (:dir @state) response)
                             :call/usage (:response/usage response {:usage/status :unknown})
                             :call/cost (:response/cost response {:cost/usd :unknown})
@@ -108,7 +142,8 @@
                                :call/input-ref (artifacts/value-ref! (:dir @state) input)
                                :call/query query
                                :call/mode mode
-                               :request (leaf-request input query (str (:session/id (:session @state)) ":leaf"))}
+                               :request (leaf-request input query
+                                                      (cache/request-cache (:session/id (:session @state)) :leaf))}
                               extra)
                   {:keys [call-id response]} (call-provider! state cfg :leaf call)
                   text (provider/response-text response)
@@ -168,8 +203,17 @@
                   (artifacts/update-call! state (:call/id call-row) assoc
                                           :call/status (:status result)
                                           :call/final-ref (artifacts/value-ref! (:dir @state) value)
+                                          :call/error (:error result)
                                           :call/ended-at (time/now-str))
-                  value)
+                  (if (= :error (:status result))
+                    (throw (ex-info "Child process failed"
+                                    {:error/type :fractal/child-failed
+                                     :error/message "Child process returned error"
+                                     :error/data (:error result)
+                                     :child/session-id cid
+                                     :child/dir child-rel
+                                     :error/retryable? false}))
+                    value))
                 (catch Throwable t
                   (let [err {:error/type :fractal/child-failed
                              :error/message (.getMessage t)
@@ -255,42 +299,65 @@
       (let [err {:error/type :fractal/max-turns :max-turns (:max-turns cfg)}]
         (artifacts/mark-error! state err)
         {:status :error :error err :dir (:dir @state)})
-      (let [request (provider-request (:messages @state) (str (:session/id (:session @state)) ":agent"))
-            {:keys [call-id response]} (call-provider!
-                                        state cfg :root
-                                        {:call/type :root
-                                         :call/message-ids (mapv :message/id (:messages @state))
-                                         :request request})
-            content (provider/response-text response)
-            assistant (assoc (artifacts/add-message! state :assistant content)
-                             :message/call-id call-id)
-            result (eval-assistant! state cfg ns-sym assistant)]
-        (if (= :final (:status result))
-          {:status :final
-           :final-value (:value result)
-           :dir (:dir @state)
-           :session-id (:session/id (:session @state))}
-          (recur (inc turn)))))))
+      (let [request (provider-request (:messages @state)
+                                      (cache/request-cache (:session/id (:session @state)) :agent))]
+        (let [step (try
+                     (let [{:keys [call-id response]} (call-provider!
+                                                       state cfg :root
+                                                       {:call/type :root
+                                                        :call/message-ids (mapv :message/id (:messages @state))
+                                                        :request request})
+                           content (provider/response-text response)
+                           assistant (assoc (artifacts/add-message! state :assistant content)
+                                            :message/call-id call-id)]
+                       (eval-assistant! state cfg ns-sym assistant))
+                     (catch clojure.lang.ExceptionInfo e
+                       (if (= :provider/failed (:error/type (ex-data e)))
+                         {:status :provider-error :error (ex-data e)}
+                         (throw e))))]
+          (cond
+            (= :provider-error (:status step))
+            (let [err (:error step)]
+              (artifacts/mark-error! state err)
+              {:status :error
+               :error err
+               :dir (:dir @state)
+               :session-id (:session/id (:session @state))})
+
+            (= :final (:status step))
+            {:status :final
+             :final-value (:value step)
+             :dir (:dir @state)
+             :session-id (:session/id (:session @state))}
+
+            :else
+            (recur (inc turn))))))))
+
+(defn child-root-config [cfg kind]
+  (if (= :child kind)
+    (assoc-in cfg [:models :root] (get-in cfg [:models :child]))
+    cfg))
 
 (defn run-process!
   [cfg {:keys [dir id kind parent task messages resume-state ns-sym] :as opts}]
   (let [cfg (config cfg)
+        effective-cfg (child-root-config cfg kind)
         state (or resume-state
                   (artifacts/new-state! {:dir dir
                                          :id id
                                          :kind (or kind :root)
-                                         :provider (provider-shape cfg)
+                                         :provider (provider-shape effective-cfg)
                                          :parent parent}))
         session-id (:session/id (:session @state))
         ns-sym (or ns-sym (runtime/session-ns-symbol session-id))
-        ops (make-ops state cfg ns-sym)]
+        ops (make-ops state effective-cfg ns-sym)]
     (runtime/ensure-ns! ns-sym ops)
     (when-not resume-state
       (artifacts/add-message! state :system (if (= :child kind) prompt/child-prompt prompt/system-prompt))
       (artifacts/add-message! state :user task))
     (doseq [m messages]
       (artifacts/add-message! state (:role m) (:content m)))
-    (run-loop! state cfg ns-sym)))
+    (run-loop! state effective-cfg ns-sym)))
 
 (defn run-task!
   ([task] (run-task! (config) task))

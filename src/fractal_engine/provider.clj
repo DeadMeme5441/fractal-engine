@@ -40,25 +40,27 @@
 (defn scripted-response [config request]
   (let [response-fn (:scripted/response-fn config)
         script (:scripted/responses config)
-        text (cond
-               response-fn (response-fn request)
-               (instance? clojure.lang.Atom script) (let [xs @script]
-                                                      (when (empty? xs)
-                                                        (throw (ex-info "Scripted provider exhausted"
-                                                                        {:error/type :scripted/exhausted})))
-                                                      (let [x (first xs)]
-                                                        (swap! script subvec 1)
-                                                        x))
-               (sequential? script) (first script)
-               :else "```clojure\n(FINAL :ok)\n```")]
-    {:response/provider :scripted
-     :response/model (:request/model request "scripted")
-     :response/parts [{:part/type :text :text text}]
-     :response/finish-reason :stop
-     :response/usage {:usage/status :unknown}
-     :response/cost {:cost/usd :unknown}
-     :response/cache {:cache/status :unknown}
-     :response/raw {:scripted? true}}))
+        value (cond
+                response-fn (response-fn request)
+                (instance? clojure.lang.Atom script) (let [xs @script]
+                                                       (when (empty? xs)
+                                                         (throw (ex-info "Scripted provider exhausted"
+                                                                         {:error/type :scripted/exhausted})))
+                                                       (let [x (first xs)]
+                                                         (swap! script subvec 1)
+                                                         x))
+                (sequential? script) (first script)
+                :else "```clojure\n(FINAL :ok)\n```")
+        base {:response/provider :scripted
+              :response/model (:request/model request "scripted")
+              :response/finish-reason :stop
+              :response/usage {:usage/status :unknown}
+              :response/cost {:cost/usd :unknown}
+              :response/cache {:cache/status :unknown}
+              :response/raw {:scripted? true}}]
+    (if (map? value)
+      (merge base value)
+      (assoc base :response/parts [{:part/type :text :text value}]))))
 
 (defn complete
   [config role request]

@@ -56,14 +56,18 @@
 (defn cfg-from-opts [opts]
   (let [provider (keyword (or (:provider opts) "scripted"))
         model (or (:model opts) "scripted")
+        leaf-provider (keyword (or (:leaf-provider opts) (name provider)))
+        leaf-model (or (:leaf-model opts) model)
+        child-provider (keyword (or (:child-provider opts) (name provider)))
+        child-model (or (:child-model opts) model)
         script-name (:fake-script opts)
         response-fn (response-fn-for script-name)
         script (when (and script-name (nil? response-fn))
                  (atom (vec (script-for script-name))))]
     (process/config
      (cond-> {:models {:root {:provider provider :model model}
-                       :leaf {:provider provider :model model}
-                       :child {:provider provider :model model}}}
+                       :leaf {:provider leaf-provider :model leaf-model}
+                       :child {:provider child-provider :model child-model}}}
        response-fn (assoc :scripted/response-fn response-fn)
        script (assoc :scripted/responses script)))))
 
@@ -84,7 +88,7 @@
 
 (defn usage []
   (println "fractal-engine commands:")
-  (println "  run --question TEXT [--provider openai --model MODEL] [--fake-script simple]")
+  (println "  run --question TEXT [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
   (println "  chat --question TEXT")
   (println "  inspect --dir runs/session-id")
   (println "  resume --dir runs/session-id --question TEXT [--fake-script resume-use]")
