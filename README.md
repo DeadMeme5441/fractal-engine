@@ -1,0 +1,141 @@
+# fractal-engine
+
+`fractal-engine` is a small recursive compute kernel for running an agent through
+a persistent Clojure REPL.
+
+The loop is intentionally simple:
+
+1. messages are the model context
+2. the model emits fenced Clojure
+3. the host evaluates that Clojure in a persistent namespace
+4. the host appends projected observations as messages
+5. the loop repeats until `(FINAL value)`
+
+The only model-facing host functions are:
+
+```clojure
+FINAL
+lm
+map-lm
+rlm
+map-rlm
+```
+
+There is no magic context var, tool registry, workflow layer, storage handle
+surface, or repository-specific helper API in the compute kernel.
+
+## Status
+
+This is an early implementation. It is suitable for fake-provider development,
+artifact inspection, and live-provider smoke tests through
+[`clojure-llm-sdk`](https://github.com/DeadMeme5441/clojure-llm-sdk).
+
+The runtime executes trusted local Clojure. It is not sandboxed.
+
+## Quickstart
+
+Run the offline scripted provider:
+
+```bash
+clojure -M -m fractal-engine run --fake-script simple --question "Define x and return it."
+```
+
+Inspect the generated run:
+
+```bash
+clojure -M -m fractal-engine inspect --dir runs/<session-id>
+```
+
+Run tests:
+
+```bash
+clojure -M:test
+```
+
+## Live Providers
+
+Provider calls go through `llm.sdk/complete` from `clojure-llm-sdk`. The CLI
+accepts a provider and model:
+
+```bash
+clojure -M -m fractal-engine run \
+  --provider openai \
+  --model gpt-4o-mini \
+  --question "Use Clojure to compute (+ 20 22), then FINAL the answer."
+```
+
+Credentials are read from environment variables. For local development, an
+ignored `.env` file can also be used by this CLI. Do not commit secrets.
+
+## Artifacts
+
+Each process writes a session directory:
+
+```text
+runs/<session-id>/
+  session.edn
+  messages.edn
+  evals.edn
+  calls.edn
+  events.edn
+  snapshots.edn
+  final.edn
+  usage.edn
+  tree.edn
+  blobs/
+  children/
+```
+
+Canonical files are `session.edn`, `messages.edn`, `evals.edn`, `calls.edn`,
+`events.edn`, `snapshots.edn`, `blobs/`, and `children/`.
+
+`final.edn`, `usage.edn`, and `tree.edn` are derived views.
+
+Child RLM processes use the same shape under `children/child-0001/`,
+`children/child-0002/`, and so on.
+
+## Resume
+
+Snapshots are written at graceful boundaries. Resume restores message history
+and EDN-safe vars into a fresh namespace, reinstalls the five runtime functions,
+and appends a new user turn.
+
+```bash
+clojure -M -m fractal-engine resume \
+  --dir runs/<session-id> \
+  --fake-script resume-use \
+  --question "Use the restored var and FINAL the result."
+```
+
+Non-EDN values are recorded as unresumable rather than silently dropped.
+
+## CLI
+
+The CLI is a thin shell over the compute engine:
+
+```text
+run
+chat
+inspect
+resume
+fork
+```
+
+It does not define workflows or product-specific behavior.
+
+## Anti-Goals
+
+The core runtime does not include:
+
+- persistent memory databases
+- vector search
+- workflow templates
+- task schemas
+- repository analyzers
+- MCP server concepts
+- web UI
+- deterministic planner layers
+- hidden convenience functions
+
+Those belong in layers around the kernel, not in the kernel.
+

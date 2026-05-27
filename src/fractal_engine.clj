@@ -1,6 +1,7 @@
 (ns fractal-engine
-  (:gen-class))
+  (:gen-class)
+  (:require [fractal-engine.cli :as cli]))
 
 (defn -main
-  [& _args]
-  (println "fractal-engine"))
+  [& args]
+  (apply cli/-main args))

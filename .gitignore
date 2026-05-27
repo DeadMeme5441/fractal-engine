@@ -1,8 +1,12 @@
 .DS_Store
 .cpcache/
+.clj-kondo/.cache/
+.lsp/
 .nrepl-port
 target/
 build_spec/
+runs/
+.env
 
 # Beads / Dolt files (added by bd init)
 .dolt/

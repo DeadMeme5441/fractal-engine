@@ -1,5 +1,8 @@
 {:paths ["src"]
- :deps {org.clojure/clojure {:mvn/version "1.12.4"}}
+ :deps {org.clojure/clojure {:mvn/version "1.12.4"}
+        com.deadmeme5441/clojure-llm-sdk
+        {:git/url "https://github.com/DeadMeme5441/clojure-llm-sdk"
+         :git/sha "996545c4a20af2026bd80f04d6a00b55649ffc74"}}
  :aliases
  {:test
   {:extra-paths ["test"]
