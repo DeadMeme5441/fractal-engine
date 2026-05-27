@@ -8,6 +8,7 @@
 (def special-symbols '#{FINAL lm map-lm rlm map-rlm})
 (def ^:dynamic *current-eval-id* nil)
 (def ^:dynamic *current-turn-id* nil)
+(def observation-string-limit 4000)
 
 (defn session-ns-symbol [session-id]
   (symbol (str "fractal.session." (str/replace session-id #"[^A-Za-z0-9_]" "_"))))
@@ -22,11 +23,19 @@
 (defn read-forms [code]
   (let [eof (Object.)]
     (with-open [r (PushbackReader. (StringReader. code))]
-      (loop [forms []]
-        (let [form (read {:eof eof} r)]
-          (if (identical? eof form)
-            forms
-            (recur (conj forms form))))))))
+      (binding [*read-eval* false]
+        (loop [forms []]
+          (let [form (read {:eof eof} r)]
+            (if (identical? eof form)
+              forms
+              (recur (conj forms form)))))))))
+
+(defn project-output-string [s]
+  (let [s (str s)]
+    (if (> (count s) observation-string-limit)
+      (str (subs s 0 observation-string-limit)
+           "\n... [truncated " (- (count s) observation-string-limit) " chars]")
+      s)))
 
 (defn final! [value]
   (throw (ex-info "FINAL" {:fractal/final value})))
@@ -52,21 +61,25 @@
   (let [out (StringWriter.)
         err (StringWriter.)
         started (time/now-str)
-        started-ns (System/nanoTime)]
+        started-ns (System/nanoTime)
+        forms-count (volatile! nil)]
     (binding [*ns* (the-ns ns-sym)
               *out* out
               *err* err]
       (try
-        (let [result (loop [forms (read-forms code)
+        (let [forms (read-forms code)
+              _ (vreset! forms-count (count forms))
+              result (loop [forms forms
                             last-value nil]
                        (if-let [form (first forms)]
                          (recur (rest forms) (eval form))
                          last-value))]
           {:eval/status :ok
+           :eval/forms-count @forms-count
            :eval/value (artifacts/project-value result)
            :eval/raw-value result
-           :eval/stdout (str out)
-           :eval/stderr (str err)
+           :eval/stdout (project-output-string out)
+           :eval/stderr (project-output-string err)
            :eval/started-at started
            :eval/ended-at (time/now-str)
            :eval/elapsed-ms (quot (- (System/nanoTime) started-ns) 1000000)})
@@ -74,37 +87,67 @@
           (if (contains? (ex-data e) :fractal/final)
             (let [v (:fractal/final (ex-data e))]
               {:eval/status :final
+               :eval/forms-count @forms-count
                :eval/final-value (artifacts/project-value v)
                :eval/raw-final-value v
-               :eval/stdout (str out)
-               :eval/stderr (str err)
+               :eval/stdout (project-output-string out)
+               :eval/stderr (project-output-string err)
                :eval/started-at started
                :eval/ended-at (time/now-str)
                :eval/elapsed-ms (quot (- (System/nanoTime) started-ns) 1000000)})
             {:eval/status :error
+             :eval/forms-count @forms-count
              :eval/error (throwable-data e)
-             :eval/stdout (str out)
-             :eval/stderr (str err)
+             :eval/stdout (project-output-string out)
+             :eval/stderr (project-output-string err)
              :eval/started-at started
              :eval/ended-at (time/now-str)
              :eval/elapsed-ms (quot (- (System/nanoTime) started-ns) 1000000)}))
         (catch Throwable t
           {:eval/status :error
+           :eval/forms-count @forms-count
            :eval/error (throwable-data t)
-           :eval/stdout (str out)
-           :eval/stderr (str err)
+           :eval/stdout (project-output-string out)
+           :eval/stderr (project-output-string err)
            :eval/started-at started
            :eval/ended-at (time/now-str)
            :eval/elapsed-ms (quot (- (System/nanoTime) started-ns) 1000000)})))))
 
+(defn- pretty-value [value]
+  (binding [*print-length* 80
+            *print-level* 8
+            *print-namespace-maps* false]
+    (pr-str value)))
+
+(defn- observation-header [idx row]
+  (str "(eval " (inc idx)
+       " id=" (:eval/id row)
+       " elapsed=" (or (:eval/elapsed-ms row) 0) "ms"
+       (when-let [n (:eval/forms-count row)]
+         (str " forms=" n))
+       " status=" (name (:eval/status row))
+       ")"))
+
+(defn- observation-row-text [idx row]
+  (let [stdout (str (:eval/stdout row))
+        stderr (str (:eval/stderr row))
+        lines (cond-> [(observation-header idx row)]
+                (seq stdout) (conj (str "stdout:\n" (str/trimr stdout)))
+                (seq stderr) (conj (str "stderr:\n" (str/trimr stderr))))]
+    (str/join
+     "\n"
+     (case (:eval/status row)
+       :ok (conj lines (str "=> " (pretty-value (:eval/value row))))
+       :final (conj lines (str "FINAL=> " (pretty-value (:eval/final-value row))))
+       :error (conj lines (str "error=> " (pretty-value (:eval/error row))))
+       (conj lines (str "=> " (pretty-value (select-keys row [:eval/status :eval/error]))))))))
+
 (defn observation [rows]
-  (binding [*print-length* 80 *print-level* 8]
-    (str "Evaluation observation:\n"
-         (pr-str
-          (mapv (fn [row]
-                  (select-keys row [:eval/id :eval/status :eval/value :eval/final-value
-                                    :eval/error :eval/stdout :eval/stderr]))
-                rows)))))
+  (str "Evaluation observation. Values shown here are compact projections; full live values remain in REPL vars you defined.\n\n"
+       (str/join "\n\n" (map-indexed observation-row-text rows))
+       (when (and (seq rows)
+                  (not-any? #(= :final (:eval/status %)) rows))
+         "\n\nNo FINAL was called in this batch; the current turn is still open.")))
 
 (defn edn-safe? [value]
   (try

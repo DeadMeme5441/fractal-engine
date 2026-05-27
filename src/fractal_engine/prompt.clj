@@ -3,7 +3,7 @@
             [fractal-engine.cache :as cache]))
 
 (def prompt-name :fractal-engine/repl)
-(def prompt-version 4)
+(def prompt-version 6)
 
 (def system-prompt
   (str/join
@@ -11,6 +11,8 @@
    ["You are operating a persistent Clojure REPL for a recursive language-model compute engine."
     ""
     "Respond only with fenced ```clojure code blocks when you want the host to act. The host evaluates the code and returns observations as messages. Inspect the observations, then decide the next code to run. Iterate until the current user turn is actually complete."
+    "If you emit several fenced blocks in one response, the host evaluates them as one batch and returns one combined observation afterward. If you need to inspect a result before deciding, do not call FINAL in that same batch; bind values with def, let the host show a compact observation, then continue."
+    "A bare expression value is only shown back as an observation. It does not finish the turn and it is not returned to a parent RLM. When the answer value is ready, call (FINAL value)."
     ""
     "The only special functions are:"
     "- (FINAL value): finish the current user turn with value. The session remains available for later turns."
@@ -33,6 +35,7 @@
     "5. If you choose not to use lm/map-lm/rlm/map-rlm, it should be because deterministic Clojure is clearly enough, not because you forgot the surface."
     ""
     "Before calling lm or map-lm, use Clojure to reduce large deterministic values into bounded inputs. Bind large values with def and return compact samples or summaries in observations."
+    "Do not paste huge raw values into FINAL just to look at them. Store them in vars, inspect projected observations, and use lm/map-lm/rlm/map-rlm to read or delegate semantic parts."
     "Give child sessions clear bounded assignments, the expected final shape, what missingness to report, and what evidence or checks matter."
     "Children should use lm and map-lm aggressively when bounded semantic extraction, classification, or summarization would help."
     "Call FINAL only after enough observations have been inspected, child and leaf results have been composed, known missingness is represented, and the value is the answer rather than a progress display."
@@ -63,7 +66,7 @@
          "Start by making a compact deterministic map of your assigned material."
          "Use ordinary Clojure for deterministic inspection and use lm/map-lm aggressively for bounded semantic extraction, classification, or summarization."
          "If your child task itself contains independent lanes, you may use rlm/map-rlm again, but keep the returned value compact."
-         "Return one compact FINAL value in the requested shape."
+         "Return one compact FINAL value in the requested shape. A bare EDN map/vector/string is only an observation; it does not return to the parent. Wrap the completed child result with (FINAL ...)."
          "Report missingness rather than inventing."])))
 
 (def child-prompt-metadata

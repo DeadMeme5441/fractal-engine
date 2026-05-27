@@ -32,13 +32,17 @@
   (is (clojure.string/includes? prompt/system-prompt "do not inspect them one by one in the root loop"))
   (is (clojure.string/includes? prompt/system-prompt "Children should use lm and map-lm aggressively"))
   (is (clojure.string/includes? prompt/system-prompt "Bind large values with def"))
+  (is (clojure.string/includes? prompt/system-prompt "combined observation"))
+  (is (clojure.string/includes? prompt/system-prompt "Store them in vars"))
+  (is (clojure.string/includes? prompt/system-prompt "A bare expression value is only shown back as an observation"))
   (doseq [example ["- lm:" "- map-lm:" "- rlm:" "- map-rlm:"]]
     (is (clojure.string/includes? prompt/system-prompt example)))
   (is (clojure.string/includes? prompt/child-prompt "Child session boundary"))
   (is (clojure.string/includes? prompt/child-prompt "Do not solve the parent task globally"))
+  (is (clojure.string/includes? prompt/child-prompt "A bare EDN map/vector/string is only an observation"))
   (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
   (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
-  (is (= 4 (:prompt/version prompt/prompt-metadata))))
+  (is (= 6 (:prompt/version prompt/prompt-metadata))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -46,6 +50,44 @@
   (is (= ["(def x 1)\n" "x\n"]
          (runtime/extract-clojure-blocks "```clj\n(def x 1)\n```\n```clojure\nx\n```")))
   (is (empty? (runtime/extract-clojure-blocks "```python\n1\n```"))))
+
+(deftest eval-observations-are-compact-control-surface
+  (let [ns-sym (symbol (str "fractal.test.obs." (java.util.UUID/randomUUID)))
+        ops {:lm (fn [& _] nil)
+             :map-lm (fn [& _] nil)
+             :rlm (fn [& _] nil)
+             :map-rlm (fn [& _] nil)}
+        _ (runtime/ensure-ns! ns-sym ops)
+        ok-row (assoc (runtime/eval-code ns-sym "(def data (vec (range 100)))\n(take 3 data)")
+                      :eval/id 1)
+        final-row (assoc (runtime/eval-code ns-sym "(FINAL {:count (count data)})")
+                         :eval/id 2)
+        obs (runtime/observation [ok-row final-row])]
+    (is (= :ok (:eval/status ok-row)))
+    (is (= 2 (:eval/forms-count ok-row)))
+    (is (= :final (:eval/status final-row)))
+    (is (= 1 (:eval/forms-count final-row)))
+    (is (clojure.string/includes? obs "compact projections"))
+    (is (clojure.string/includes? obs "(eval 1 id=1"))
+    (is (clojure.string/includes? obs "forms=2 status=ok"))
+    (is (clojure.string/includes? obs "=>"))
+    (is (clojure.string/includes? (runtime/observation [ok-row]) "No FINAL was called"))
+    (is (clojure.string/includes? obs "FINAL=> {:count 100}"))))
+
+(deftest eval-output-is-bounded-and-read-eval-disabled
+  (let [ns-sym (symbol (str "fractal.test.safe." (java.util.UUID/randomUUID)))
+        ops {:lm (fn [& _] nil)
+             :map-lm (fn [& _] nil)
+             :rlm (fn [& _] nil)
+             :map-rlm (fn [& _] nil)}
+        _ (runtime/ensure-ns! ns-sym ops)
+        noisy (runtime/eval-code ns-sym "(print (apply str (repeat 4100 \"x\")))\n:done")
+        unsafe (runtime/eval-code ns-sym "#=(+ 1 2)")]
+    (is (= :ok (:eval/status noisy)))
+    (is (<= (count (:eval/stdout noisy))
+            (+ runtime/observation-string-limit 64)))
+    (is (clojure.string/includes? (:eval/stdout noisy) "truncated"))
+    (is (= :error (:eval/status unsafe)))))
 
 (deftest artifact-skeleton-round-trips
   (let [dir (tmp-dir "artifacts")
@@ -125,7 +167,8 @@
     (is (= 2 (:final/latest-turn-id final)))
     (is (= {:restored 42} (:final/latest-value-preview final)))
     (is (= usage (:final/usage final)))
-    (is (= #{"fractal:root:agent"} (set (map :call/cache-scope calls))))
+    (is (every? #(<= (count %) 64) (map :call/cache-scope calls)))
+    (is (= #{"fractal:root:agent"} (set (map :call/cache-label calls))))
     (is (= [1 2 3 4 5] (:call/request-message-ids (second calls))))
     (is (= 2 (count @requests)))
     (is (= (:request/messages (first @requests))
@@ -189,9 +232,18 @@
     (is (= prompt/prompt-metadata (:session/prompt session)))
     (is (= "fractal:root:agent" (get-in session [:session/cache :agent-scope])))
     (is (= "fractal:root:leaf" (get-in session [:session/cache :leaf-scope])))
-    (is (= #{"fractal:root:agent"} (set (map :call/cache-scope root-calls))))
-    (is (= #{"fractal:root:leaf"} (set (map :call/cache-scope leaf-calls))))
-    (is (= {:enabled? true :scope-id "fractal:root:agent"} (:call/cache-request first-root)))
+    (is (= (cache/provider-scope "root" :agent)
+           (get-in session [:session/cache :agent-provider-scope])))
+    (is (= (cache/provider-scope "root" :leaf)
+           (get-in session [:session/cache :leaf-provider-scope])))
+    (is (= #{(cache/provider-scope "root" :agent)} (set (map :call/cache-scope root-calls))))
+    (is (= #{(cache/provider-scope "root" :leaf)} (set (map :call/cache-scope leaf-calls))))
+    (is (= #{"fractal:root:agent"} (set (map :call/cache-label root-calls))))
+    (is (= #{"fractal:root:leaf"} (set (map :call/cache-label leaf-calls))))
+    (is (= {:enabled? true
+            :scope-id (cache/provider-scope "root" :agent)}
+           (:call/cache-request first-root)))
+    (is (<= (count (get-in first-root [:call/cache-request :scope-id])) 64))
     (is (= [1 2 3 4] (:call/request-message-ids (second root-calls))))
     (is (= 4 (:call/request-message-count (second root-calls))))
     (is (= (:prompt/hash (:session/prompt session)) (:call/request-system-hash first-root)))
@@ -208,9 +260,9 @@
                           "```clojure\n(def one (rlm \"child one\"))\n(def many (map-rlm [\"a\" \"b\"]))\n(FINAL {:one one :many many})\n```"
                           (clojure.string/includes? content "child one")
                           "```clojure\n(FINAL {:child 1})\n```"
-                          (= "a" content)
+                          (clojure.string/includes? content "Assigned child task:\na")
                           "```clojure\n(FINAL :a)\n```"
-                          (= "b" content)
+                          (clojure.string/includes? content "Assigned child task:\nb")
                           "```clojure\n(FINAL :b)\n```"
                           :else
                           "```clojure\n(FINAL :unknown)\n```")))
@@ -227,6 +279,7 @@
     (let [calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
           child-calls (filter #(#{:child :child-batch-item} (:call/type %)) calls)
           child-session (artifacts/read-edn-file (artifacts/path dir "children/child-0001/session.edn") {})
+          child-messages (artifacts/read-edn-file (artifacts/path dir "children/child-0001/messages.edn") [])
           child-root-calls (artifacts/read-edn-file (artifacts/path dir "children/child-0001/calls.edn") [])]
       (is (= 1 (count (filter #(= :child (:call/type %)) calls))))
       (is (= 2 (count (filter #(= :child-batch-item (:call/type %)) calls))))
@@ -238,10 +291,18 @@
              (set (map :child/cache-id child-calls))))
       (is (= "child-0001" (:session/id child-session)))
       (is (= "root/children/child-0001" (:session/cache-id child-session)))
+      (is (clojure.string/includes? (:message/content (second child-messages))
+                                     "Child RLM protocol"))
+      (is (clojure.string/includes? (:message/content (second child-messages))
+                                     "MUST call (FINAL value)"))
       (is (= "fractal:root/children/child-0001:agent"
              (get-in child-session [:session/cache :agent-scope])))
+      (is (= #{(cache/provider-scope "root/children/child-0001" :agent)}
+             (set (map :call/cache-scope child-root-calls))))
       (is (= #{"fractal:root/children/child-0001:agent"}
-             (set (map :call/cache-scope child-root-calls)))))))
+             (set (map :call/cache-label child-root-calls))))
+      (is (every? #(<= (count %) 64)
+                  (map :call/cache-scope child-root-calls))))))
 
 (deftest child-cache-scopes-do-not-collide-across-parent-sessions
   (let [response-fn (fn [request]
@@ -371,11 +432,11 @@
                         (let [content (:message/content (last (:request/messages request)))
                               scope (get-in request [:request/cache :scope-id])]
                           (cond
-                            (clojure.string/ends-with? scope ":agent")
+                            (= scope (cache/provider-scope "root" :agent))
                             (case (swap! root-count inc)
                               1 "```clojure\n(lm {:x 1} \"fail\")\n```"
                               "```clojure\n(FINAL :repaired)\n```")
-                            (and (clojure.string/ends-with? scope ":leaf")
+                            (and (= scope (cache/provider-scope "root" :leaf))
                                  (clojure.string/includes? content "fail"))
                             (throw (ex-info "leaf boom" {:why :leaf}))
                             :else
@@ -464,7 +525,8 @@
       (is (= :stopped (:session/status session-row)))
       (is (= 2 (count turns)))
       (is (= 1 (count (filter #(= :system (:message/role %)) messages))))
-      (is (= #{"fractal:"} (set (map #(subs (:call/cache-scope %) 0 8) calls))))))
+      (is (every? #(<= (count %) 64) (map :call/cache-scope calls)))
+      (is (= #{"fractal:"} (set (map #(subs (:call/cache-label %) 0 8) calls))))))
   (testing "resume adds another turn to existing history"
     (let [dir (tmp-dir "resume-command")
           s (session/start-session! (scripted-cfg ["```clojure\n(def saved 99)\n(FINAL {:saved saved})\n```"])

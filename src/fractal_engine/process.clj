@@ -60,7 +60,10 @@
 (defn enrich-call [state cfg role call]
   (let [request (:request call)
         cache-request (:request/cache request)
-        model-cfg (get-in cfg [:models role])]
+        model-cfg (get-in cfg [:models role])
+        cache-id (or (get-in @state [:session :session/cache-id])
+                     (get-in @state [:session :session/id]))
+        cache-purpose (if (= role :leaf) :leaf :agent)]
     (cond-> (assoc call
                    :call/provider (:provider model-cfg)
                    :call/model (:model model-cfg)
@@ -69,6 +72,9 @@
                    :call/request-message-count (count (:request/messages request))
                    :call/request-system-hash (request-system-hash request)
                    :call/cache-scope (:scope-id cache-request)
+                   :call/cache-label (case cache-purpose
+                                       :leaf (cache/leaf-scope cache-id)
+                                       :agent (cache/agent-scope cache-id))
                    :call/cache-request cache-request)
       (:call/message-ids call) (assoc :call/request-message-ids (:call/message-ids call)))))
 
@@ -139,6 +145,16 @@
 (defn session-cache-id [state]
   (or (get-in @state [:session :session/cache-id])
       (get-in @state [:session :session/id])))
+
+(defn child-task-prompt [task]
+  (str "Child RLM protocol:\n"
+       "- Work only on the assigned child task below.\n"
+       "- Use ordinary Clojure for deterministic inspection.\n"
+       "- Use lm/map-lm for bounded semantic extraction when useful.\n"
+       "- When the child result is ready, you MUST call (FINAL value).\n"
+       "- A bare EDN map/vector/string is only an observation and is NOT returned to the parent.\n\n"
+       "Assigned child task:\n"
+       (if (string? task) task (pr-str task))))
 
 (defn make-ops [state cfg ns-sym]
   (letfn [(leaf-call [call-type input query mode extra]
@@ -211,7 +227,7 @@
                                                 :cache-id child-cache-id
                                                 :kind :child
                                                 :parent parent
-                                                :task task})
+                                                :task (child-task-prompt task)})
                       value (:final-value result)]
                   (artifacts/update-call! state (:call/id call-row) assoc
                                           :call/status (:status result)
