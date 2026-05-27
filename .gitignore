@@ -2,6 +2,7 @@
 .cpcache/
 .nrepl-port
 target/
+build_spec/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
