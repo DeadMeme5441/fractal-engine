@@ -122,13 +122,14 @@
            (.setDaemon true)))))))
 
 (defn parallel-map-indexed [prefix f xs]
-  (let [executor (daemon-executor prefix)]
+  (let [executor (daemon-executor prefix)
+        f' (bound-fn [idx x] (f idx x))]
     (try
       (let [tasks (mapv (fn [idx x]
                           (.submit executor
                                    ^Callable
                                    (reify Callable
-                                     (call [_] (f idx x)))))
+                                     (call [_] (f' idx x)))))
                         (range) xs)]
         (mapv #(.get %) tasks))
       (finally

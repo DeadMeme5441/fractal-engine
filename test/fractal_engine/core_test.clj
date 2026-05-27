@@ -153,7 +153,11 @@
     (is (= {:a "label" :b [{:x 1} {:x 2}]} (:final-value result)))
     (let [calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])]
       (is (= 1 (count (filter #(= :leaf (:call/type %)) calls))))
-      (is (= 2 (count (filter #(= :leaf-batch-item (:call/type %)) calls)))))))
+      (is (= 2 (count (filter #(= :leaf-batch-item (:call/type %)) calls))))
+      (is (every? #(= 1 (:call/turn-id %))
+                  (filter #(#{:leaf :leaf-batch-item} (:call/type %)) calls)))
+      (is (every? #(= 1 (:call/parent-eval-id %))
+                  (filter #(#{:leaf :leaf-batch-item} (:call/type %)) calls))))))
 
 (deftest prompt-cache-and-request-artifacts
   (let [dir (tmp-dir "cache")
@@ -212,6 +216,8 @@
           child-root-calls (artifacts/read-edn-file (artifacts/path dir "children/child-0001/calls.edn") [])]
       (is (= 1 (count (filter #(= :child (:call/type %)) calls))))
       (is (= 2 (count (filter #(= :child-batch-item (:call/type %)) calls))))
+      (is (every? #(= 1 (:call/turn-id %)) child-calls))
+      (is (every? #(= 1 (:call/parent-eval-id %)) child-calls))
       (is (= #{"root/children/child-0001"
                "root/children/child-0002"
                "root/children/child-0003"}
