@@ -13,15 +13,12 @@
 
 (def artifact-version 1)
 (def surface-version 1)
-(def surface '[FINAL lm map-lm rlm map-rlm attach-rlm])
+(def surface '[FINAL lm map-lm rlm map-rlm])
 (defn session-id []
   (str "session-" (UUID/randomUUID)))
 
 (defn child-id [n]
   (format "child-%04d" (long n)))
-
-(defn attached-child-id [n]
-  (format "attached-%04d" (long n)))
 
 (defn path [dir & parts]
   (let [base (cond
@@ -64,9 +61,6 @@
       (with-open [r (PushbackReader. (io/reader f))]
         (edn/read {:eof default} r))
       default)))
-
-(defn write-edn-file! [file value]
-  (atomic-spit! file value))
 
 (defn value-summary [value]
   (cond
@@ -118,7 +112,7 @@
 
 (def root-call-types #{:root})
 (def leaf-call-types #{:leaf :leaf-batch-item})
-(def child-call-types #{:child :child-batch-item :attached-child})
+(def child-call-types #{:child :child-batch-item})
 (def provider-call-types (into root-call-types leaf-call-types))
 
 (defn- first-number [m ks]

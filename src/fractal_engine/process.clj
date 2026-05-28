@@ -4,16 +4,13 @@
             [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
-            [fractal-engine.lineage :as lineage]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.provider :as provider]
-            [fractal-engine.rehydrate :as rehydrate]
             [fractal-engine.runtime :as runtime]
-            [fractal-engine.session-store :as store]
             [fractal-engine.time :as time])
   (:import [java.util.concurrent Callable Executors ThreadFactory TimeUnit]))
 
-(declare run-process! run-turn-on-state! child-root-config)
+(declare run-process!)
 
 (defn config
   ([] (config {}))
@@ -258,125 +255,6 @@
                                             :call/error err
                                             :call/ended-at (time/now-str))
                     (throw (ex-info "Child process failed" err t)))))))
-          (attach-call [source-path task opts]
-            (let [source (store/load-session source-path)]
-              (when (empty? (:session source))
-                (throw (ex-info "Attach source not found or invalid"
-                                {:error/type (if (.exists (io/file (str source-path)))
-                                               :attach/source-invalid
-                                               :attach/source-not-found)
-                                 :source/path (str source-path)})))
-              (let [child-num (artifacts/next-counter! state :child)
-                    cid (artifacts/attached-child-id child-num)
-                    child-rel (str "children/" cid)
-                    child-dir (artifacts/path (:dir @state) child-rel)
-                    parent-cache-id (session-cache-id state)
-                    child-cache-id (str parent-cache-id ":child:" cid)
-                    call-row (artifacts/add-call! state {:call/type :attached-child
-                                                         :call/turn-id runtime/*current-turn-id*
-                                                         :edge/type :attached
-                                                         :call/parent-eval-id runtime/*current-eval-id*
-                                                         :child/session-id cid
-                                                         :child/cache-id child-cache-id
-                                                         :child/dir child-rel
-                                                         :attach/source-path (str source-path)
-                                                         :attach/source-fingerprint (:fingerprint source)
-                                                         :attach/options opts})
-                    parent {:parent/session-id (:session/id (:session @state))
-                            :parent/cache-id parent-cache-id
-                            :parent/call-id (:call/id call-row)
-                            :parent/eval-id runtime/*current-eval-id*
-                            :parent/relative-dir ".."}
-                    effective-cfg (child-root-config cfg :attached-child)
-                    child-state (artifacts/new-state! {:dir child-dir
-                                                       :id cid
-                                                       :cache-id child-cache-id
-                                                       :kind :child
-                                                       :provider (provider-shape effective-cfg)
-                                                       :parent parent})
-                    child-ns (runtime/session-ns-symbol cid)
-                    child-ops (make-ops child-state effective-cfg child-ns)
-                    child-session {:state child-state
-                                   :cfg effective-cfg
-                                   :ns-sym child-ns
-                                   :ops child-ops
-                                   :dir child-dir}
-                    lineage-row {:lineage/version 1
-                                 :lineage/session-id cid
-                                 :lineage/kind :attached-child
-                                 :lineage/source {:source/path (str source-path)
-                                                  :source/session-id (get-in source [:session :session/id])
-                                                  :source/artifact-version (get-in source [:session :session/artifact-version])
-                                                  :source/fingerprint (:fingerprint source)}
-                                 :lineage/parents [{:parent/kind :child-of
-                                                    :parent/path (str (:dir @state))
-                                                    :parent/call-id (:call/id call-row)
-                                                    :parent/eval-id runtime/*current-eval-id*}
-                                                   {:parent/kind :attached-from
-                                                    :parent/path (str source-path)
-                                                    :parent/fingerprint (:fingerprint source)}]
-                                 :lineage/created-at (time/now-str)
-                                 :lineage/events []}]
-                (try
-                  (runtime/ensure-ns! child-ns child-ops)
-                  (rehydrate/reset-state-from-source! child-state source)
-                  (swap! child-state update :session assoc
-                         :session/id cid
-                         :session/kind :child
-                         :session/status :running
-                         :session/ended-at nil
-                         :session/cache-id child-cache-id
-                         :session/cache (cache/session-cache child-cache-id)
-                         :session/provider (provider-shape effective-cfg)
-                         :session/parent parent
-                         :session/derived-from {:source/path (str source-path)
-                                                :source/session-id (get-in source [:session :session/id])
-                                                :source/fingerprint (:fingerprint source)}
-                         :session/lineage-kind :attached-child)
-                  (lineage/write-lineage! child-dir lineage-row)
-                  (artifacts/flush! child-state)
-                  (let [rehydration (rehydrate/rehydrate! effective-cfg source-path child-session opts)
-                        result (run-turn-on-state! child-state effective-cfg child-ns task)]
-                    (if (= :final (:status result))
-                      (do
-                        (artifacts/update-status! child-state :stopped)
-                        (artifacts/update-call! state (:call/id call-row) assoc
-                                                :call/status :final
-                                                :call/final-ref (artifacts/value-ref! (:dir @state) (:final-value result))
-                                                :call/error nil
-                                                :call/ended-at (time/now-str)
-                                                :attach/rehydration-status (:rehydration/status rehydration))
-                        (:final-value result))
-                      (let [err {:error/type :attach/child-error
-                                 :error/message "Attached child did not finalize"
-                                 :error/data (:error result)
-                                 :child/session-id cid
-                                 :child/dir child-rel
-                                 :source/path (str source-path)}]
-                        (artifacts/update-call! state (:call/id call-row) assoc
-                                                :call/status :error
-                                                :call/error err
-                                                :call/ended-at (time/now-str))
-                        (throw (ex-info "Attach child failed" err)))))
-                  (catch Throwable t
-                    (let [data (ex-data t)
-                          etype (case (:error/type data)
-                                  :rehydration/replay-error :attach/rehydration-failed
-                                  :attach/child-error :attach/child-error
-                                  :attach/source-invalid :attach/source-invalid
-                                  :attach/source-not-found :attach/source-not-found
-                                  :attach/child-error)
-                          err {:error/type etype
-                               :error/message (.getMessage t)
-                               :error/data data
-                               :child/session-id cid
-                               :child/dir child-rel
-                               :source/path (str source-path)}]
-                      (artifacts/update-call! state (:call/id call-row) assoc
-                                              :call/status :error
-                                              :call/error err
-                                              :call/ended-at (time/now-str))
-                      (throw (ex-info "attach-rlm failed" err t))))))))
           (rlm [task]
             (child-call :child task {}))
           (map-rlm
@@ -404,11 +282,8 @@
                  (mapv :value (sort-by :index results))
                  (throw (ex-info "Child batch failed"
                                  {:error/type :fractal/child-batch-failed
-                                  :results (vec (sort-by :index results))}))))))
-          (attach-rlm
-            ([path task] (attach-rlm path task {}))
-            ([path task opts] (attach-call path task opts)))]
-    {:lm lm :map-lm map-lm :rlm rlm :map-rlm map-rlm :attach-rlm attach-rlm}))
+                                  :results (vec (sort-by :index results))}))))))]
+    {:lm lm :map-lm map-lm :rlm rlm :map-rlm map-rlm}))
 
 (defn add-observation! [state turn-id content]
   (let [message (artifacts/add-message! state :observation content turn-id)]
@@ -541,7 +416,7 @@
     (run-loop! state cfg ns-sym turn-id)))
 
 (defn child-root-config [cfg kind]
-  (if (#{:child :attached-child} kind)
+  (if (= :child kind)
     (assoc-in cfg [:models :root] (get-in cfg [:models :child]))
     cfg))
 
@@ -561,7 +436,6 @@
         ops (make-ops state effective-cfg ns-sym)]
     (runtime/ensure-ns! ns-sym ops)
     (when-not resume-state
-      (lineage/write-lineage! dir (lineage/root-lineage dir session-id (or kind :root)))
       (artifacts/add-message! state :system (if (= :child kind) prompt/child-prompt prompt/system-prompt)))
     (doseq [m messages]
       (artifacts/add-message! state (:role m) (:content m) (:turn-id m)))

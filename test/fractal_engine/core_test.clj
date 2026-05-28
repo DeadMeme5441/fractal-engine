@@ -3,16 +3,12 @@
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
             [fractal-engine.cli :as cli]
-            [fractal-engine.inspect :as inspect]
-            [fractal-engine.lineage :as lineage]
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.provider :as provider]
-            [fractal-engine.rehydrate :as rehydrate]
             [fractal-engine.runtime :as runtime]
             [fractal-engine.resume :as resume]
             [fractal-engine.session :as session]
-            [fractal-engine.session-store :as store]
             [llm.sdk.http :as sdk-http]))
 
 (defn tmp-dir [name]
@@ -21,14 +17,11 @@
              (make-array java.nio.file.attribute.FileAttribute 0))]
     (str dir)))
 
-(defn delete-file! [file]
-  (.delete (java.io.File. (str file))))
-
 (defn scripted-cfg [responses]
   (process/config {:scripted/responses (atom (vec responses))}))
 
 (deftest prompt-contract
-  (doseq [sym ["FINAL" "lm" "map-lm" "rlm" "map-rlm" "attach-rlm"]]
+  (doseq [sym ["FINAL" "lm" "map-lm" "rlm" "map-rlm"]]
     (is (clojure.string/includes? prompt/system-prompt sym)))
   (is (not (clojure.string/includes? prompt/system-prompt "context")))
   (doseq [forbidden ["product" "storage" "workflow"]]
@@ -44,14 +37,14 @@
   (is (clojure.string/includes? prompt/system-prompt "combined observation"))
   (is (clojure.string/includes? prompt/system-prompt "Store them in vars"))
   (is (clojure.string/includes? prompt/system-prompt "A bare expression value is only shown back as an observation"))
-  (doseq [example ["- lm:" "- map-lm:" "- rlm:" "- map-rlm:" "- attach-rlm:"]]
+  (doseq [example ["- lm:" "- map-lm:" "- rlm:" "- map-rlm:"]]
     (is (clojure.string/includes? prompt/system-prompt example)))
   (is (clojure.string/includes? prompt/child-prompt "Child session boundary"))
   (is (clojure.string/includes? prompt/child-prompt "Do not solve the parent task globally"))
   (is (clojure.string/includes? prompt/child-prompt "A bare EDN map/vector/string is only an observation"))
   (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
   (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
-  (is (= 7 (:prompt/version prompt/prompt-metadata))))
+  (is (= 6 (:prompt/version prompt/prompt-metadata))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -557,26 +550,20 @@
       (is (= #{"fractal:"} (set (map #(subs (:call/cache-label %) 0 8) calls))))))
   (testing "resume adds another turn to existing history"
     (let [dir (tmp-dir "resume-command")
-          target-dir (tmp-dir "resume-derived")
-          s (session/start-session! (scripted-cfg ["```clojure\n(def saved 99)\nsaved\n```"
-                                                   "```clojure\n(FINAL {:saved saved})\n```"])
+          s (session/start-session! (scripted-cfg ["```clojure\n(def saved 99)\n(FINAL {:saved saved})\n```"])
                                     {:dir dir :id "root"})
           _ (session/run-turn! s "save")
           _ (session/stop-session! s)
           result (resume/resume! (scripted-cfg ["```clojure\n(FINAL {:restored saved})\n```"])
                                  dir
-                                 "restore"
-                                 {:dir target-dir :id "resumed-root"})
-          source-turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])
-          target-turns (artifacts/read-edn-file (artifacts/path target-dir "turns.edn") [])]
+                                 "restore")
+          turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])]
       (is (= {:restored 99} (:final-value result)))
-      (is (= 1 (count source-turns)))
-      (is (= 2 (count target-turns)))))
+      (is (= 2 (count turns)))))
   (testing "fork creates an independent live session with restored vars"
     (let [dir (tmp-dir "fork-source")
           fork-dir (tmp-dir "fork-target")
-          s (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\nx\n```"
-                                                   "```clojure\n(FINAL {:saved x})\n```"])
+          s (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\n(FINAL {:saved x})\n```"])
                                     {:dir dir :id "root"})
           _ (session/run-turn! s "save")
           forked (session/fork-session! (scripted-cfg ["```clojure\n(FINAL {:forked x})\n```"])
@@ -585,166 +572,6 @@
           result (session/run-turn! forked "use forked")]
       (is (= {:forked 42} (:final-value result)))
       (is (not= (str (:dir s)) (str (:dir forked)))))))
-
-(deftest session-loading-handles-lineage-and-fingerprint
-  (let [dir (tmp-dir "load-session")
-        s (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\nx\n```"
-                                                 "```clojure\n(FINAL {:x x})\n```"])
-                                  {:dir dir :id "root"})
-        _ (session/run-turn! s "save")
-        _ (session/stop-session! s)
-        loaded (store/load-session dir)
-        summary (store/session-summary dir)
-        before (:fingerprint loaded)]
-    (is (= "root" (get-in loaded [:session :session/id])))
-    (is (= (lineage/session-handle dir) (:handle summary)))
-    (is (= 1 (:turn-count summary)))
-    (is (re-find #"^turn:.*#turn-0001$" (-> summary :turns first :handle)))
-    (is (re-find #"^eval:.*#eval-0001$" (-> summary :evals first :handle)))
-    (is (some? (:lineage summary)))
-    (delete-file! (artifacts/path dir "lineage.edn"))
-    (is (nil? (:lineage (store/session-summary dir))))
-    (spit (str (artifacts/path dir "evals.edn")) "[]\n")
-    (is (not= before (store/session-fingerprint dir)))))
-
-(deftest inspector-recurses-and-tolerates-malformed-child
-  (let [dir (tmp-dir "inspect-tree")
-        response-fn (fn [request]
-                      (let [content (:message/content (last (:request/messages request)))]
-                        (if (clojure.string/includes? content "spawn")
-                          "```clojure\n(FINAL {:child (rlm \"child final\")})\n```"
-                          "```clojure\n(FINAL {:child true})\n```")))
-        _ (process/run-process!
-           (process/config {:scripted/response-fn response-fn})
-           {:dir dir :id "root" :kind :root :task "spawn"})
-        bad-dir (artifacts/path dir "children" "child-9999")]
-    (.mkdirs (.toFile bad-dir))
-    (spit (str (artifacts/path bad-dir "session.edn")) "{:bad")
-    (let [summary (store/session-summary dir)
-          structured (inspect/structured dir {:tree true :handles true})
-          human (inspect/human-string dir {:tree true :lineage true :handles true})]
-      (is (>= (:child-count summary) 2))
-      (is (some #(= "child-0001" (:id %)) (:children summary)))
-      (is (some #(= :malformed (:status %)) (:children summary)))
-      (is (seq (:open-problems structured)))
-      (is (clojure.string/includes? human "tree"))
-      (is (clojure.string/includes? human "child-0001")))))
-
-(deftest rehydration-replays-skips-and-restores-bindings
-  (let [source-dir (tmp-dir "rehydrate-source")
-        target-dir (tmp-dir "rehydrate-target")
-        source-state (artifacts/new-state! {:dir source-dir :id "source" :kind :root :provider {}})
-        target-state (artifacts/new-state! {:dir target-dir :id "target" :kind :root :provider {}})
-        ns-sym (runtime/session-ns-symbol "target")
-        ops {:lm (fn [& _] nil)
-             :map-lm (fn [& _] nil)
-             :rlm (fn [& _] nil)
-             :map-rlm (fn [& _] nil)
-             :attach-rlm (fn [& _] nil)}
-        target-session {:state target-state :ns-sym ns-sym :ops ops :cfg (process/config)}]
-    (runtime/ensure-ns! ns-sym ops)
-    (artifacts/add-eval! source-state {:eval/status :ok
-                                       :eval/code "(def x 42)"
-                                       :eval/value 42})
-    (artifacts/add-eval! source-state {:eval/status :ok
-                                       :eval/code "(def y (lm {:x x} \"label\"))"
-                                       :eval/value "label"})
-    (artifacts/add-call! source-state {:call/type :leaf
-                                       :call/status :ok
-                                       :call/parent-eval-id 2})
-    (artifacts/add-eval! source-state {:eval/status :final
-                                       :eval/code "(FINAL {:x x})"
-                                       :eval/final-value {:x 42}})
-    (artifacts/add-eval! source-state {:eval/status :error
-                                       :eval/code "(/ 1 0)"
-                                       :eval/error {:error/type :boom}})
-    (artifacts/add-eval! source-state {:eval/status :read-error
-                                       :eval/code "#=(+ 1 2)"})
-    (let [report (rehydrate/rehydrate! (process/config) source-dir target-session {})]
-      (is (= :ok (:rehydration/status report)))
-      (is (= 42 @(ns-resolve ns-sym 'x)))
-      (is (= "label" @(ns-resolve ns-sym 'y)))
-      (is (= #{:ok :restored-binding :skipped}
-             (set (map :replay/status (:rehydration/replayed report)))))
-      (is (some #(= :final-form (:replay/reason %)) (:rehydration/replayed report)))
-      (is (some #(= :source-error (:replay/reason %)) (:rehydration/replayed report)))
-      (is (some #(= :source-read-error (:replay/reason %)) (:rehydration/replayed report)))
-      (is (= report (artifacts/read-edn-file (artifacts/path target-dir "rehydration.edn") nil))))))
-
-(deftest derived-resume-fork-and-attach
-  (testing "resume creates a new lineage-bearing session and does not mutate source"
-    (let [source-dir (tmp-dir "resume-source")
-          target-dir (tmp-dir "resume-target")
-          s (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\nx\n```"
-                                                   "```clojure\n(FINAL {:x x})\n```"])
-                                    {:dir source-dir :id "source"})
-          _ (session/run-turn! s "save x")
-          _ (session/stop-session! s)
-          source-fingerprint (store/session-fingerprint source-dir)
-          result (resume/resume! (scripted-cfg ["```clojure\n(FINAL {:x x})\n```"])
-                                 source-dir
-                                 "use x"
-                                 {:dir target-dir :id "resumed"})]
-      (is (= {:x 42} (:final-value result)))
-      (is (= source-fingerprint (store/session-fingerprint source-dir)))
-      (is (= :resume (get-in (store/read-lineage target-dir) [:lineage/kind])))
-      (is (= :ok (:rehydration/status (artifacts/read-edn-file (artifacts/path target-dir "rehydration.edn") nil))))))
-  (testing "fork records fork lineage"
-    (let [source-dir (tmp-dir "fork-lineage-source")
-          fork-dir (tmp-dir "fork-lineage-target")
-          s (session/start-session! (scripted-cfg ["```clojure\n(def x 7)\nx\n```"
-                                                   "```clojure\n(FINAL x)\n```"])
-                                    {:dir source-dir :id "source"})
-          _ (session/run-turn! s "save")
-          forked (session/fork-session! (scripted-cfg ["```clojure\n(FINAL {:forked x})\n```"])
-                                        source-dir
-                                        fork-dir)
-          result (session/run-turn! forked "use fork")]
-      (is (= {:forked 7} (:final-value result)))
-      (is (= :fork (get-in (store/read-lineage fork-dir) [:lineage/kind])))))
-  (testing "attach returns child final value and records source lineage"
-    (let [source-dir (tmp-dir "attach-source")
-          parent-dir (tmp-dir "attach-parent")
-          s (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\nx\n```"
-                                                   "```clojure\n(FINAL {:x x})\n```"])
-                                    {:dir source-dir :id "source"})
-          _ (session/run-turn! s "save x")
-          source-fingerprint (store/session-fingerprint source-dir)
-          response-fn (fn [request]
-                        (let [content (:message/content (last (:request/messages request)))]
-                          (cond
-                            (clojure.string/includes? content "attach prior")
-                            (str "```clojure\n(FINAL {:child-x (attach-rlm "
-                                 (pr-str source-dir)
-                                 " \"return child x\")})\n```")
-                            (clojure.string/includes? content "return child x")
-                            "```clojure\n(FINAL {:child-x x})\n```"
-                            :else "```clojure\n(FINAL :unknown)\n```")))
-          result (process/run-process!
-                  (process/config {:scripted/response-fn response-fn})
-                  {:dir parent-dir :id "parent" :kind :root :task "attach prior"})
-          child-dir (artifacts/path parent-dir "children" "attached-0001")
-          child-lineage (store/read-lineage child-dir)
-          parent-calls (artifacts/read-edn-file (artifacts/path parent-dir "calls.edn") [])]
-      (is (= {:child-x {:child-x 42}} (:final-value result)))
-      (is (.exists (java.io.File. (str (artifacts/path child-dir "session.edn")))))
-      (is (= :attached-child (:lineage/kind child-lineage)))
-      (is (= (str source-dir) (get-in child-lineage [:lineage/source :source/path])))
-      (is (= source-fingerprint (get-in child-lineage [:lineage/source :source/fingerprint])))
-      (is (= source-fingerprint (:attach/source-fingerprint (first (filter #(= :attached-child (:call/type %)) parent-calls)))))))
-  (testing "attach failure is typed and parent can recover"
-    (let [parent-dir (tmp-dir "attach-failure")
-          calls (atom 0)
-          response-fn (fn [_]
-                        (case (swap! calls inc)
-                          1 "```clojure\n(attach-rlm \"missing-session\" \"task\")\n```"
-                          "```clojure\n(FINAL :recovered)\n```"))
-          result (process/run-process!
-                  (process/config {:scripted/response-fn response-fn})
-                  {:dir parent-dir :id "parent" :kind :root :task "attach missing"})
-          evals (artifacts/read-edn-file (artifacts/path parent-dir "evals.edn") [])]
-      (is (= :recovered (:final-value result)))
-      (is (some #(= :attach/source-not-found (get-in % [:eval/error :error/type])) evals)))))
 
 (deftest map-lm-partial-failure-keeps-successes
   (let [dir (tmp-dir "leaf-failure")

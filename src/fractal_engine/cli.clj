@@ -1,6 +1,5 @@
 (ns fractal-engine.cli
   (:require [clojure.string :as str]
-            [fractal-engine.artifacts :as artifacts]
             [fractal-engine.inspect :as inspect]
             [fractal-engine.process :as process]
             [fractal-engine.resume :as resume]
@@ -12,22 +11,8 @@
       m
       (let [[k v & more] xs]
         (if (str/starts-with? k "--")
-          (if (and v (not (str/starts-with? v "--")))
-            (recur more (assoc m (keyword (subs k 2)) v))
-            (recur (if v (cons v more) more)
-                   (assoc m (keyword (subs k 2)) true)))
+          (recur more (assoc m (keyword (subs k 2)) v))
           (recur (rest xs) m))))))
-
-(defn positional-args [args]
-  (loop [xs args out []]
-    (if (empty? xs)
-      out
-      (let [[x y & more] xs]
-        (if (str/starts-with? x "--")
-          (if (and y (not (str/starts-with? y "--")))
-            (recur more out)
-            (recur (if y (cons y more) more) out))
-          (recur (rest xs) (conj out x)))))))
 
 (defn script-for [name]
   (case name
@@ -43,9 +28,8 @@
     "map-rlm" ["```clojure\n(def children (map-rlm [\"Return FINAL 1\" \"Return FINAL 2\"]))\n(FINAL {:children children})\n```"
                "```clojure\n(FINAL 1)\n```"
                "```clojure\n(FINAL 2)\n```"]
-    "resume-setup" ["```clojure\n(def x 42)\nx\n```"
-                    "```clojure\n(FINAL {:x x})\n```"]
-    "resume-use" ["```clojure\n(FINAL {:x x})\n```"]
+    "resume-setup" ["```clojure\n(def saved 99)\n(FINAL {:saved saved})\n```"]
+    "resume-use" ["```clojure\n(FINAL {:restored saved})\n```"]
     "multi-turn-chat" ["```clojure\n(def x 42)\n(FINAL {:saved x})\n```"
                        "```clojure\n(FINAL {:restored x})\n```"]
     ["```clojure\n(FINAL :ok)\n```"]))
@@ -105,12 +89,8 @@
     (print-result result)))
 
 (defn chat-session [opts]
-  (if-let [dir (or (:resume opts) (:dir opts))]
-    (session/resume-session! (cfg-from-opts opts) dir
-                             (cond-> {}
-                               (string? (:session opts))
-                               (assoc :id (:session opts)
-                                      :dir (artifacts/path "runs" (:session opts)))))
+  (if-let [dir (:dir opts)]
+    (session/resume-session! (cfg-from-opts opts) dir)
     (session/start-session! (cfg-from-opts opts))))
 
 (def quit-commands #{".quit" ":quit" "/quit" "/exit"})
@@ -146,46 +126,28 @@
 (defn resume-command [opts]
   (if (:chat opts)
     (chat-command opts)
-    (let [derive-opts (cond-> {}
-                        (string? (:session opts))
-                        (assoc :id (:session opts)
-                               :dir (artifacts/path "runs" (:session opts))))]
-      (print-result (resume/resume! (cfg-from-opts opts)
-                                    (:dir opts)
-                                    (or (:question opts) "Continue and call FINAL.")
-                                    derive-opts)))))
+    (print-result (resume/resume! (cfg-from-opts opts) (:dir opts) (or (:question opts) "Continue and call FINAL.")))))
 
 (defn inspect-command [opts]
-  (if (:json opts)
-    (print (inspect/structured-string (:dir opts) opts))
-    (print (inspect/human-string (:dir opts) opts))))
+  (print (inspect/summary-string (:dir opts))))
 
 (defn usage []
   (println "fractal-engine commands:")
   (println "  run --question TEXT [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
-  (println "  chat [--resume runs/session-id] [--session session-new] [--fake-script multi-turn-chat]  # /send submits a message")
-  (println "  inspect runs/session-id [--tree --lineage --handles --json]")
-  (println "  resume runs/session-id --question TEXT [--session session-new] [--fake-script resume-use]")
-  (println "  fork runs/session-id --new-dir runs/session-fork --question TEXT")
+  (println "  chat [--dir runs/session-id] [--fake-script multi-turn-chat]  # /send submits a message")
+  (println "  inspect --dir runs/session-id")
+  (println "  resume --dir runs/session-id --question TEXT [--fake-script resume-use]")
+  (println "  fork --dir runs/session-id --new-dir runs/session-fork --question TEXT")
   (println)
   (println "The default provider is the offline scripted provider. Live providers use clojure-llm-sdk."))
 
 (defn -main [& args]
   (let [[cmd & rest] args
-        opts (arg-map rest)
-        positionals (positional-args rest)
-        opts (cond-> opts
-               (and (#{"inspect" "resume" "fork"} cmd)
-                    (nil? (:dir opts))
-                    (seq positionals))
-               (assoc :dir (first positionals)))]
+        opts (arg-map rest)]
     (case cmd
       "run" (run-command opts)
       "chat" (chat-command opts)
       "inspect" (inspect-command opts)
       "resume" (resume-command opts)
-      "fork" (let [new-dir (or (:new-dir opts)
-                               (when (string? (:session opts))
-                                 (str (artifacts/path "runs" (:session opts)))))]
-               (print-result (resume/fork! (cfg-from-opts opts) (:dir opts) new-dir (or (:question opts) "Continue."))))
+      "fork" (print-result (resume/fork! (cfg-from-opts opts) (:dir opts) (:new-dir opts) (or (:question opts) "Continue.")))
       (usage))))
