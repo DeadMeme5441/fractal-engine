@@ -32,9 +32,12 @@
   (is (clojure.string/includes? prompt/system-prompt "Call FINAL only after enough observations have been inspected"))
   (is (clojure.string/includes? prompt/system-prompt "Use map-lm when the same semantic operation applies independently"))
   (is (clojure.string/includes? prompt/system-prompt "Use map-rlm when several independent lanes can run in parallel"))
+  (is (clojure.string/includes? prompt/system-prompt "up to 50 inputs"))
+  (is (clojure.string/includes? prompt/system-prompt "up to 50 tasks"))
   (is (clojure.string/includes? prompt/system-prompt "Default decomposition posture"))
   (is (clojure.string/includes? prompt/system-prompt "do not inspect them one by one in the root loop"))
   (is (clojure.string/includes? prompt/system-prompt "Children should use lm and map-lm aggressively"))
+  (is (clojure.string/includes? prompt/system-prompt "do not inherit root-local vars"))
   (is (clojure.string/includes? prompt/system-prompt "Bind large values with def"))
   (is (clojure.string/includes? prompt/system-prompt "combined observation"))
   (is (clojure.string/includes? prompt/system-prompt "Store them in vars"))
@@ -42,12 +45,14 @@
   (doseq [example ["- lm:" "- map-lm:" "- rlm:" "- map-rlm:"]]
     (is (clojure.string/includes? prompt/system-prompt example)))
   (is (clojure.string/includes? prompt/child-prompt "Child session boundary"))
+  (is (clojure.string/includes? prompt/child-prompt "do not inherit parent REPL vars"))
   (is (clojure.string/includes? prompt/child-prompt "Do not solve the parent task globally"))
   (is (clojure.string/includes? prompt/child-prompt "A bare EDN map/vector/string is only an observation"))
+  (is (clojure.string/includes? prompt/child-prompt "final-step warning"))
   (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
   (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
   (is (clojure.string/includes? prompt/system-prompt "restoring its last completed turn snapshot"))
-  (is (= 7 (:prompt/version prompt/prompt-metadata))))
+  (is (= 8 (:prompt/version prompt/prompt-metadata))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -409,6 +414,56 @@
     (is (not= (get-in a [:child-session :session/cache])
               (get-in b [:child-session :session/cache])))))
 
+(deftest child-gets-finalization-warning-before-max-turns
+  (let [dir (tmp-dir "child-finalization")
+        response-fn (fn [request]
+                      (let [content (:message/content (last (:request/messages request)))]
+                        (cond
+                          (clojure.string/includes? content "spawn stubborn child")
+                          "```clojure\n(FINAL (rlm \"stubborn child task\"))\n```"
+
+                          (clojure.string/includes? content "CHILD FINALIZATION REQUIRED")
+                          "```clojure\n(FINAL {:forced true :observed observed})\n```"
+
+                          (clojure.string/includes? content "stubborn child task")
+                          "```clojure\n(def observed (if (bound? #'observed) (inc observed) 1))\nobserved\n```"
+
+                          (clojure.string/includes? content "No FINAL was called")
+                          "```clojure\n(def observed (inc observed))\nobserved\n```"
+
+                          :else
+                          "```clojure\n(FINAL :unexpected)\n```")))
+        result (process/run-process!
+                (process/config {:max-turns 4
+                                 :scripted/response-fn response-fn})
+                {:dir dir :id "root" :kind :root :task "spawn stubborn child"})
+        child-dir (artifacts/path dir "children/child-0001")
+        child-messages (artifacts/read-edn-file (artifacts/path child-dir "messages.edn") [])
+        child-turns (artifacts/read-edn-file (artifacts/path child-dir "turns.edn") [])
+        child-snapshots (artifacts/read-edn-file (artifacts/path child-dir "snapshots.edn") [])]
+    (is (= {:forced true :observed 1} (:final-value result)))
+    (is (some #(clojure.string/includes? (:message/content %) "CHILD FINALIZATION REQUIRED")
+              child-messages))
+    (is (= :final (:turn/status (first child-turns))))
+    (is (= 1 (count child-snapshots)))))
+
+(deftest map-fanout-is-capped-for-leaves-and-children
+  (let [dir (tmp-dir "fanout-cap")
+        result (process/run-process!
+                (scripted-cfg ["```clojure\n(def leaf-error (try (map-lm (range 51) \"return EDN\" :edn) (catch Exception e (ex-data e))))\n(def child-error (try (map-rlm (range 51)) (catch Exception e (ex-data e))))\n(FINAL {:leaf (select-keys leaf-error [:error/type :fanout/kind :fanout/max :fanout/count-at-least])\n        :child (select-keys child-error [:error/type :fanout/kind :fanout/max :fanout/count-at-least])})\n```"])
+                {:dir dir :id "root" :kind :root :task "fanout cap"})
+        value (:final-value result)]
+    (is (= {:error/type :fractal/fanout-exceeded
+            :fanout/kind :leaf
+            :fanout/max 50
+            :fanout/count-at-least 51}
+           (:leaf value)))
+    (is (= {:error/type :fractal/fanout-exceeded
+            :fanout/kind :child
+            :fanout/max 50
+            :fanout/count-at-least 51}
+           (:child value)))))
+
 (deftest usage-rollup-known-unknown-partial-and-children
   (let [dir (tmp-dir "usage")
         child-dir (str (artifacts/path dir "children" "child-0001"))
@@ -605,6 +660,18 @@
           turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])]
       (is (= :stopped (:session/status session-row)))
       (is (= 1 (count turns)))))
+  (testing "run honors explicit session names"
+    (let [runs-dir (tmp-dir "named-runs")
+          out (with-out-str
+                (cli/run-command {:fake-script "simple"
+                                  :question "define x"
+                                  :runs-dir runs-dir
+                                  :session "named"}))
+          dir (artifacts/path runs-dir "named")
+          session-row (artifacts/read-edn-file (artifacts/path dir "session.edn") {})]
+      (is (clojure.string/includes? out (str dir)))
+      (is (= "named" (:session/id session-row)))
+      (is (= :stopped (:session/status session-row)))))
   (testing "chat processes two submitted messages in one session"
     (let [out (with-in-str "first\n/send\nsecond\n/send\n"
                 (with-out-str

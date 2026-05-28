@@ -23,10 +23,15 @@ lm
 map-lm
 rlm
 map-rlm
+attach-rlm
 ```
 
 There is no magic context var, tool registry, workflow layer, storage handle
 surface, or repository-specific helper API in the compute kernel.
+
+`map-lm` and `map-rlm` are real parallel fanout surfaces, capped at 50 inputs
+per call by default. Child RLM sessions are also prompted and nudged to call
+`FINAL` before turn exhaustion so parent sessions receive values, not progress.
 
 ## Status
 

@@ -11,13 +11,14 @@
             [fractal-engine.time :as time])
   (:import [java.util.concurrent Callable Executors ThreadFactory TimeUnit]))
 
-(declare run-process! run-turn-on-state! child-root-config)
+(declare run-process! run-turn-on-state! child-root-config add-observation!)
 
 (defn config
   ([] (config {}))
   ([m]
    (let [base {:runs-dir "runs"
                :max-turns 25
+               :max-fanout 50
                :models provider/default-models
                :retry nil}
          models (merge-with merge provider/default-models (:models m))]
@@ -130,6 +131,18 @@
     :edn (edn/read-string text)
     text))
 
+(defn bounded-fanout-inputs [kind cfg inputs]
+  (let [max-fanout (:max-fanout cfg)
+        xs (vec (take (inc max-fanout) inputs))]
+    (if (> (count xs) max-fanout)
+      (throw (ex-info "Fanout limit exceeded"
+                      {:error/type :fractal/fanout-exceeded
+                       :fanout/kind kind
+                       :fanout/max max-fanout
+                       :fanout/count-at-least (count xs)
+                       :error/retryable? false}))
+      xs)))
+
 (defn daemon-executor [prefix]
   (let [counter (atom 0)]
     (Executors/newCachedThreadPool
@@ -163,9 +176,32 @@
        "- Use ordinary Clojure for deterministic inspection.\n"
        "- Use lm/map-lm for bounded semantic extraction when useful.\n"
        "- When the child result is ready, you MUST call (FINAL value).\n"
+       "- If the host warns that this is the final child step, stop inspecting and call (FINAL value) from the evidence already gathered. Include missingness rather than continuing.\n"
        "- A bare EDN map/vector/string is only an observation and is NOT returned to the parent.\n\n"
        "Assigned child task:\n"
        (if (string? task) task (pr-str task))))
+
+(defn child-finalization-warning [max-turns]
+  (str "CHILD FINALIZATION REQUIRED:\n"
+       "This child session is close to exhausting its " max-turns
+       "-step turn budget. Do not start broad new searches, spawn more work, or emit progress."
+       " Compose a compact result from the vars and observations already available."
+       " If the assignment is incomplete, include explicit :missing or :unknowns."
+       " Your next Clojure block must call (FINAL value)."))
+
+(defn child-session? [state]
+  (= :child (get-in @state [:session :session/kind])))
+
+(defn finalization-warning-step? [state cfg step-n]
+  (let [max-turns (:max-turns cfg)]
+    (and (child-session? state)
+         (integer? max-turns)
+         (pos? max-turns)
+         (>= step-n (max 0 (- max-turns 3))))))
+
+(defn maybe-add-child-finalization-warning! [state cfg turn-id step-n]
+  (when (finalization-warning-step? state cfg step-n)
+    (add-observation! state turn-id (child-finalization-warning (:max-turns cfg)))))
 
 (defn attached-child-id [n]
   (format "attached-%04d" (long n)))
@@ -248,7 +284,8 @@
           (map-lm
             ([inputs query] (map-lm inputs query :string))
             ([inputs query mode]
-             (let [batch-id (str "leaf-batch-" (java.util.UUID/randomUUID))
+             (let [inputs' (bounded-fanout-inputs :leaf cfg inputs)
+                   batch-id (str "leaf-batch-" (java.util.UUID/randomUUID))
                    results (parallel-map-indexed
                             "fractal-map-lm"
                             (fn [idx input]
@@ -261,7 +298,7 @@
                                   {:ok false :index idx
                                    :error {:error/message (.getMessage t)
                                            :error/data (ex-data t)}})))
-                            inputs)]
+                            inputs')]
                (if (every? :ok results)
                  (mapv :value (sort-by :index results))
                  (throw (ex-info "Leaf batch failed"
@@ -301,7 +338,8 @@
                                           :call/final-ref (artifacts/value-ref! (:dir @state) value)
                                           :call/error (:error result)
                                           :call/ended-at (time/now-str))
-                  (if (= :error (:status result))
+                  (cond
+                    (= :error (:status result))
                     (throw (ex-info "Child process failed"
                                     {:error/type :fractal/child-failed
                                      :error/message "Child process returned error"
@@ -309,14 +347,24 @@
                                      :child/session-id cid
                                      :child/dir child-rel
                                      :error/retryable? false}))
+                    (not (contains? result :final-value))
+                    (throw (ex-info "Child process did not return FINAL"
+                                    {:error/type :fractal/child-no-final
+                                     :error/message "Child process returned without a FINAL value"
+                                     :child/session-id cid
+                                     :child/dir child-rel
+                                     :error/retryable? false}))
+                    :else
                     value))
                 (catch Throwable t
-                  (let [err {:error/type :fractal/child-failed
-                             :error/message (.getMessage t)
-                             :error/data (ex-data t)
-                             :child/session-id cid
-                             :child/dir child-rel
-                             :error/retryable? false}]
+                  (let [data (ex-data t)
+                        err (merge {:error/type :fractal/child-failed
+                                    :error/message (.getMessage t)
+                                    :error/data data
+                                    :child/session-id cid
+                                    :child/dir child-rel
+                                    :error/retryable? false}
+                                   (select-keys data [:error/type :child/session-id :child/dir :error/retryable?]))]
                     (artifacts/update-call! state (:call/id call-row) assoc
                                             :call/status :error
                                             :call/error err
@@ -439,7 +487,8 @@
           (map-rlm
             ([tasks] (map-rlm tasks nil))
             ([tasks shared-instruction]
-             (let [batch-id (str "child-batch-" (java.util.UUID/randomUUID))
+             (let [tasks' (bounded-fanout-inputs :child cfg tasks)
+                   batch-id (str "child-batch-" (java.util.UUID/randomUUID))
                    results (parallel-map-indexed
                             "fractal-map-rlm"
                             (fn [idx task]
@@ -456,7 +505,7 @@
                                   {:ok false :index idx
                                    :error {:error/message (.getMessage t)
                                            :error/data (ex-data t)}})))
-                            tasks)]
+                            tasks')]
                (if (every? :ok results)
                  (mapv :value (sort-by :index results))
                  (throw (ex-info "Child batch failed"
@@ -532,7 +581,9 @@
         (let [err {:error/type :fractal/max-turns :max-turns (:max-turns cfg)}]
           (finish-turn-error! state turn-id err)
           {:status :error :error err :dir (:dir @state) :turn-id turn-id})
-        (let [request (provider-request (:messages @state)
+        (do
+          (maybe-add-child-finalization-warning! state cfg turn-id step-n)
+          (let [request (provider-request (:messages @state)
                                         (cache/request-cache (session-cache-id state) :agent))
               step (try
                      (let [{:keys [call-id response]} (call-provider!
@@ -590,7 +641,7 @@
                :turn-id turn-id})
 
             :else
-            (recur (inc step-n))))))))
+            (recur (inc step-n)))))))))
 
 (defn prepare-turn! [state user-message]
   (let [turn (artifacts/add-turn! state {})

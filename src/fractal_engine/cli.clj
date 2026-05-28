@@ -1,5 +1,6 @@
 (ns fractal-engine.cli
   (:require [clojure.string :as str]
+            [fractal-engine.artifacts :as artifacts]
             [fractal-engine.inspect :as inspect]
             [fractal-engine.process :as process]
             [fractal-engine.resume :as resume]
@@ -76,11 +77,18 @@
         script (when (and script-name (nil? response-fn))
                  (atom (vec (script-for script-name))))]
     (process/config
-     (cond-> {:models {:root {:provider provider :model model}
+     (cond-> {:runs-dir (or (:runs-dir opts) "runs")
+              :models {:root {:provider provider :model model}
                        :leaf {:provider leaf-provider :model leaf-model}
                        :child {:provider child-provider :model child-model}}}
        response-fn (assoc :scripted/response-fn response-fn)
        script (assoc :scripted/responses script)))))
+
+(defn session-start-opts [cfg opts]
+  (if-let [sid (:session opts)]
+    {:id sid
+     :dir (artifacts/path (:runs-dir cfg) sid)}
+    {}))
 
 (defn print-result [result]
   (println "Session:" (str (:dir result)))
@@ -91,15 +99,17 @@
     (println "Final:" (pr-str (:final-value result)))))
 
 (defn run-command [opts]
-  (let [s (session/start-session! (cfg-from-opts opts))
+  (let [cfg (cfg-from-opts opts)
+        s (session/start-session! cfg (session-start-opts cfg opts))
         result (session/run-turn! s (or (:question opts) "Return a compact final value."))]
     (session/stop-session! s)
     (print-result result)))
 
 (defn chat-session [opts]
-  (if-let [dir (:dir opts)]
-    (session/resume-session! (cfg-from-opts opts) dir)
-    (session/start-session! (cfg-from-opts opts))))
+  (let [cfg (cfg-from-opts opts)]
+    (if-let [dir (:dir opts)]
+      (session/resume-session! cfg dir)
+      (session/start-session! cfg (session-start-opts cfg opts)))))
 
 (def quit-commands #{".quit" ":quit" "/quit" "/exit"})
 
@@ -151,8 +161,8 @@
 
 (defn usage []
   (println "fractal-engine commands:")
-  (println "  run --question TEXT [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
-  (println "  chat [--dir runs/session-id] [--fake-script multi-turn-chat]  # /send submits a message")
+  (println "  run --question TEXT [--session ID] [--runs-dir DIR] [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
+  (println "  chat [--session ID] [--runs-dir DIR] [--dir runs/session-id] [--fake-script multi-turn-chat]  # /send submits a message")
   (println "  inspect --dir runs/session-id [--tree --snapshots --handles --json]")
   (println "  resume --dir runs/session-id --question TEXT [--turn N] [--session session-id] [--fake-script resume-use]")
   (println "  fork --dir runs/session-id --new-dir runs/session-fork --question TEXT [--turn N]")

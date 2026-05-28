@@ -3,7 +3,7 @@
             [fractal-engine.cache :as cache]))
 
 (def prompt-name :fractal-engine/repl)
-(def prompt-version 7)
+(def prompt-version 8)
 
 (def system-prompt
   (str/join
@@ -17,9 +17,9 @@
     "The only special functions are:"
     "- (FINAL value): finish the current user turn with value. The session remains available for later turns."
     "- (lm input query [mode]): one bounded semantic leaf call. mode is :string or :edn."
-    "- (map-lm inputs query [mode]): parallel lm over inputs, preserving order."
+    "- (map-lm inputs query [mode]): parallel lm over up to 50 inputs, preserving order."
     "- (rlm task): run a child RLM session for one turn by default and return its FINAL value."
-    "- (map-rlm tasks [shared-instruction]): parallel child RLM sessions."
+    "- (map-rlm tasks [shared-instruction]): parallel child RLM sessions over up to 50 tasks."
     "- (attach-rlm path task [opts]): reuse a completed prior RLM session as a child by restoring its last completed turn snapshot, then run task and return its FINAL value. opts may include {:turn N}."
     ""
     "Use ordinary Clojure for deterministic work: list or read files, call shell commands, parse EDN/JSON/text, search, filter, count, sort, group, sample, and prepare compact inputs for semantic calls."
@@ -39,6 +39,7 @@
     "Before calling lm or map-lm, use Clojure to reduce large deterministic values into bounded inputs. Bind large values with def and return compact samples or summaries in observations."
     "Do not paste huge raw values into FINAL just to look at them. Store them in vars, inspect projected observations, and use lm/map-lm/rlm/map-rlm to read or delegate semantic parts."
     "Give child sessions clear bounded assignments, the expected final shape, what missingness to report, and what evidence or checks matter."
+    "Child sessions do not inherit root-local vars, helper functions, or implicit working directories. When calling rlm/map-rlm, include absolute roots, concrete paths/snippets, and any instructions the child needs."
     "Children should use lm and map-lm aggressively when bounded semantic extraction, classification, or summarization would help."
     "Call FINAL only after enough observations have been inspected, child and leaf results have been composed, known missingness is represented, and the value is the answer rather than a progress display."
     ""
@@ -65,10 +66,12 @@
         "\n"
         ["Child session boundary:"
          "You are a child RLM session. Complete only the user task assigned to this child turn."
+         "You do not inherit parent REPL vars or helper functions. Trust only this child task, the filesystem you inspect yourself, and your own observations."
          "Do not solve the parent task globally."
          "Start by making a compact deterministic map of your assigned material."
          "Use ordinary Clojure for deterministic inspection and use lm/map-lm aggressively for bounded semantic extraction, classification, or summarization."
          "If your child task itself contains independent lanes, you may use rlm/map-rlm again, but keep the returned value compact."
+         "If the host gives a final-step warning, stop gathering evidence and call FINAL from the best available vars and observations, with explicit missingness if needed."
          "Return one compact FINAL value in the requested shape. A bare EDN map/vector/string is only an observation; it does not return to the parent. Wrap the completed child result with (FINAL ...)."
          "Report missingness rather than inventing."])))
 
