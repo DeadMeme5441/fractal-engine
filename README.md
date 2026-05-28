@@ -87,13 +87,20 @@ runs/<session-id>/
   final.edn
   usage.edn
   tree.edn
+  blobs/
   children/
 ```
 
 Canonical files are `session.edn`, `messages.edn`, `turns.edn`, `evals.edn`,
-`calls.edn`, `events.edn`, `snapshots.edn`, and `children/`.
+`calls.edn`, `snapshots.edn`, `lineage.edn` when present, and canonical child
+session summaries under `children/`.
 
 `final.edn`, `usage.edn`, and `tree.edn` are derived views.
+
+Large EDN values in call request/response refs and turn snapshots are stored
+under `blobs/` with refs containing the relative path, SHA-256, and byte count.
+Small refs remain inline. Session fingerprints hash canonical state files and
+child session fingerprints, not arbitrary blob contents.
 
 Child RLM sessions use the same shape under `children/child-0001/`,
 `children/child-0002/`, and so on. `rlm` and `map-rlm` run child sessions for

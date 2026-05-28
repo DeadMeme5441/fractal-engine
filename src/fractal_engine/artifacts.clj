@@ -14,6 +14,8 @@
 (def artifact-version 1)
 (def surface-version 2)
 (def surface '[FINAL lm map-lm rlm map-rlm attach-rlm])
+(def inline-byte-threshold 4096)
+
 (defn session-id []
   (str "session-" (UUID/randomUUID)))
 
@@ -111,8 +113,26 @@
     :blob (read-edn-file (path dir (:path ref)) ::missing)
     ::missing))
 
-(defn value-ref! [dir value]
-  {:value/kind :inline :value value})
+(defn value-bytes [value]
+  (alength (.getBytes (formatted-edn value) StandardCharsets/UTF_8)))
+
+(defn blob-ref! [dir rel-path value]
+  (let [text (formatted-edn value)
+        bytes (.getBytes text StandardCharsets/UTF_8)]
+    (write-edn! (path dir rel-path) value)
+    {:value/kind :blob
+     :path rel-path
+     :sha256 (cache/sha256-string text)
+     :bytes (alength bytes)}))
+
+(defn value-ref!
+  ([dir value]
+   {:value/kind :inline :value value})
+  ([dir value {:keys [path threshold]
+               :or {threshold inline-byte-threshold}}]
+   (if (and path (> (value-bytes value) threshold))
+     (blob-ref! dir path value)
+     (value-ref! dir value))))
 
 (def root-call-types #{:root})
 (def leaf-call-types #{:leaf :leaf-batch-item})
@@ -308,19 +328,23 @@
     (atomic-spit! (path dir "usage.edn") usage)
     (atomic-spit! (path dir "tree.edn") tree)))
 
+(defn- flush-lock [state]
+  (or (:flush-lock @state) state))
+
 (defn flush! [state]
-  (let [{:keys [dir session messages turns evals calls events snapshots]} @state]
-    (doseq [sub ["children"]]
-      (ensure-dir! (path dir sub)))
-    (atomic-spit! (path dir "session.edn") session)
-    (atomic-spit! (path dir "messages.edn") messages)
-    (atomic-spit! (path dir "turns.edn") turns)
-    (atomic-spit! (path dir "evals.edn") evals)
-    (atomic-spit! (path dir "calls.edn") calls)
-    (atomic-spit! (path dir "events.edn") events)
-    (atomic-spit! (path dir "snapshots.edn") snapshots)
-    (rebuild-derived! state)
-    state))
+  (locking (flush-lock state)
+    (let [{:keys [dir session messages turns evals calls events snapshots]} @state]
+      (doseq [sub ["children"]]
+        (ensure-dir! (path dir sub)))
+      (atomic-spit! (path dir "session.edn") session)
+      (atomic-spit! (path dir "messages.edn") messages)
+      (atomic-spit! (path dir "turns.edn") turns)
+      (atomic-spit! (path dir "evals.edn") evals)
+      (atomic-spit! (path dir "calls.edn") calls)
+      (atomic-spit! (path dir "events.edn") events)
+      (atomic-spit! (path dir "snapshots.edn") snapshots)
+      (rebuild-derived! state)
+      state)))
 
 (defn next-counter! [state k]
   (let [v (get-in (swap! state update-in [:counters k] (fnil inc 0)) [:counters k])]
@@ -385,7 +409,8 @@
     (update-turn! state turn-id update k #(vec (concat (or % []) values)))))
 
 (defn add-call! [state call]
-  (let [id (next-counter! state :call)
+  (let [id (or (:call/id call)
+               (next-counter! state :call))
         call' (merge {:call/id id
                       :call/status :running
                       :call/started-at (time/now-str)}
@@ -470,31 +495,8 @@
                      :calls []
                      :events []
                      :snapshots []
+                     :flush-lock (Object.)
                      :counters {:message 0 :turn 0 :eval 0 :call 0 :event 0 :snapshot 0 :child 0}})]
     (flush! state)
     (add-event! state {:event/type :session-started :session/id (:session/id (:session @state))})
     state))
-
-(defn load-state! [dir]
-  (let [messages (read-edn-file (path dir "messages.edn") [])
-        turns (read-edn-file (path dir "turns.edn") [])
-        evals (read-edn-file (path dir "evals.edn") [])
-        calls (read-edn-file (path dir "calls.edn") [])
-        events (read-edn-file (path dir "events.edn") [])
-        snapshots (read-edn-file (path dir "snapshots.edn") [])
-        session (read-edn-file (path dir "session.edn") {})]
-    (atom {:dir (path dir)
-           :session (assoc session :session/status :running :session/ended-at nil)
-           :messages messages
-           :turns turns
-           :evals evals
-           :calls calls
-           :events events
-           :snapshots snapshots
-           :counters {:message (apply max 0 (map :message/id messages))
-                      :turn (apply max 0 (map :turn/id turns))
-                      :eval (apply max 0 (map :eval/id evals))
-                      :call (apply max 0 (map :call/id calls))
-                      :event (apply max 0 (map :event/id events))
-                      :snapshot (apply max 0 (map :snapshot/id snapshots))
-                      :child (count (filter #(#{:child :child-batch-item} (:call/type %)) calls))}})))

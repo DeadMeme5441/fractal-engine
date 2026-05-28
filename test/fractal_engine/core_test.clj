@@ -256,6 +256,31 @@
            (artifacts/read-ref dir (:call/request-ref (first root-calls)))))
     (is (= :scripted (:response/provider (artifacts/read-ref dir (:call/response-ref first-root)))))))
 
+(deftest large-call-request-and-response-refs-blob-and-round-trip
+  (let [dir (tmp-dir "call-blobs")
+        big-request (apply str (repeat 5000 "request-data "))
+        big-tail (apply str (repeat 5000 "response-data "))
+        result (process/run-process!
+                (process/config {:scripted/response-fn
+                                 (fn [_]
+                                   (str "```clojure\n(FINAL :blobbed)\n```\n" big-tail))})
+                {:dir dir :id "root" :kind :root :task big-request})
+        calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+        root-call (first calls)
+        request-ref (:call/request-ref root-call)
+        response-ref (:call/response-ref root-call)]
+    (is (= :blobbed (:final-value result)))
+    (is (= :blob (:value/kind request-ref)))
+    (is (= "blobs/calls/call-000001-request.edn" (:path request-ref)))
+    (is (string? (:sha256 request-ref)))
+    (is (> (:bytes request-ref) artifacts/inline-byte-threshold))
+    (is (= :blob (:value/kind response-ref)))
+    (is (= "blobs/calls/call-000001-response.edn" (:path response-ref)))
+    (is (.exists (java.io.File. dir "blobs/calls/call-000001-request.edn")))
+    (is (.exists (java.io.File. dir "blobs/calls/call-000001-response.edn")))
+    (is (= (:request root-call) (artifacts/read-ref dir request-ref)))
+    (is (= :scripted (:response/provider (artifacts/read-ref dir response-ref))))))
+
 (deftest child-and-map-child
   (let [dir (tmp-dir "child")
         response-fn (fn [request]
@@ -308,6 +333,49 @@
              (set (map :call/cache-label child-root-calls))))
       (is (every? #(<= (count %) 64)
                   (map :call/cache-scope child-root-calls))))))
+
+(defn- unique-ids? [rows k]
+  (= (count rows) (count (set (map k rows)))))
+
+(deftest parallel-child-and-leaf-updates-keep-artifacts-parseable
+  (let [dir (tmp-dir "parallel-artifacts")
+        response-fn (fn [request]
+                      (let [content (:message/content (last (:request/messages request)))]
+                        (cond
+                          (clojure.string/includes? content "fanout stress")
+                          "```clojure\n(def children (map-rlm (mapv #(str \"lane-\" %) (range 8))))\n(FINAL children)\n```"
+
+                          (clojure.string/includes? content "Assigned child task:")
+                          "```clojure\n(def leaves (map-lm (vec (range 6)) \"leaf echo\" :edn))\n(FINAL {:leaves leaves})\n```"
+
+                          (clojure.string/includes? content "leaf echo")
+                          "{:leaf true}"
+
+                          :else
+                          "```clojure\n(FINAL :unexpected)\n```")))
+        result (process/run-process!
+                (process/config {:scripted/response-fn response-fn})
+                {:dir dir :id "root" :kind :root :task "fanout stress"})
+        parent-calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+        parent-events (artifacts/read-edn-file (artifacts/path dir "events.edn") [])
+        child-dirs (map #(artifacts/path dir "children" (format "child-%04d" %))
+                        (range 1 9))]
+    (is (= :final (:status result)))
+    (is (unique-ids? parent-calls :call/id))
+    (is (unique-ids? parent-events :event/id))
+    (doseq [file ["session.edn" "messages.edn" "turns.edn" "evals.edn" "calls.edn"
+                  "events.edn" "snapshots.edn" "final.edn" "usage.edn" "tree.edn"]]
+      (is (some? (artifacts/read-edn-file (artifacts/path dir file) nil)) file))
+    (doseq [child-dir child-dirs]
+      (let [calls (artifacts/read-edn-file (artifacts/path child-dir "calls.edn") [])
+            events (artifacts/read-edn-file (artifacts/path child-dir "events.edn") [])]
+        (is (= 6 (count (filter #(= :leaf-batch-item (:call/type %)) calls))))
+        (is (unique-ids? calls :call/id))
+        (is (unique-ids? events :event/id))
+        (doseq [file ["session.edn" "messages.edn" "turns.edn" "evals.edn"
+                      "calls.edn" "events.edn" "snapshots.edn"]]
+          (is (some? (artifacts/read-edn-file (artifacts/path child-dir file) nil))
+              (str child-dir "/" file)))))))
 
 (deftest child-cache-scopes-do-not-collide-across-parent-sessions
   (let [response-fn (fn [request]
@@ -654,6 +722,32 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"No completed turn snapshot"
                           (session/resume-session! (scripted-cfg []) empty-dir)))))
+
+(deftest session-fingerprint-is-canonical-and-lightweight
+  (let [dir (tmp-dir "fingerprint")
+        s (session/start-session! (scripted-cfg ["```clojure\n(def x 1)\n(FINAL x)\n```"])
+                                  {:dir dir :id "root"})
+        _ (session/run-turn! s "save")
+        before (snapshot/session-fingerprint dir)]
+    (artifacts/write-edn! (artifacts/path dir "blobs/arbitrary.edn")
+                          {:not :canonical})
+    (is (= before (snapshot/session-fingerprint dir)))
+    (artifacts/write-edn! (artifacts/path dir "messages.edn")
+                          (conj (artifacts/read-edn-file (artifacts/path dir "messages.edn") [])
+                                {:message/id 999
+                                 :message/role :observation
+                                 :message/content "canonical change"}))
+    (let [after-message (snapshot/session-fingerprint dir)]
+      (is (not= before after-message))
+      (artifacts/new-state! {:dir (artifacts/path dir "children/child-0001")
+                             :id "child-0001"
+                             :kind :child
+                             :provider {}})
+      (let [after-child (snapshot/session-fingerprint dir)]
+        (is (not= after-message after-child))
+        (artifacts/write-edn! (artifacts/path dir "children/child-0001/blobs/ignored.edn")
+                              {:large (apply str (repeat 5000 "x"))})
+        (is (= after-child (snapshot/session-fingerprint dir)))))))
 
 (deftest resume-restores-vars-and_messages_without_replay
   (let [dir (tmp-dir "resume-snapshot")

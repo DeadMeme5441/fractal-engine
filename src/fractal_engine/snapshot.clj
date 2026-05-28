@@ -9,7 +9,7 @@
            [java.nio.file Files Path]
            [java.util.concurrent Future]))
 
-(def inline-byte-threshold 4096)
+(def inline-byte-threshold artifacts/inline-byte-threshold)
 
 (def special-symbols '#{FINAL lm map-lm rlm map-rlm attach-rlm})
 
@@ -20,19 +20,10 @@
   (artifacts/formatted-edn value))
 
 (defn- blob-ref! [dir rel-path value]
-  (let [text (edn-string value)
-        bytes (.getBytes text java.nio.charset.StandardCharsets/UTF_8)]
-    (artifacts/write-edn! (artifacts/path dir rel-path) value)
-    {:value/kind :blob
-     :path rel-path
-     :sha256 (cache/sha256-string text)
-     :bytes (alength bytes)}))
+  (artifacts/blob-ref! dir rel-path value))
 
 (defn- inline-ref [value]
   {:value/kind :inline :value value})
-
-(defn- value-bytes [value]
-  (alength (.getBytes (edn-string value) java.nio.charset.StandardCharsets/UTF_8)))
 
 (defn- safe-var-file [sym]
   (str (str/replace (name sym) #"[^A-Za-z0-9_.-]" "_") ".edn"))
@@ -69,7 +60,7 @@
     (some? value) (assoc :class (.getName (class value)))))
 
 (defn- value-ref-for-var! [dir turn-id sym value]
-  (let [bytes (value-bytes value)]
+  (let [bytes (artifacts/value-bytes value)]
     (if (> bytes inline-byte-threshold)
       (blob-ref! dir
                  (str "blobs/vars/" (turn-token turn-id) "/" (safe-var-file sym))
@@ -215,17 +206,44 @@
 (defn source-session-id [dir]
   (:session/id (artifacts/read-edn-file (artifacts/path dir "session.edn") {})))
 
+(def canonical-state-files
+  ["session.edn"
+   "messages.edn"
+   "turns.edn"
+   "evals.edn"
+   "calls.edn"
+   "snapshots.edn"
+   "lineage.edn"])
+
+(defn- regular-file? [^Path p]
+  (Files/isRegularFile p (make-array java.nio.file.LinkOption 0)))
+
+(defn- hash-file [root rel]
+  (let [p (artifacts/path root rel)]
+    (when (regular-file? p)
+      [rel (cache/sha256-string (slurp (.toFile p)))])))
+
+(defn- child-session-dirs [^Path root]
+  (let [children-dir (artifacts/path root "children")]
+    (if (Files/isDirectory children-dir (make-array java.nio.file.LinkOption 0))
+      (with-open [paths (Files/list children-dir)]
+        (->> (iterator-seq (.iterator paths))
+             (filter #(Files/isDirectory ^Path % (make-array java.nio.file.LinkOption 0)))
+             (filter #(regular-file? (artifacts/path % "session.edn")))
+             (sort-by #(.toString (.relativize root ^Path %)))
+             vec))
+      [])))
+
 (defn session-fingerprint [dir]
   (let [root (artifacts/path dir)
-        files (with-open [paths (Files/walk root (make-array java.nio.file.FileVisitOption 0))]
-                (->> (iterator-seq (.iterator paths))
-                     (filter #(Files/isRegularFile ^Path % (make-array java.nio.file.LinkOption 0)))
-                     (sort-by #(.toString (.relativize root ^Path %)))
-                     (mapv (fn [^Path p]
-                             (let [rel (.toString (.relativize root p))
-                                   text (slurp (.toFile p))]
-                               [rel (cache/sha256-string text)])))))]
-    (cache/sha256-string (pr-str files))))
+        files (vec (keep #(hash-file root %) canonical-state-files))
+        children (mapv (fn [^Path child-dir]
+                         [(.toString (.relativize root child-dir))
+                          (session-fingerprint child-dir)])
+                       (child-session-dirs root))]
+    (cache/sha256-string (pr-str {:fingerprint/version 2
+                                  :files files
+                                  :children children}))))
 
 (defn write-restore-report! [dir report]
   (artifacts/write-edn! (artifacts/path dir "restore.edn") report))

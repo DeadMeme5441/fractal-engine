@@ -58,7 +58,15 @@
                            (:request/messages request))]
     (cache/sha256-string content)))
 
-(defn enrich-call [state cfg role call]
+(defn call-blob-path [call-id part]
+  (format "blobs/calls/call-%06d-%s.edn" (long call-id) (name part)))
+
+(defn call-value-ref! [state call-id part value]
+  (artifacts/value-ref! (:dir @state)
+                        value
+                        {:path (call-blob-path call-id part)}))
+
+(defn enrich-call [state cfg role call call-id]
   (let [request (:request call)
         cache-request (:request/cache request)
         model-cfg (get-in cfg [:models role])
@@ -66,10 +74,11 @@
                      (get-in @state [:session :session/id]))
         cache-purpose (if (= role :leaf) :leaf :agent)]
     (cond-> (assoc call
+                   :call/id call-id
                    :call/provider (:provider model-cfg)
                    :call/model (:model model-cfg)
                    :call/turn-id (or (:call/turn-id call) runtime/*current-turn-id*)
-                   :call/request-ref (artifacts/value-ref! (:dir @state) request)
+                   :call/request-ref (call-value-ref! state call-id :request request)
                    :call/request-message-count (count (:request/messages request))
                    :call/request-system-hash (request-system-hash request)
                    :call/cache-scope (:scope-id cache-request)
@@ -80,7 +89,8 @@
       (:call/message-ids call) (assoc :call/request-message-ids (:call/message-ids call)))))
 
 (defn call-provider! [state cfg role call]
-  (let [call-row (artifacts/add-call! state (enrich-call state cfg role call))
+  (let [reserved-call-id (artifacts/next-counter! state :call)
+        call-row (artifacts/add-call! state (enrich-call state cfg role call reserved-call-id))
         call-id (:call/id call-row)
         request (:request call)
         response (try
@@ -107,7 +117,7 @@
                        (throw (ex-info "Provider call failed" err t)))))]
     (artifacts/update-call! state call-id assoc
                             :call/status :ok
-                            :call/response-ref (artifacts/value-ref! (:dir @state) response)
+                            :call/response-ref (call-value-ref! state call-id :response response)
                             :call/usage (:response/usage response {:usage/status :unknown})
                             :call/cost (:response/cost response {:cost/usd :unknown})
                             :call/cache (:response/cache response {:cache/status :unknown})
