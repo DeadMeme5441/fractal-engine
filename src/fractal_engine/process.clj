@@ -42,7 +42,16 @@
    :request/cache cache-request})
 
 (def leaf-system-prompt
-  "Return only the answer requested by the user. For EDN mode, return exactly one EDN value.")
+  (str "You are a leaf LM inside a recursive Clojure compute engine. "
+       "You receive one bounded input plus one query. You have no tools, no REPL, "
+       "and no hidden state. Return only the requested answer. If the input has "
+       "identity fields such as :id, :index, :path, :handle, or :lane, preserve "
+       "that identity in the answer when the query asks for structured output. "
+       "When asked to classify, use only the supplied label set, read the whole "
+       "bounded input, and include uncertainty when the evidence is ambiguous. "
+       "For EDN mode, return exactly one EDN value with no prose, no Markdown, "
+       "and no code fence. For exact tasks, do not invent counts; report uncertainty "
+       "inside the requested shape if the bounded input is insufficient."))
 
 (defn leaf-request [input query cache-request]
   {:request/messages [{:message/role :system
@@ -173,8 +182,14 @@
 (defn child-task-prompt [task]
   (str "Child RLM protocol:\n"
        "- Work only on the assigned child task below.\n"
+       "- You are an investigator for one bounded uncertainty surface, not the author of the whole parent answer.\n"
        "- Use ordinary Clojure for deterministic inspection.\n"
-       "- Use lm/map-lm for bounded semantic extraction when useful.\n"
+       "- For any large uncertainty surface, do reconnaissance before solving: identify structure, partitions, validation checks, useful leaf batches, and missingness.\n"
+       "- Represent assigned material before solving it. For raw text, tables, logs, transcripts, code, search results, or mixed artifacts, separate data from instructions/headings/metadata, validate counts and required fields when present, inspect edge cases, and repair bad representation before semantic calls or FINAL.\n"
+       "- Use lm/map-lm aggressively for bounded semantic extraction, classification, or summarization when useful.\n"
+       "- Track answer-sensitive uncertainty and resolve or report it before FINAL.\n"
+       "- Keep durable vars for material, leaf results, ledgers, checks, and missingness.\n"
+       "- For exact tasks, compute aggregates with Clojure and verify the FINAL value against the ledger.\n"
        "- When the child result is ready, you MUST call (FINAL value).\n"
        "- If the host warns that this is the final child step, stop inspecting and call (FINAL value) from the evidence already gathered. Include missingness rather than continuing.\n"
        "- A bare EDN map/vector/string is only an observation and is NOT returned to the parent.\n\n"
