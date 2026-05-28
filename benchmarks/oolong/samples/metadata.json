@@ -1,0 +1,50 @@
+[
+  {
+    "name": "spam-2k-numeric",
+    "offset": 53,
+    "dataset": "oolongbench/oolong-synth",
+    "config": "default",
+    "split": "validation",
+    "id": 111010006,
+    "context_len": 2048,
+    "dataset_name": "spam",
+    "task": "TASK_TYPE.NUMERIC_ONE_CLASS",
+    "answer": "[12]",
+    "answer_type": "ANSWER_TYPE.NUMERIC",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-numeric.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-numeric.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-4k-numeric",
+    "offset": 103,
+    "dataset": "oolongbench/oolong-synth",
+    "config": "default",
+    "split": "validation",
+    "id": 112010011,
+    "context_len": 4096,
+    "dataset_name": "spam",
+    "task": "TASK_TYPE.NUMERIC_ONE_CLASS",
+    "answer": "[36]",
+    "answer_type": "ANSWER_TYPE.NUMERIC",
+    "prompt_path": "benchmarks/oolong/samples/spam-4k-numeric.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-4k-numeric.row.json",
+    "context_chars": 10146
+  },
+  {
+    "name": "spam-16k-numeric",
+    "offset": 203,
+    "dataset": "oolongbench/oolong-synth",
+    "config": "default",
+    "split": "validation",
+    "id": 114010015,
+    "context_len": 16384,
+    "dataset_name": "spam",
+    "task": "TASK_TYPE.NUMERIC_ONE_CLASS",
+    "answer": "[140]",
+    "answer_type": "ANSWER_TYPE.NUMERIC",
+    "prompt_path": "benchmarks/oolong/samples/spam-16k-numeric.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-16k-numeric.row.json",
+    "context_chars": 40164
+  }
+]

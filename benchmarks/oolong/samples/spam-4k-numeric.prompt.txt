@@ -1,0 +1,89 @@
+You are evaluating one public Oolong benchmark sample.
+Use the full context below and answer the benchmark question exactly.
+
+Important operating instructions for the RLM:
+- Use the Clojure REPL for deterministic parsing/counting when possible.
+- Bind the full context and intermediate parsed records to vars; do not rely on mental counting.
+- Use lm/map-lm only if a bounded semantic classification is needed.
+- Use rlm/map-rlm only if the context naturally splits into independent chunks.
+- FINAL an EDN map with {:answer value :method string :evidence string :notes [string]}.
+
+Expected answer format for scoring:
+Return the answer value in :answer, preserving number/string/vector shape where applicable.
+
+[BEGIN OOLONG CONTEXT]
+The following lines contain 61 text messages, one per line. Each text message can be classified as spam or ham (i.e., not spam).
+
+You will be asked to answer questions about the aggregate label statistics across all 61 examples in this dataset. Do not try to guess, estimate, or approximate the result. Calculate the exact answer given these datapoints.
+
+Date: Nov 29, 2024 || User: 51810 || Instance: It is a good thing I'm now getting the connection to bw 
+Date: Nov 29, 2022 || User: 99770 || Instance: We tried to contact you re your reply to our offer of a Video Phone 750 anytime any network mins Half Price Line Rental Camcorder Reply or call 08000930705 
+Date: May 31, 2022 || User: 50090 || Instance: Get 3 Lions England tone, reply lionm 4 mono or lionp 4 poly. 4 more go 2 www.ringtones.co.uk, the original n best. Tones 3GBP network operator rates apply 
+Date: Aug 31, 2022 || User: 68179 || Instance: Hi 07734396839 IBH Customer Loyalty Offer: The NEW NOKIA6600 Mobile from ONLY £10 at TXTAUCTION!Txt word:START to No:81151 & get Yours Now!4T& 
+Date: Mar 28, 2025 || User: 51810 || Instance: As one of our registered subscribers u can enter the draw 4 a 100 G.B. gift voucher by replying with ENTER. To unsubscribe text STOP 
+Date: May 12, 2022 || User: 51810 || Instance: For taking part in our mobile survey yesterday! You can now have 500 texts 2 use however you wish. 2 get txts just send TXT to 80160 T&C www.txt43.com 1.50p 
+Date: Oct 09, 2024 || User: 90458 || Instance: I'm gonna say no. Sorry. I would but as normal am starting to panic about time. Sorry again! Are you seeing on Tuesday? 
+Date: Nov 16, 2022 || User: 63654 || Instance: Ur cash-balance is currently 500 pounds - to maximize ur cash-in now send GO to 86688 only 150p/msg. CC 08718720201 HG/Suite342/2Lands Row/W1J6HL 
+Date: Nov 11, 2022 || User: 50090 || Instance: Yes i thought so. Thanks. 
+Date: Apr 07, 2022 || User: 20058 || Instance: Please CALL 08712402779 immediately as there is an urgent message waiting for you 
+Date: Jan 13, 2024 || User: 10418 || Instance: TheMob> Check out our newest selection of content, Games, Tones, Gossip, babes and sport, Keep your mobile fit and funky text WAP to 82468 
+Date: Dec 06, 2022 || User: 64086 || Instance: Ard 530 lor. I ok then message ü lor. 
+Date: Dec 18, 2024 || User: 81548 || Instance: XMAS iscoming & ur awarded either £500 CD gift vouchers & free entry 2 r £100 weekly draw txt MUSIC to 87066 TnC www.Ldew.com1win150ppmx3age16subscription  
+Date: Feb 23, 2023 || User: 68179 || Instance: Hi where you. You in home or calicut? 
+Date: Jun 02, 2023 || User: 44668 || Instance: Jolly good! By the way,  will give u tickets for sat eve 7.30. Speak before then x 
+Date: Oct 03, 2023 || User: 90458 || Instance: My supervisor find 4 me one lor i thk his students. I havent ask her yet. Tell u aft i ask her. 
+Date: Jan 26, 2025 || User: 50090 || Instance: PRIVATE! Your 2003 Account Statement for shows 800 un-redeemed S. I. M. points. Call 08719899230 Identifier Code: 41685 Expires 07/11/04 
+Date: May 15, 2022 || User: 68179 || Instance: Have a nice day my dear. 
+Date: Oct 14, 2024 || User: 50090 || Instance: U’ve Bin Awarded £50 to Play 4 Instant Cash. Call 08715203028 To Claim. EVERY 9th Player Wins Min £50-£500. OptOut 08718727870 
+Date: Mar 21, 2022 || User: 80695 || Instance: URGENT!! Your 4* Costa Del Sol Holiday or £5000 await collection. Call 09050090044 Now toClaim. SAE, TC s, POBox334, Stockport, SK38xh, Cost£1.50/pm, Max10mins 
+Date: Mar 23, 2025 || User: 63654 || Instance: Thanks for this hope you had a good day today 
+Date: Nov 25, 2024 || User: 51810 || Instance: We tried to call you re your reply to our sms for a video mobile 750 mins UNLIMITED TEXT free camcorder Reply or call now 08000930705 Del Thurs 
+Date: Sep 20, 2024 || User: 51810 || Instance: U know we watchin at lido? 
+Date: Nov 16, 2024 || User: 29803 || Instance: Also are you bringing galileo or dobby 
+Date: Jun 30, 2022 || User: 68179 || Instance: Huh so early.. Then ü having dinner outside izzit? 
+Date: Jul 18, 2022 || User: 63654 || Instance: Do you want a new video handset? 750 anytime any network mins? Half Price Line Rental? Camcorder? Reply or call 08000930705 for delivery tomorrow 
+Date: Feb 27, 2022 || User: 90458 || Instance: Natalie (20/F) is inviting you to be her friend. Reply YES-165 or NO-165 See her: www.SMS.ac/u/natalie2k9 STOP? Send STOP FRND to 62468 
+Date: Aug 23, 2024 || User: 70976 || Instance: Here got ur favorite oyster... N got my favorite sashimi... Ok lar i dun say already... Wait ur stomach start rumbling... 
+Date: Dec 26, 2022 || User: 10449 || Instance: Sunshine Quiz Wkly Q! Win a top Sony DVD player if u know which country Liverpool played in mid week? Txt ansr to 82277. £1.50 SP:Tyrone 
+Date: Aug 02, 2024 || User: 51810 || Instance: Bored of speed dating? Try SPEEDCHAT, txt SPEEDCHAT to 80155, if you don't like em txt SWAP and get a new chatter! Chat80155 POBox36504W45WQ 150p/msg rcd 16 
+Date: May 09, 2025 || User: 50090 || Instance: Well at this right I'm gonna have to get up and check today's steam sales/pee so text me when you want me to come get you 
+Date: Apr 29, 2024 || User: 17365 || Instance: Have you been practising your curtsey? 
+Date: Mar 26, 2025 || User: 51810 || Instance: FREE>Ringtone! Reply REAL or POLY eg REAL1 1. PushButton 2. DontCha 3. BabyGoodbye 4. GoldDigger 5. WeBeBurnin 1st tone FREE and 6 more when u join for £3/wk 
+Date: Feb 21, 2022 || User: 68179 || Instance: 500 free text msgs. Just text ok to 80488 and we'll credit your account 
+Date: Dec 27, 2023 || User: 33541 || Instance: Ok da, i already planned. I wil pick you. 
+Date: Mar 18, 2022 || User: 78402 || Instance: Loans for any purpose even if you have Bad Credit! Tenants Welcome. Call NoWorriesLoans.com on 08717111821 
+Date: Jan 23, 2025 || User: 63654 || Instance: Can U get 2 phone NOW? I wanna chat 2 set up meet Call me NOW on 09096102316 U can cum here 2moro Luv JANE xx Calls£1/minmoremobsEMSPOBox45PO139WA 
+Date: Mar 11, 2025 || User: 20058 || Instance: This weeks SavaMob member offers are now accessible. Just call 08709501522 for details! SavaMob, POBOX 139, LA3 2WU. Only £1.50/week. SavaMob - offers mobile! 
+Date: May 12, 2022 || User: 25818 || Instance: We don call like  &lt;#&gt;  times oh. No give us hypertension oh. 
+Date: Feb 12, 2025 || User: 20058 || Instance: Are you unique enough? Find out from 30th August. www.areyouunique.co.uk 
+Date: Jun 05, 2023 || User: 50090 || Instance: Pete,is this your phone still? Its Jenny from college and Leanne.what are you up to now?:) 
+Date: Feb 20, 2024 || User: 63654 || Instance: Congratulations ur awarded 500 of CD vouchers or 125gift guaranteed & Free entry 2 100 wkly draw txt MUSIC to 87066 
+Date: May 26, 2024 || User: 63654 || Instance: Urgent Please call 09066612661 from landline. £5000 cash or a luxury 4* Canary Islands Holiday await collection. T&Cs SAE award. 20M12AQ. 150ppm. 16+ “ 
+Date: Jul 04, 2023 || User: 86207 || Instance: Thanks again for your reply today. When is ur visa coming in. And r u still buying the gucci and bags. My sister things are not easy, uncle john also has his own bills so i really need to think about how to make my own money. Later sha. 
+Date: Jul 22, 2024 || User: 90458 || Instance: Hello. Damn this christmas thing. I think i have decided to keep this mp3 that doesnt work. 
+Date: Aug 07, 2023 || User: 50090 || Instance: Get 3 Lions England tone, reply lionm 4 mono or lionp 4 poly. 4 more go 2 www.ringtones.co.uk, the original n best. Tones 3GBP network operator rates apply. 
+Date: Oct 18, 2022 || User: 20058 || Instance: PRIVATE! Your 2003 Account Statement for 078 
+Date: May 11, 2022 || User: 50090 || Instance: **FREE MESSAGE**Thanks for using the Auction Subscription Service. 18 . 150p/MSGRCVD 2 Skip an Auction txt OUT. 2 Unsubscribe txt STOP CustomerCare 08718726270 
+Date: Jan 03, 2024 || User: 90458 || Instance: U have a Secret Admirer who is looking 2 make contact with U-find out who they R*reveal who thinks UR so special-call on 09065171142-stopsms-08718727870150ppm 
+Date: Jan 14, 2025 || User: 90458 || Instance: URGENT! Your Mobile number has been awarded a <UKP>2000 prize GUARANTEED. Call 09061790125 from landline. Claim 3030. Valid 12hrs only 150ppm 
+Date: Jan 28, 2024 || User: 25748 || Instance: TheMob>Hit the link to get a premium Pink Panther game, the new no. 1 from Sugababes, a crazy Zebra animation or a badass Hoody wallpaper-all 4 FREE! 
+Date: Oct 03, 2024 || User: 90458 || Instance: Congratulations ur awarded either £500 of CD gift vouchers & Free entry 2 our £100 weekly draw txt MUSIC to 87066 TnCs www.Ldew.com1win150ppmx3age16 
+Date: Jul 20, 2022 || User: 20058 || Instance: That is wondar full flim. 
+Date: Aug 03, 2024 || User: 51810 || Instance: Do you think i can move  &lt;#&gt;  in a week 
+Date: Nov 28, 2024 || User: 90458 || Instance: Yes fine  
+Date: Aug 02, 2022 || User: 90458 || Instance: 3 FREE TAROT TEXTS! Find out about your love life now! TRY 3 FOR FREE! Text CHANCE to 85555 16 only! After 3 Free, Msgs £1.50 each 
+Date: Jul 15, 2022 || User: 68179 || Instance: PRIVATE! Your 2003 Account Statement for shows 800 un-redeemed S. I. M. points. Call 08718738002 Identifier Code: 48922 Expires 21/11/04 
+Date: Jul 01, 2024 || User: 68179 || Instance: No. Thank you. You've been wonderful 
+Date: May 26, 2025 || User: 51810 || Instance: 08714712388 between 10am-7pm Cost 10p 
+Date: Mar 10, 2022 || User: 90458 || Instance: Dear Dave this is your final notice to collect your 4* Tenerife Holiday or #5000 CASH award! Call 09061743806 from landline. TCs SAE Box326 CW25WX 150ppm 
+Date: Aug 09, 2024 || User: 20058 || Instance: Babe, have you got enough money to pick up bread and milk ? And I'll give you it back when you get home ? 
+Recall: the preceding lines contain 61 text messages, one per line. Each text message can be classified as spam or ham (i.e., not spam).
+
+You will be asked to answer questions about the aggregate label statistics across all 61 examples in this dataset. Do not try to guess, estimate, or approximate the result. Calculate the exact answer given these datapoints.
+
+
+[END OOLONG CONTEXT]
+
+[BEGIN OOLONG QUESTION]
+In the above data, how many data points should be classified as label 'spam'? Give your final answer in the form 'Answer: number'.
+[END OOLONG QUESTION]

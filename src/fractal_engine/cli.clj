@@ -98,10 +98,16 @@
   (when (contains? result :final-value)
     (println "Final:" (pr-str (:final-value result)))))
 
+(defn question-text [opts default-text]
+  (cond
+    (:question-file opts) (slurp (:question-file opts))
+    (:question opts) (:question opts)
+    :else default-text))
+
 (defn run-command [opts]
   (let [cfg (cfg-from-opts opts)
         s (session/start-session! cfg (session-start-opts cfg opts))
-        result (session/run-turn! s (or (:question opts) "Return a compact final value."))]
+        result (session/run-turn! s (question-text opts "Return a compact final value."))]
     (session/stop-session! s)
     (print-result result)))
 
@@ -146,7 +152,7 @@
     (chat-command opts)
     (print-result (resume/resume! (cfg-from-opts opts)
                                   (:dir opts)
-                                  (or (:question opts) "Continue and call FINAL.")
+                                  (question-text opts "Continue and call FINAL.")
                                   (cond-> {}
                                     (:turn opts) (assoc :turn (parse-long-opt (:turn opts)))
                                     (:session opts) (assoc :id (:session opts))
@@ -161,10 +167,10 @@
 
 (defn usage []
   (println "fractal-engine commands:")
-  (println "  run --question TEXT [--session ID] [--runs-dir DIR] [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
+  (println "  run --question TEXT|--question-file PATH [--session ID] [--runs-dir DIR] [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
   (println "  chat [--session ID] [--runs-dir DIR] [--dir runs/session-id] [--fake-script multi-turn-chat]  # /send submits a message")
   (println "  inspect --dir runs/session-id [--tree --snapshots --handles --json]")
-  (println "  resume --dir runs/session-id --question TEXT [--turn N] [--session session-id] [--fake-script resume-use]")
+  (println "  resume --dir runs/session-id --question TEXT|--question-file PATH [--turn N] [--session session-id] [--fake-script resume-use]")
   (println "  fork --dir runs/session-id --new-dir runs/session-fork --question TEXT [--turn N]")
   (println)
   (println "The default provider is the offline scripted provider. Live providers use clojure-llm-sdk."))

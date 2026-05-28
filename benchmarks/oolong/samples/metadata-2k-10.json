@@ -1,0 +1,122 @@
+[
+  {
+    "name": "spam-2k-row-50",
+    "row_idx": 50,
+    "id": 111010003,
+    "context_len": 2048,
+    "task": "TASK_TYPE.MOST_FREQ",
+    "answer": "['ham']",
+    "answer_type": "ANSWER_TYPE.LABEL",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-50.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-50.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-51",
+    "row_idx": 51,
+    "id": 111010004,
+    "context_len": 2048,
+    "task": "TASK_TYPE.LEAST_FREQ",
+    "answer": "['spam']",
+    "answer_type": "ANSWER_TYPE.LABEL",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-51.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-51.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-52",
+    "row_idx": 52,
+    "id": 111010005,
+    "context_len": 2048,
+    "task": "TASK_TYPE.RELATIVE_FREQ",
+    "answer": "['less common than']",
+    "answer_type": "ANSWER_TYPE.COMPARISON",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-52.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-52.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-53",
+    "row_idx": 53,
+    "id": 111010006,
+    "context_len": 2048,
+    "task": "TASK_TYPE.NUMERIC_ONE_CLASS",
+    "answer": "[12]",
+    "answer_type": "ANSWER_TYPE.NUMERIC",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-53.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-53.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-54",
+    "row_idx": 54,
+    "id": 111010007,
+    "context_len": 2048,
+    "task": "TASK_TYPE.NUMERIC_ONE_CLASS",
+    "answer": "[15]",
+    "answer_type": "ANSWER_TYPE.NUMERIC",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-54.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-54.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-55",
+    "row_idx": 55,
+    "id": 111010008,
+    "context_len": 2048,
+    "task": "TASK_TYPE.MOST_FREQ",
+    "answer": "[23356]",
+    "answer_type": "ANSWER_TYPE.USER",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-55.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-55.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-56",
+    "row_idx": 56,
+    "id": 111010009,
+    "context_len": 2048,
+    "task": "TASK_TYPE.SECOND_MOST_FREQ",
+    "answer": "[26273]",
+    "answer_type": "ANSWER_TYPE.USER",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-56.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-56.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-57",
+    "row_idx": 57,
+    "id": 111010010,
+    "context_len": 2048,
+    "task": "TASK_TYPE.MOST_FREQ",
+    "answer": "['ham']",
+    "answer_type": "ANSWER_TYPE.LABEL",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-57.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-57.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-58",
+    "row_idx": 58,
+    "id": 111010011,
+    "context_len": 2048,
+    "task": "TASK_TYPE.LEAST_FREQ",
+    "answer": "['ham']",
+    "answer_type": "ANSWER_TYPE.LABEL",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-58.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-58.row.json",
+    "context_chars": 4457
+  },
+  {
+    "name": "spam-2k-row-59",
+    "row_idx": 59,
+    "id": 111010012,
+    "context_len": 2048,
+    "task": "TASK_TYPE.NUMERIC_ONE_CLASS",
+    "answer": "[1]",
+    "answer_type": "ANSWER_TYPE.NUMERIC",
+    "prompt_path": "benchmarks/oolong/samples/spam-2k-row-59.prompt.txt",
+    "row_path": "benchmarks/oolong/samples/spam-2k-row-59.row.json",
+    "context_chars": 4457
+  }
+]

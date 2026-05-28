@@ -29,30 +29,38 @@
   (doseq [forbidden ["product" "storage" "workflow"]]
     (is (not (clojure.string/includes? (clojure.string/lower-case prompt/system-prompt) forbidden))))
   (is (clojure.string/includes? prompt/system-prompt "observations"))
+  (is (clojure.string/includes? prompt/system-prompt "Do not use provider tool calls or function calls"))
   (is (clojure.string/includes? prompt/system-prompt "Call FINAL only after enough observations have been inspected"))
-  (is (clojure.string/includes? prompt/system-prompt "Use map-lm when the same semantic operation applies independently"))
-  (is (clojure.string/includes? prompt/system-prompt "Use map-rlm when several independent lanes can run in parallel"))
+  (is (clojure.string/includes? prompt/system-prompt "Split by evidence type and uncertainty surface"))
+  (is (clojure.string/includes? prompt/system-prompt "If many bounded values need the same language-understanding operation"))
+  (is (clojure.string/includes? prompt/system-prompt "If several independent subproblems each need an investigator"))
   (is (clojure.string/includes? prompt/system-prompt "up to 50 inputs"))
   (is (clojure.string/includes? prompt/system-prompt "up to 50 tasks"))
-  (is (clojure.string/includes? prompt/system-prompt "Default decomposition posture"))
-  (is (clojure.string/includes? prompt/system-prompt "do not inspect them one by one in the root loop"))
+  (is (clojure.string/includes? prompt/system-prompt "How to choose the next move"))
+  (is (clojure.string/includes? prompt/system-prompt "Bounded material is broader than raw text"))
+  (is (clojure.string/includes? prompt/system-prompt "semantic interpretation instead of manually reading every line"))
+  (is (clojure.string/includes? prompt/system-prompt "A child is an investigator"))
   (is (clojure.string/includes? prompt/system-prompt "Children should use lm and map-lm aggressively"))
+  (is (clojure.string/includes? prompt/system-prompt "Aggregation and exact-answer discipline"))
+  (is (clojure.string/includes? prompt/system-prompt "perform a consistency check in Clojure"))
+  (is (clojure.string/includes? prompt/system-prompt "auditable ledger var"))
   (is (clojure.string/includes? prompt/system-prompt "do not inherit root-local vars"))
   (is (clojure.string/includes? prompt/system-prompt "Bind large values with def"))
   (is (clojure.string/includes? prompt/system-prompt "combined observation"))
-  (is (clojure.string/includes? prompt/system-prompt "Store them in vars"))
-  (is (clojure.string/includes? prompt/system-prompt "A bare expression value is only shown back as an observation"))
+  (is (clojure.string/includes? prompt/system-prompt "Keep durable vars"))
+  (is (clojure.string/includes? prompt/system-prompt "A bare expression value is only an observation"))
   (doseq [example ["- lm:" "- map-lm:" "- rlm:" "- map-rlm:"]]
     (is (clojure.string/includes? prompt/system-prompt example)))
   (is (clojure.string/includes? prompt/child-prompt "Child session boundary"))
   (is (clojure.string/includes? prompt/child-prompt "do not inherit parent REPL vars"))
   (is (clojure.string/includes? prompt/child-prompt "Do not solve the parent task globally"))
+  (is (clojure.string/includes? prompt/child-prompt "keep a ledger var"))
   (is (clojure.string/includes? prompt/child-prompt "A bare EDN map/vector/string is only an observation"))
   (is (clojure.string/includes? prompt/child-prompt "final-step warning"))
   (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
   (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
   (is (clojure.string/includes? prompt/system-prompt "restoring its last completed turn snapshot"))
-  (is (= 8 (:prompt/version prompt/prompt-metadata))))
+  (is (= 10 (:prompt/version prompt/prompt-metadata))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -129,6 +137,16 @@
   (is (= "unterminated but real"
          (with-in-str "unterminated but real\n"
            (cli/read-chat-message)))))
+
+(deftest cli-question-file-wins-over-inline-question
+  (let [dir (tmp-dir "question-file")
+        file (str (artifacts/path dir "question.txt"))]
+    (spit file "from file")
+    (is (= "from file" (cli/question-text {:question "inline"
+                                           :question-file file}
+                                          "default")))
+    (is (= "inline" (cli/question-text {:question "inline"} "default")))
+    (is (= "default" (cli/question-text {} "default")))))
 
 (deftest simple-final-loop
   (let [dir (tmp-dir "simple")
