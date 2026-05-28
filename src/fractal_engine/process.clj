@@ -7,10 +7,11 @@
             [fractal-engine.prompt :as prompt]
             [fractal-engine.provider :as provider]
             [fractal-engine.runtime :as runtime]
+            [fractal-engine.snapshot :as snapshot]
             [fractal-engine.time :as time])
   (:import [java.util.concurrent Callable Executors ThreadFactory TimeUnit]))
 
-(declare run-process!)
+(declare run-process! run-turn-on-state! child-root-config)
 
 (defn config
   ([] (config {}))
@@ -156,6 +157,62 @@
        "Assigned child task:\n"
        (if (string? task) task (pr-str task))))
 
+(defn attached-child-id [n]
+  (format "attached-%04d" (long n)))
+
+(defn restore-state-from-snapshot!
+  [state source-dir ns-sym snapshot-row snapshot-blob lineage-kind lineage-parents source-fingerprint]
+  (let [source-dir (artifacts/path source-dir)
+        message-through-id (:snapshot/message-through-id snapshot-row)
+        source-session-id (snapshot/source-session-id source-dir)
+        messages (snapshot/messages-through source-dir message-through-id)
+        max-message-id (apply max 0 (map :message/id messages))
+        source-turn-id (:snapshot/turn-id snapshot-row)
+        started-at (time/now-str)
+        restore-result (snapshot/restore-vars! source-dir ns-sym snapshot-blob)
+        ended-at (time/now-str)
+        restore-report {:restore/version 1
+                        :restore/strategy :snapshot-vars
+                        :restore/source (str source-dir)
+                        :restore/source-turn-id source-turn-id
+                        :restore/source-snapshot-id (:snapshot/id snapshot-row)
+                        :restore/status (if (seq (:skipped-vars restore-result)) :partial :ok)
+                        :restore/started-at started-at
+                        :restore/ended-at ended-at
+                        :restore/restored-vars (:restored-count restore-result)
+                        :restore/unrestorable-vars (:skipped-vars restore-result)
+                        :restore/missing-vars (filterv #(= :missing-value (:reason %))
+                                                       (:skipped-vars restore-result))
+                        :restore/current-ns (str ns-sym)
+                        :restore/error nil}
+        lineage {:lineage/version 1
+                 :lineage/session-id (get-in @state [:session :session/id])
+                 :lineage/kind lineage-kind
+                 :lineage/source {:source/path (str source-dir)
+                                  :source/session-id source-session-id
+                                  :source/fingerprint source-fingerprint
+                                  :source/turn-id source-turn-id
+                                  :source/snapshot-id (:snapshot/id snapshot-row)}
+                 :lineage/parents lineage-parents
+                 :lineage/created-at ended-at}]
+    (swap! state assoc :messages messages)
+    (swap! state update :counters merge {:message max-message-id
+                                         :turn (long source-turn-id)})
+    (swap! state update :session assoc
+           :session/restored-from (:lineage/source lineage)
+           :session/lineage-kind lineage-kind
+           :session/latest-turn-id source-turn-id)
+    (snapshot/write-restore-report! (:dir @state) restore-report)
+    (snapshot/write-lineage! (:dir @state) lineage)
+    (artifacts/add-event! state {:event/type :restore-end
+                                 :restore/strategy :snapshot-vars
+                                 :restore/status (:restore/status restore-report)
+                                 :snapshot/id (:snapshot/id snapshot-row)
+                                 :turn/id source-turn-id})
+    (artifacts/flush! state)
+    {:restore-report restore-report
+     :lineage lineage}))
+
 (defn make-ops [state cfg ns-sym]
   (letfn [(leaf-call [call-type input query mode extra]
             (let [call (merge {:call/type call-type
@@ -255,6 +312,118 @@
                                             :call/error err
                                             :call/ended-at (time/now-str))
                     (throw (ex-info "Child process failed" err t)))))))
+          (attach-call [source-path task opts]
+            (let [source-dir (artifacts/path source-path)
+                  source-fingerprint (snapshot/session-fingerprint source-dir)
+                  snapshot-row (try
+                                 (snapshot/require-snapshot source-dir opts)
+                                 (catch Throwable t
+                                   (throw (ex-info "Attach source has no completed turn snapshot"
+                                                   {:error/type :attach/snapshot-not-found
+                                                    :error/data (ex-data t)
+                                                    :source/path (str source-dir)}
+                                                   t))))
+                  snapshot-blob (try
+                                  (snapshot/require-snapshot-blob source-dir snapshot-row)
+                                  (catch Throwable t
+                                    (throw (ex-info "Attach snapshot restore failed"
+                                                    {:error/type :attach/restore-failed
+                                                     :error/data (ex-data t)
+                                                     :source/path (str source-dir)
+                                                     :snapshot/id (:snapshot/id snapshot-row)}
+                                                    t))))
+                  child-num (artifacts/next-counter! state :child)
+                  cid (attached-child-id child-num)
+                  child-rel (str "children/" cid)
+                  child-dir (artifacts/path (:dir @state) child-rel)
+                  parent-cache-id (session-cache-id state)
+                  child-cache-id (str parent-cache-id "/" child-rel)
+                  call-row (artifacts/add-call! state {:call/type :attached-child
+                                                       :call/turn-id runtime/*current-turn-id*
+                                                       :edge/type :attached
+                                                       :call/parent-eval-id runtime/*current-eval-id*
+                                                       :attach/source-path (str source-dir)
+                                                       :attach/source-fingerprint source-fingerprint
+                                                       :attach/source-turn-id (:snapshot/turn-id snapshot-row)
+                                                       :attach/source-snapshot-id (:snapshot/id snapshot-row)
+                                                       :child/session-id cid
+                                                       :child/cache-id child-cache-id
+                                                       :child/dir child-rel})
+                  parent {:parent/session-id (:session/id (:session @state))
+                          :parent/cache-id parent-cache-id
+                          :parent/call-id (:call/id call-row)
+                          :parent/eval-id runtime/*current-eval-id*
+                          :parent/relative-dir ".."}
+                  child-state (artifacts/new-state! {:dir child-dir
+                                                     :id cid
+                                                     :cache-id child-cache-id
+                                                     :kind :child
+                                                     :provider (provider-shape (child-root-config cfg :child))
+                                                     :parent parent})
+                  child-ns (runtime/session-ns-symbol cid)
+                  child-cfg (child-root-config cfg :child)
+                  child-ops (make-ops child-state child-cfg child-ns)]
+              (try
+                (artifacts/add-event! state {:event/type :attach-rlm-start
+                                             :call/id (:call/id call-row)
+                                             :snapshot/id (:snapshot/id snapshot-row)})
+                (runtime/ensure-ns! child-ns child-ops)
+                (restore-state-from-snapshot!
+                 child-state
+                 source-dir
+                 child-ns
+                 snapshot-row
+                 snapshot-blob
+                 :attached-child
+                 [{:parent/kind :child-of
+                   :parent/path (str (:dir @state))
+                   :parent/call-id (:call/id call-row)
+                   :parent/eval-id runtime/*current-eval-id*}
+                  {:parent/kind :attached-from
+                   :parent/path (str source-dir)
+                   :parent/turn-id (:snapshot/turn-id snapshot-row)
+                   :parent/snapshot-id (:snapshot/id snapshot-row)}]
+                 source-fingerprint)
+                (let [result (run-turn-on-state! child-state child-cfg child-ns task)
+                      value (:final-value result)]
+                  (artifacts/update-status! child-state (if (= :error (:status result)) :error :stopped))
+                  (artifacts/add-event! child-state {:event/type :session-stopped
+                                                     :session/id (:session/id (:session @child-state))})
+                  (artifacts/update-call! state (:call/id call-row) assoc
+                                          :call/status (:status result)
+                                          :call/final-ref (artifacts/value-ref! (:dir @state) value)
+                                          :call/error (:error result)
+                                          :call/ended-at (time/now-str))
+                  (artifacts/add-event! state {:event/type :attach-rlm-end
+                                               :call/id (:call/id call-row)
+                                               :call/status (:status result)})
+                  (cond
+                    (= :error (:status result))
+                    (throw (ex-info "Attached child returned error"
+                                    {:error/type :attach/child-error
+                                     :error/data (:error result)
+                                     :child/session-id cid
+                                     :child/dir child-rel}))
+                    (not (contains? result :final-value))
+                    (throw (ex-info "Attached child did not return FINAL"
+                                    {:error/type :attach/no-final
+                                     :child/session-id cid
+                                     :child/dir child-rel}))
+                    :else value))
+                (catch Throwable t
+                  (let [err (merge {:error/type :attach/child-error
+                                    :error/message (.getMessage t)
+                                    :child/session-id cid
+                                    :child/dir child-rel}
+                                   (select-keys (ex-data t) [:error/type :error/data]))]
+                    (artifacts/update-call! state (:call/id call-row) assoc
+                                            :call/status :error
+                                            :call/error err
+                                            :call/ended-at (time/now-str))
+                    (artifacts/add-event! state {:event/type :attach-rlm-error
+                                                 :call/id (:call/id call-row)
+                                                 :error err})
+                    (throw (ex-info "Attach RLM failed" err t)))))))
           (rlm [task]
             (child-call :child task {}))
           (map-rlm
@@ -282,8 +451,11 @@
                  (mapv :value (sort-by :index results))
                  (throw (ex-info "Child batch failed"
                                  {:error/type :fractal/child-batch-failed
-                                  :results (vec (sort-by :index results))}))))))]
-    {:lm lm :map-lm map-lm :rlm rlm :map-rlm map-rlm}))
+                                  :results (vec (sort-by :index results))}))))))
+          (attach-rlm
+            ([path task] (attach-rlm path task {}))
+            ([path task opts] (attach-call path task opts)))]
+    {:lm lm :map-lm map-lm :rlm rlm :map-rlm map-rlm :attach-rlm attach-rlm}))
 
 (defn add-observation! [state turn-id content]
   (let [message (artifacts/add-message! state :observation content turn-id)]
@@ -317,12 +489,14 @@
                              :eval/code code
                              :eval/started-at (:eval/started-at result started)}))
                 rows' (conj rows row)]
-            (artifacts/add-snapshot! state (runtime/snapshot-vars state ns-sym))
             (if (= :final (:eval/status result))
               (do
                 (artifacts/mark-final! state (:eval/raw-final-value result))
                 (add-observation! state turn-id (runtime/observation rows'))
-                {:status :final :value (:eval/raw-final-value result) :final-ref final-ref})
+                {:status :final
+                 :value (:eval/raw-final-value result)
+                 :final-ref final-ref
+                 :eval-row row})
               (if (= :error (:eval/status result))
                 (do
                   (add-observation! state turn-id (runtime/observation rows'))
@@ -394,6 +568,10 @@
                                       :turn/final-preview (artifacts/project-value (:value step))
                                       :turn/usage usage)
               (artifacts/add-event! state {:event/type :turn-final :turn/id turn-id})
+              (snapshot/write-turn-snapshot! state
+                                             ns-sym
+                                             (artifacts/current-turn state turn-id)
+                                             (:eval-row step))
               (artifacts/flush! state)
               {:status :final
                :final-value (:value step)

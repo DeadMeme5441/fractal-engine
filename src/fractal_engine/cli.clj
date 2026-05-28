@@ -11,8 +11,14 @@
       m
       (let [[k v & more] xs]
         (if (str/starts-with? k "--")
-          (recur more (assoc m (keyword (subs k 2)) v))
+          (if (or (nil? v) (str/starts-with? v "--"))
+            (recur (rest xs) (assoc m (keyword (subs k 2)) true))
+            (recur more (assoc m (keyword (subs k 2)) v)))
           (recur (rest xs) m))))))
+
+(defn parse-long-opt [v]
+  (when (and v (not= true v))
+    (Long/parseLong (str v))))
 
 (defn script-for [name]
   (case name
@@ -30,6 +36,8 @@
                "```clojure\n(FINAL 2)\n```"]
     "resume-setup" ["```clojure\n(def saved 99)\n(FINAL {:saved saved})\n```"]
     "resume-use" ["```clojure\n(FINAL {:restored saved})\n```"]
+    "fake-source" ["```clojure\n(def x 42)\n(FINAL {:x x})\n```"]
+    "fake-resume" ["```clojure\n(FINAL {:resumed x :plus-one (inc x)})\n```"]
     "multi-turn-chat" ["```clojure\n(def x 42)\n(FINAL {:saved x})\n```"
                        "```clojure\n(FINAL {:restored x})\n```"]
     ["```clojure\n(FINAL :ok)\n```"]))
@@ -126,18 +134,28 @@
 (defn resume-command [opts]
   (if (:chat opts)
     (chat-command opts)
-    (print-result (resume/resume! (cfg-from-opts opts) (:dir opts) (or (:question opts) "Continue and call FINAL.")))))
+    (print-result (resume/resume! (cfg-from-opts opts)
+                                  (:dir opts)
+                                  (or (:question opts) "Continue and call FINAL.")
+                                  (cond-> {}
+                                    (:turn opts) (assoc :turn (parse-long-opt (:turn opts)))
+                                    (:session opts) (assoc :id (:session opts))
+                                    (:new-dir opts) (assoc :dir (:new-dir opts)))))))
 
 (defn inspect-command [opts]
-  (print (inspect/summary-string (:dir opts))))
+  (if (:json opts)
+    (do (prn (inspect/structured (:dir opts) {:tree (:tree opts)
+                                              :snapshots (:snapshots opts)
+                                              :handles (:handles opts)})))
+    (print (inspect/summary-string (:dir opts) opts))))
 
 (defn usage []
   (println "fractal-engine commands:")
   (println "  run --question TEXT [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
   (println "  chat [--dir runs/session-id] [--fake-script multi-turn-chat]  # /send submits a message")
-  (println "  inspect --dir runs/session-id")
-  (println "  resume --dir runs/session-id --question TEXT [--fake-script resume-use]")
-  (println "  fork --dir runs/session-id --new-dir runs/session-fork --question TEXT")
+  (println "  inspect --dir runs/session-id [--tree --snapshots --handles --json]")
+  (println "  resume --dir runs/session-id --question TEXT [--turn N] [--session session-id] [--fake-script resume-use]")
+  (println "  fork --dir runs/session-id --new-dir runs/session-fork --question TEXT [--turn N]")
   (println)
   (println "The default provider is the offline scripted provider. Live providers use clojure-llm-sdk."))
 
@@ -149,5 +167,10 @@
       "chat" (chat-command opts)
       "inspect" (inspect-command opts)
       "resume" (resume-command opts)
-      "fork" (print-result (resume/fork! (cfg-from-opts opts) (:dir opts) (:new-dir opts) (or (:question opts) "Continue.")))
+      "fork" (print-result (resume/fork! (cfg-from-opts opts)
+                                         (:dir opts)
+                                         (:new-dir opts)
+                                         (or (:question opts) "Continue.")
+                                         (cond-> {}
+                                           (:turn opts) (assoc :turn (parse-long-opt (:turn opts))))))
       (usage))))

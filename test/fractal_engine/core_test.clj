@@ -3,12 +3,14 @@
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
             [fractal-engine.cli :as cli]
+            [fractal-engine.inspect :as inspect]
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.provider :as provider]
             [fractal-engine.runtime :as runtime]
             [fractal-engine.resume :as resume]
             [fractal-engine.session :as session]
+            [fractal-engine.snapshot :as snapshot]
             [llm.sdk.http :as sdk-http]))
 
 (defn tmp-dir [name]
@@ -21,7 +23,7 @@
   (process/config {:scripted/responses (atom (vec responses))}))
 
 (deftest prompt-contract
-  (doseq [sym ["FINAL" "lm" "map-lm" "rlm" "map-rlm"]]
+  (doseq [sym ["FINAL" "lm" "map-lm" "rlm" "map-rlm" "attach-rlm"]]
     (is (clojure.string/includes? prompt/system-prompt sym)))
   (is (not (clojure.string/includes? prompt/system-prompt "context")))
   (doseq [forbidden ["product" "storage" "workflow"]]
@@ -44,7 +46,8 @@
   (is (clojure.string/includes? prompt/child-prompt "A bare EDN map/vector/string is only an observation"))
   (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
   (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
-  (is (= 6 (:prompt/version prompt/prompt-metadata))))
+  (is (clojure.string/includes? prompt/system-prompt "restoring its last completed turn snapshot"))
+  (is (= 7 (:prompt/version prompt/prompt-metadata))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -554,12 +557,21 @@
                                     {:dir dir :id "root"})
           _ (session/run-turn! s "save")
           _ (session/stop-session! s)
+          source-fingerprint (snapshot/session-fingerprint dir)
           result (resume/resume! (scripted-cfg ["```clojure\n(FINAL {:restored saved})\n```"])
                                  dir
                                  "restore")
-          turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])]
+          resume-dir (str (:dir result))
+          source-turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])
+          resume-turns (artifacts/read-edn-file (artifacts/path resume-dir "turns.edn") [])
+          restore-report (artifacts/read-edn-file (artifacts/path resume-dir "restore.edn") {})
+          lineage (artifacts/read-edn-file (artifacts/path resume-dir "lineage.edn") {})]
       (is (= {:restored 99} (:final-value result)))
-      (is (= 2 (count turns)))))
+      (is (= 1 (count source-turns)))
+      (is (= 1 (count resume-turns)))
+      (is (= :snapshot-vars (:restore/strategy restore-report)))
+      (is (= :resume (:lineage/kind lineage)))
+      (is (= source-fingerprint (snapshot/session-fingerprint dir)))))
   (testing "fork creates an independent live session with restored vars"
     (let [dir (tmp-dir "fork-source")
           fork-dir (tmp-dir "fork-target")
@@ -591,14 +603,160 @@
     (is (= {:ok 1} (get-in result [:final-value :results 0 :value])))
     (is (= false (get-in result [:final-value :results 1 :ok])))))
 
-(deftest snapshot-keeps-large-vars-inline-and-marks-unresumable
+(deftest turn-final-snapshots-capture-vars-and_refs
   (let [dir (tmp-dir "snapshot")
         result (process/run-process!
-                (scripted-cfg ["```clojure\n(def big (vec (range 5000)))\n(def proc (Object.))\n(FINAL :done)\n```"])
+                (scripted-cfg ["```clojure\n(def small {:a 1})\n(def big (vec (range 5000)))\n(def f (fn [x] x))\n(def proc (Object.))\n(FINAL :done)\n```"])
                 {:dir dir :id "root" :kind :root :task "snapshot"})
         snapshots (artifacts/read-edn-file (artifacts/path dir "snapshots.edn") [])
-        last-snapshot (last snapshots)]
+        last-snapshot (last snapshots)
+        blob (snapshot/read-snapshot-blob dir last-snapshot)
+        vars-by-name (zipmap (map :var/name (:snapshot/vars blob))
+                             (:snapshot/vars blob))]
     (is (= :done (:final-value result)))
-    (is (= :inline (get-in last-snapshot [:snapshot/vars 'big :value/kind])))
-    (is (= 5000 (count (get-in last-snapshot [:snapshot/vars 'big :value]))))
-    (is (= :not-edn (get-in last-snapshot [:snapshot/unresumable 'proc :reason])))))
+    (is (= 1 (count snapshots)))
+    (is (= :turn-final (:snapshot/kind last-snapshot)))
+    (is (= 1 (:snapshot/turn-id last-snapshot)))
+    (is (= :blob (get-in last-snapshot [:snapshot/ref :value/kind])))
+    (is (.exists (java.io.File. dir "blobs/snapshots/turn-0001.edn")))
+    (is (= :inline (get-in vars-by-name ["small" :var/value-ref :value/kind])))
+    (is (= :blob (get-in vars-by-name ["big" :var/value-ref :value/kind])))
+    (is (= 5000 (count (artifacts/read-ref dir (get-in vars-by-name ["big" :var/value-ref])))))
+    (is (= :function (get-in vars-by-name ["f" :var/reason])))
+    (is (= :not-data (get-in vars-by-name ["proc" :var/reason])))
+    (is (nil? (get vars-by-name "FINAL")))
+    (is (nil? (get vars-by-name "lm")))
+    (is (nil? (get vars-by-name "attach-rlm")))))
+
+(deftest snapshot-selection-and-missing-snapshot-errors
+  (let [dir (tmp-dir "snapshot-select")
+        s (session/start-session!
+           (scripted-cfg ["```clojure\n(def x 1)\n(FINAL x)\n```"
+                          "```clojure\n(def x 2)\n(FINAL x)\n```"])
+           {:dir dir :id "root"})
+        _ (session/run-turn! s "one")
+        _ (session/run-turn! s "two")
+        resumed (session/resume-session!
+                 (scripted-cfg ["```clojure\n(FINAL {:selected x})\n```"])
+                 dir
+                 {:turn 1})
+        selected (session/run-turn! resumed "selected")
+        default-resumed (session/resume-session!
+                         (scripted-cfg ["```clojure\n(FINAL {:latest x})\n```"])
+                         dir)
+        latest (session/run-turn! default-resumed "latest")]
+    (is (= 2 (:snapshot/turn-id (snapshot/latest-turn-snapshot dir))))
+    (is (= 1 (:snapshot/turn-id (snapshot/snapshot-for-turn dir 1))))
+    (is (= {:selected 1} (:final-value selected)))
+    (is (= {:latest 2} (:final-value latest))))
+  (let [empty-dir (tmp-dir "no-snapshot")]
+    (session/start-session! (scripted-cfg []) {:dir empty-dir :id "empty"})
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"No completed turn snapshot"
+                          (session/resume-session! (scripted-cfg []) empty-dir)))))
+
+(deftest resume-restores-vars-and_messages_without_replay
+  (let [dir (tmp-dir "resume-snapshot")
+        calls (atom 0)
+        cfg (process/config
+             {:scripted/response-fn
+              (fn [request]
+                (swap! calls inc)
+                (let [content (:message/content (last (:request/messages request)))]
+                  (cond
+                    (clojure.string/includes? content "source expensive")
+                    "```clojure\n(def expensive (lm \"input\" \"query\"))\n(FINAL {:done true})\n```"
+                    (clojure.string/includes? content "query")
+                    "expensive-value"
+                    :else
+                    "```clojure\n(FINAL {:expensive expensive})\n```")))})
+        source (session/start-session! cfg {:dir dir :id "root"})
+        _ (session/run-turn! source "source expensive")
+        source-call-count @calls
+        source-fingerprint (snapshot/session-fingerprint dir)
+        resumed (session/resume-session! cfg dir)
+        restore-call-count @calls
+        result (session/run-turn! resumed "use restored")
+        resume-dir (str (:dir resumed))
+        messages (artifacts/read-edn-file (artifacts/path resume-dir "messages.edn") [])
+        restore-report (artifacts/read-edn-file (artifacts/path resume-dir "restore.edn") {})]
+    (is (= 2 source-call-count))
+    (is (= source-call-count restore-call-count))
+    (is (= {:expensive "expensive-value"} (:final-value result)))
+    (is (= :snapshot-vars (:restore/strategy restore-report)))
+    (is (= [1 2 3 4] (mapv :message/id (take 4 messages))))
+    (is (= source-fingerprint (snapshot/session-fingerprint dir)))))
+
+(deftest fork-writes-lineage-and-restores-vars
+  (let [dir (tmp-dir "fork-source")
+        fork-dir (tmp-dir "fork-derived")
+        s (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\n(FINAL {:x x})\n```"])
+                                  {:dir dir :id "root"})
+        _ (session/run-turn! s "save")
+        forked (session/fork-session! (scripted-cfg ["```clojure\n(FINAL {:forked x})\n```"])
+                                      dir
+                                      fork-dir)
+        result (session/run-turn! forked "fork")
+        lineage (artifacts/read-edn-file (artifacts/path fork-dir "lineage.edn") {})]
+    (is (= {:forked 42} (:final-value result)))
+    (is (= :fork (:lineage/kind lineage)))
+    (is (= 1 (get-in lineage [:lineage/source :source/turn-id])))
+    (is (= 1 (get-in lineage [:lineage/source :source/snapshot-id])))))
+
+(deftest attach-rlm-restores_source_child_without_replay
+  (let [source-dir (tmp-dir "attach-source")
+        source (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\n(FINAL {:x x})\n```"])
+                                       {:dir source-dir :id "source"})
+        _ (session/run-turn! source "save x")
+        source-fingerprint (snapshot/session-fingerprint source-dir)
+        parent-dir (tmp-dir "attach-parent")
+        provider-calls (atom 0)
+        cfg (process/config
+             {:scripted/response-fn
+              (fn [request]
+                (swap! provider-calls inc)
+                (let [content (:message/content (last (:request/messages request)))]
+                  (cond
+                    (clojure.string/includes? content "attach source")
+                    (str "```clojure\n"
+                         "(def child (attach-rlm " (pr-str source-dir)
+                         " \"return child-x\"))\n"
+                         "(FINAL {:child child})\n"
+                         "```")
+                    (clojure.string/includes? content "return child-x")
+                    "```clojure\n(FINAL {:child-x x})\n```"
+                    :else
+                    "```clojure\n(FINAL :unexpected)\n```")))})
+        result (process/run-process! cfg {:dir parent-dir :id "parent" :kind :root :task "attach source"})
+        child-dir (artifacts/path parent-dir "children/attached-0001")
+        child-restore (artifacts/read-edn-file (artifacts/path child-dir "restore.edn") {})
+        child-lineage (artifacts/read-edn-file (artifacts/path child-dir "lineage.edn") {})
+        calls (artifacts/read-edn-file (artifacts/path parent-dir "calls.edn") [])]
+    (is (= {:child {:child-x 42}} (:final-value result)))
+    (is (.exists (java.io.File. (str child-dir) "session.edn")))
+    (is (= :snapshot-vars (:restore/strategy child-restore)))
+    (is (= :attached-child (:lineage/kind child-lineage)))
+    (is (= 1 (get-in child-lineage [:lineage/source :source/turn-id])))
+    (is (= 1 (get-in child-lineage [:lineage/source :source/snapshot-id])))
+    (is (some #(= :attached-child (:call/type %)) calls))
+    (is (= 2 @provider-calls))
+    (is (= source-fingerprint (snapshot/session-fingerprint source-dir)))))
+
+(deftest inspector-shows_snapshots_tree_handles_and_open_problems
+  (let [dir (tmp-dir "inspect")
+        s (session/start-session! (scripted-cfg ["```clojure\n(def x 42)\n(FINAL x)\n```"])
+                                  {:dir dir :id "root"})
+        _ (session/run-turn! s "save")
+        _ (artifacts/new-state! {:dir (artifacts/path dir "children/child-0001")
+                                 :id "child-0001"
+                                 :kind :child
+                                 :provider {}})
+        human (inspect/summary-string dir {:tree true :snapshots true :handles true})
+        structured (inspect/structured dir {:tree true :snapshots true :handles true})]
+    (is (clojure.string/includes? human "snapshots"))
+    (is (clojure.string/includes? human "tree"))
+    (is (clojure.string/includes? human "snapshot:"))
+    (is (seq (:snapshots structured)))
+    (is (seq (get-in structured [:handles :snapshots])))
+    (is (some #(= :no-completed-turn-snapshot (:kind %))
+              (:open-problems structured)))))

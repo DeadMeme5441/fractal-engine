@@ -12,8 +12,8 @@
            [java.util UUID]))
 
 (def artifact-version 1)
-(def surface-version 1)
-(def surface '[FINAL lm map-lm rlm map-rlm])
+(def surface-version 2)
+(def surface '[FINAL lm map-lm rlm map-rlm attach-rlm])
 (defn session-id []
   (str "session-" (UUID/randomUUID)))
 
@@ -52,6 +52,9 @@
                             [StandardCopyOption/REPLACE_EXISTING
                              StandardCopyOption/ATOMIC_MOVE]))
     value))
+
+(defn write-edn! [file value]
+  (atomic-spit! file value))
 
 (defn read-edn-file [file default]
   (let [f (if (instance? Path file)
@@ -105,6 +108,7 @@
 (defn read-ref [dir ref]
   (case (:value/kind ref)
     :inline (:value ref)
+    :blob (read-edn-file (path dir (:path ref)) ::missing)
     ::missing))
 
 (defn value-ref! [dir value]
@@ -112,7 +116,7 @@
 
 (def root-call-types #{:root})
 (def leaf-call-types #{:leaf :leaf-batch-item})
-(def child-call-types #{:child :child-batch-item})
+(def child-call-types #{:child :child-batch-item :attached-child})
 (def provider-call-types (into root-call-types leaf-call-types))
 
 (defn- first-number [m ks]
@@ -231,17 +235,19 @@
         calls (read-edn-file (path child-dir "calls.edn") [])
         evals (read-edn-file (path child-dir "evals.edn") [])
         usage (read-edn-file (path child-dir "usage.edn") nil)
-        final (read-edn-file (path child-dir "final.edn") nil)]
+        final (read-edn-file (path child-dir "final.edn") nil)
+        snapshots (read-edn-file (path child-dir "snapshots.edn") [])]
     {:tree/session-id (:session/id session)
      :tree/status (:session/status session)
      :call/count (count calls)
      :eval/count (count evals)
+     :snapshot/count (count snapshots)
      :tree/usage usage
      :tree/final-preview (:final/value-preview final)
      :tree/children
      (->> calls
           (keep (fn [call]
-                  (when (#{:child :child-batch-item} (:call/type call))
+                  (when (contains? child-call-types (:call/type call))
                     (let [dir (path child-dir (:child/dir call))
                           ct (child-tree dir)]
                       (assoc ct
@@ -259,7 +265,7 @@
    :tree/children
    (->> calls
         (keep (fn [call]
-                (when (#{:child :child-batch-item} (:call/type call))
+                (when (contains? child-call-types (:call/type call))
                   (let [rel (:child/dir call)
                         ct (child-tree (path dir rel))]
                     (assoc ct

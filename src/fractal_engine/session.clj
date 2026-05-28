@@ -3,10 +3,11 @@
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.runtime :as runtime]
+            [fractal-engine.snapshot :as snapshot]
             [fractal-engine.time :as time]))
 
 (defn latest-complete-snapshot [state]
-  (last (filter #(= :complete (:snapshot/status %)) (:snapshots @state))))
+  (last (filter snapshot/completed-turn-snapshot? (:snapshots @state))))
 
 (defn session-handle [state cfg ns-sym ops]
   {:state state
@@ -56,53 +57,67 @@
                                  :session/id (get-in @state [:session :session/id])})
     (:session @state)))
 
-(defn resume-session! [cfg dir]
+(defn- restored-session!
+  [cfg source-dir {:keys [dir id kind cache-id lineage-kind lineage-parents turn parent]}]
   (let [cfg (process/config cfg)
-        state (artifacts/load-state! dir)
-        session-id (get-in @state [:session :session/id])
-        ns-sym (runtime/session-ns-symbol session-id)
-        ops (install! state cfg ns-sym)
-        snapshot (latest-complete-snapshot state)
-        report (when snapshot
-                 (runtime/restore-snapshot! state ns-sym ops snapshot))]
-    (swap! state update :session assoc
-           :session/status :running
-           :session/ended-at nil
-           :session/resumed-from {:resume/dir (str dir)
-                                  :resume/snapshot-id (:snapshot/id snapshot)
-                                  :resume/at (time/now-str)})
-    (artifacts/add-event! state {:event/type :session-resumed
-                                 :session/id session-id
-                                 :resume/report report})
-    (artifacts/flush! state)
-    (session-handle state cfg ns-sym ops)))
-
-(defn fork-session! [cfg old-dir new-dir]
-  (let [cfg (process/config cfg)
-        old (artifacts/load-state! old-dir)
-        snapshot (latest-complete-snapshot old)
-        sid (artifacts/session-id)
-        state (artifacts/new-state! {:dir new-dir
+        source-dir (artifacts/path source-dir)
+        snapshot-row (snapshot/require-snapshot source-dir {:turn turn})
+        snapshot-blob (snapshot/require-snapshot-blob source-dir snapshot-row)
+        source-fingerprint (snapshot/session-fingerprint source-dir)
+        sid (or id (artifacts/session-id))
+        target-dir (or dir (artifacts/path (:runs-dir cfg) sid))
+        kind' (or kind :root)
+        effective-cfg (process/child-root-config cfg kind')
+        state (artifacts/new-state! {:dir target-dir
                                      :id sid
-                                     :kind :root
-                                     :provider (process/provider-shape cfg)
-                                     :forked-from {:fork/source-dir (str old-dir)
-                                                   :fork/snapshot-id (:snapshot/id snapshot)}})
+                                     :cache-id cache-id
+                                     :kind kind'
+                                     :provider (process/provider-shape effective-cfg)
+                                     :parent parent})
         ns-sym (runtime/session-ns-symbol sid)
-        ops (install! state cfg ns-sym)]
-    (swap! state assoc
-           :messages (:messages @old)
-           :turns (:turns @old)
-           :counters (merge (:counters @state)
-                            {:message (apply max 0 (map :message/id (:messages @old)))
-                             :turn (apply max 0 (map :turn/id (:turns @old)))}))
-    (when snapshot
-      (doseq [[sym ref] (:snapshot/vars snapshot)]
-        (let [value (artifacts/read-ref (:dir @old) ref)]
-          (when-not (= ::artifacts/missing value)
-            (intern (the-ns ns-sym) sym value)))))
-    (artifacts/add-event! state {:event/type :session-forked
+        ops (install! state effective-cfg ns-sym)]
+    (process/restore-state-from-snapshot!
+     state
+     source-dir
+     ns-sym
+     snapshot-row
+     snapshot-blob
+     lineage-kind
+     lineage-parents
+     source-fingerprint)
+    (artifacts/add-event! state {:event/type (case lineage-kind
+                                               :fork :session-forked
+                                               :resume :session-resumed
+                                               :session-restored)
                                  :session/id sid
-                                 :fork/source-dir (str old-dir)})
+                                 :restore/strategy :snapshot-vars
+                                 :snapshot/id (:snapshot/id snapshot-row)
+                                 :turn/id (:snapshot/turn-id snapshot-row)})
     (artifacts/flush! state)
-    (session-handle state cfg ns-sym ops)))
+    (session-handle state effective-cfg ns-sym ops)))
+
+(defn resume-session!
+  ([cfg source-dir] (resume-session! cfg source-dir {}))
+  ([cfg source-dir opts]
+   (let [cfg (process/config cfg)
+         sid (or (:id opts) (:session opts) (artifacts/session-id))
+         target-dir (or (:dir opts) (artifacts/path (:runs-dir cfg) sid))]
+     (restored-session! cfg source-dir
+                        (merge opts
+                               {:id sid
+                                :dir target-dir
+                                :kind :root
+                                :lineage-kind :resume
+                                :lineage-parents [{:parent/kind :resumed-from
+                                                   :parent/path (str (artifacts/path source-dir))}]})))))
+
+(defn fork-session!
+  ([cfg old-dir new-dir] (fork-session! cfg old-dir new-dir {}))
+  ([cfg old-dir new-dir opts]
+   (restored-session! cfg old-dir
+                      (merge opts
+                             {:dir new-dir
+                              :kind :root
+                              :lineage-kind :fork
+                              :lineage-parents [{:parent/kind :forked-from
+                                                 :parent/path (str (artifacts/path old-dir))}]}))))

@@ -5,7 +5,7 @@
             [fractal-engine.time :as time])
   (:import [java.io PushbackReader StringReader StringWriter]))
 
-(def special-symbols '#{FINAL lm map-lm rlm map-rlm})
+(def special-symbols '#{FINAL lm map-lm rlm map-rlm attach-rlm})
 (def ^:dynamic *current-eval-id* nil)
 (def ^:dynamic *current-turn-id* nil)
 (def observation-string-limit 4000)
@@ -48,7 +48,8 @@
     (intern *ns* 'lm (:lm ops))
     (intern *ns* 'map-lm (:map-lm ops))
     (intern *ns* 'rlm (:rlm ops))
-    (intern *ns* 'map-rlm (:map-rlm ops)))
+    (intern *ns* 'map-rlm (:map-rlm ops))
+    (intern *ns* 'attach-rlm (:attach-rlm ops)))
   (the-ns ns-sym))
 
 (defn throwable-data [^Throwable t]
