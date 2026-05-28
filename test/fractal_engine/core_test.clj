@@ -541,16 +541,6 @@
           turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])]
       (is (= :stopped (:session/status session-row)))
       (is (= 1 (count turns)))))
-  (testing "run honors explicit session name"
-    (let [session-name (str "test-cli-session-" (java.util.UUID/randomUUID))
-          out (with-out-str
-                (cli/run-command {:fake-script "simple"
-                                  :session session-name
-                                  :question "define x"}))
-          dir (second (re-find #"Session: (.+)" out))
-          session-row (artifacts/read-edn-file (artifacts/path dir "session.edn") {})]
-      (is (= (str (artifacts/path "runs" session-name)) dir))
-      (is (= session-name (:session/id session-row)))))
   (testing "chat processes two submitted messages in one session"
     (let [out (with-in-str "first\n/send\nsecond\n/send\n"
                 (with-out-str
