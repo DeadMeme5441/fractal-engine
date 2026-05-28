@@ -7,11 +7,13 @@
             [fractal-engine.lineage :as lineage]
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
+            [fractal-engine.provider :as provider]
             [fractal-engine.rehydrate :as rehydrate]
             [fractal-engine.runtime :as runtime]
             [fractal-engine.resume :as resume]
             [fractal-engine.session :as session]
-            [fractal-engine.session-store :as store]))
+            [fractal-engine.session-store :as store]
+            [llm.sdk.http :as sdk-http]))
 
 (defn tmp-dir [name]
   (let [dir (java.nio.file.Files/createTempDirectory
@@ -497,6 +499,25 @@
                                           'fractal.test))
                   "task"
                   {:model "forbidden"})))))
+
+(deftest provider-complete-uses-current-sdk-chat-contract
+  (let [captured (atom nil)
+        cfg (process/config {:models {:root {:provider :fake :model "fake-model"}}})
+        request {:request/messages [{:message/role :user
+                                     :message/content "hello"}]
+                 :request/cache {:scope-id "fractal:test"}}]
+    (with-redefs [sdk-http/request (fn [req]
+                                     (reset! captured req)
+                                     {:status 200 :body {}})]
+      (let [resp (provider/complete cfg :root request)]
+        (is (= "Hello from fake provider."
+               (provider/response-text resp)))
+        (is (= :fake (:response/provider resp)))
+        (is (= "fake-model" (:request/model (:body @captured))))
+        (is (= [{:message/role :user :message/content "hello"}]
+               (:request/messages (:body @captured))))
+        (is (= {:scope-id "fractal:test"}
+               (:request/cache (:body @captured))))))))
 
 (deftest resume-restores-var
   (let [dir (tmp-dir "resume")

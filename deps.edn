@@ -2,7 +2,7 @@
  :deps {org.clojure/clojure {:mvn/version "1.12.4"}
         com.deadmeme5441/clojure-llm-sdk
         {:git/url "https://github.com/DeadMeme5441/clojure-llm-sdk"
-         :git/sha "996545c4a20af2026bd80f04d6a00b55649ffc74"}}
+         :git/sha "22792ff0294e034e29f1d3a8f37540b931763e3c"}}
  :aliases
  {:test
   {:extra-paths ["test"]
