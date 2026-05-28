@@ -98,8 +98,14 @@
   (when (contains? result :final-value)
     (println "Final:" (pr-str (:final-value result)))))
 
+(defn new-session-opts [opts]
+  (cond-> {}
+    (string? (:session opts))
+    (assoc :id (:session opts)
+           :dir (artifacts/path "runs" (:session opts)))))
+
 (defn run-command [opts]
-  (let [s (session/start-session! (cfg-from-opts opts))
+  (let [s (session/start-session! (cfg-from-opts opts) (new-session-opts opts))
         result (session/run-turn! s (or (:question opts) "Return a compact final value."))]
     (session/stop-session! s)
     (print-result result)))
@@ -107,11 +113,8 @@
 (defn chat-session [opts]
   (if-let [dir (or (:resume opts) (:dir opts))]
     (session/resume-session! (cfg-from-opts opts) dir
-                             (cond-> {}
-                               (string? (:session opts))
-                               (assoc :id (:session opts)
-                                      :dir (artifacts/path "runs" (:session opts)))))
-    (session/start-session! (cfg-from-opts opts))))
+                             (new-session-opts opts))
+    (session/start-session! (cfg-from-opts opts) (new-session-opts opts))))
 
 (def quit-commands #{".quit" ":quit" "/quit" "/exit"})
 
@@ -146,10 +149,7 @@
 (defn resume-command [opts]
   (if (:chat opts)
     (chat-command opts)
-    (let [derive-opts (cond-> {}
-                        (string? (:session opts))
-                        (assoc :id (:session opts)
-                               :dir (artifacts/path "runs" (:session opts))))]
+    (let [derive-opts (new-session-opts opts)]
       (print-result (resume/resume! (cfg-from-opts opts)
                                     (:dir opts)
                                     (or (:question opts) "Continue and call FINAL.")
