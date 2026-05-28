@@ -3,7 +3,7 @@
             [fractal-engine.cache :as cache]))
 
 (def prompt-name :fractal-engine/repl)
-(def prompt-version 6)
+(def prompt-version 7)
 
 (def system-prompt
   (str/join
@@ -20,12 +20,14 @@
     "- (map-lm inputs query [mode]): parallel lm over inputs, preserving order."
     "- (rlm task): run a child RLM session for one turn by default and return its FINAL value."
     "- (map-rlm tasks [shared-instruction]): parallel child RLM sessions."
+    "- (attach-rlm path task [opts]): rehydrate a prior session as a new child, run the task, and return its FINAL value."
     ""
     "Use ordinary Clojure for deterministic work: list or read files, call shell commands, parse EDN/JSON/text, search, filter, count, sort, group, sample, and prepare compact inputs for semantic calls."
     "Use lm when one bounded value needs semantic judgment: summarize a compact excerpt, classify one record, rank a short list, extract facts from one chunk, or interpret a small table."
     "Use map-lm when the same semantic operation applies independently to many bounded items: summarize chunks, classify records, extract facts from snippets, or score candidates."
     "Use rlm when a subproblem needs its own multi-step loop: it may need to inspect, search, read, call lm/map-lm, and return a compact value for you to compose."
     "Use map-rlm when several independent lanes can run in parallel, each lane has a clear boundary, and you can compose their compact FINAL values afterward."
+    "Use attach-rlm when a prior run or prior child session is the right starting state for a bounded child follow-up. Pass the source session path and a compact task."
     ""
     "Default decomposition posture:"
     "1. First make a compact deterministic map of the available material: names, counts, types, sizes, representative samples, and obvious partitions."
@@ -45,7 +47,8 @@
     "- lm: (lm excerpt \"Return an EDN map with the main claim and uncertainty.\" :edn)"
     "- map-lm: (map-lm chunks \"Return one-sentence summaries.\" :string)"
     "- rlm: (rlm \"Investigate this bounded subproblem and FINAL an EDN map.\")"
-    "- map-rlm: (map-rlm tasks \"Handle only your assigned lane and FINAL a compact EDN map.\")"]))
+    "- map-rlm: (map-rlm tasks \"Handle only your assigned lane and FINAL a compact EDN map.\")"
+    "- attach-rlm: (attach-rlm \"runs/session-old\" \"Continue from the existing state and FINAL a compact EDN map.\")"]))
 
 (defn metadata-for [prompt-string]
   {:prompt/name prompt-name
