@@ -140,7 +140,7 @@
           (println line)))
       (when usage
         (println "usage:")
-        (pp/pprint (select-keys usage [:usage/status :usage/root :usage/leaf :usage/total-tree])))
+        (pp/pprint (select-keys usage [:usage/status :usage/root :usage/leaf :usage/total-tree :cost/total-tree])))
       (when lineage
         (println "lineage:")
         (pp/pprint lineage))

@@ -1,11 +1,12 @@
 (ns fractal-engine.runtime
-  (:require [clojure.edn :as edn]
-            [clojure.string :as str]
+  "The eval kernel: turn model-emitted Clojure into a status map, and project
+  values/observations for the model to read. Persistence (snapshot/restore) is a
+  separate concern and lives in `snapshot.clj`."
+  (:require [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.time :as time])
   (:import [java.io PushbackReader StringReader StringWriter]))
 
-(def special-symbols '#{FINAL lm map-lm rlm map-rlm attach-rlm})
 (def ^:dynamic *current-eval-id* nil)
 (def ^:dynamic *current-turn-id* nil)
 (def observation-string-limit 4000)
@@ -149,47 +150,3 @@
        (when (and (seq rows)
                   (not-any? #(= :final (:eval/status %)) rows))
          "\n\nNo FINAL was called in this batch; the current turn is still open.")))
-
-(defn edn-safe? [value]
-  (try
-    (= value (edn/read-string (binding [*print-dup* false *print-readably* true] (pr-str value))))
-    (catch Throwable _ false)))
-
-(defn snapshot-vars [state ns-sym]
-  (let [vars (ns-publics ns-sym)
-        entries (reduce-kv
-                 (fn [acc sym v]
-                   (if (special-symbols sym)
-                     acc
-                     (let [value @v]
-                       (if (edn-safe? value)
-                         (assoc-in acc [:vars sym] (artifacts/value-ref! (:dir @state) value))
-                         (assoc-in acc [:unresumable sym]
-                                   {:class (.getName (class value))
-                                    :reason :not-edn})))))
-                 {:vars {} :unresumable {}}
-                 vars)]
-    {:snapshot/status :complete
-     :snapshot/after-turn-id *current-turn-id*
-     :snapshot/after-message-id (apply max 0 (map :message/id (:messages @state)))
-     :snapshot/after-eval-id (apply max 0 (map :eval/id (:evals @state)))
-     :snapshot/ns ns-sym
-     :snapshot/vars (:vars entries)
-     :snapshot/unresumable (:unresumable entries)}))
-
-(defn restore-snapshot! [state ns-sym ops snapshot]
-  (ensure-ns! ns-sym ops)
-  (let [restored (atom [])
-        skipped (atom [])]
-    (doseq [[sym ref] (:snapshot/vars snapshot)]
-      (let [value (artifacts/read-ref (:dir @state) ref)]
-        (if (= ::artifacts/missing value)
-          (swap! skipped conj {:var sym :reason :missing-value})
-          (do (intern (the-ns ns-sym) sym value)
-              (swap! restored conj sym)))))
-    (doseq [[sym info] (:snapshot/unresumable snapshot)]
-      (swap! skipped conj {:var sym :reason (:reason info)}))
-    {:resume/restored-vars @restored
-     :resume/skipped-vars @skipped
-     :resume/messages (count (:messages @state))
-     :resume/snapshot-id (:snapshot/id snapshot)}))

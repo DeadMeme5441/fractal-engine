@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# fractal-sandboxed — run the engine under a best-effort OS sandbox.
+#
+# NOT A PRISON: the engine keeps full READ, subprocess, and network power (it
+# must reach the LLM provider). We confine WRITES to the run workspace + temp so
+# a misbehaving model cannot modify or delete anything outside its workspace.
+# sandbox-exec / bwrap confine the whole process tree, so shelled-out children
+# inherit the limits.
+#
+# SCOPE: filesystem-write confinement only. Network is NOT filtered — a model can
+# still exfiltrate file contents to an arbitrary host. For untrusted/adversarial
+# inputs, use a network-filtering sandbox (Anthropic sandbox-runtime) or a
+# container with a locked-down network namespace. See README "Sandboxing".
+#
+# Usage: bin/fractal-sandboxed <run|chat|inspect|resume|fork> [args...]
+#   FRACTAL_RUNS_DIR overrides the writable run workspace (default ./runs).
+set -euo pipefail
+
+RUNS_DIR="${FRACTAL_RUNS_DIR:-$PWD/runs}"
+mkdir -p "$RUNS_DIR"
+RUNS_DIR="$(cd "$RUNS_DIR" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+os="$(uname -s)"
+case "$os" in
+  Darwin)
+    # macOS Seatbelt. sandbox-exec is deprecated-but-functional and is the same
+    # primitive Claude Code's /sandbox uses on macOS.
+    exec sandbox-exec \
+      -D RUNS_DIR="$RUNS_DIR" \
+      -D TMPDIR="${TMPDIR:-/tmp}" \
+      -D HOME_DIR="$HOME" \
+      -D PROJECT_DIR="$PROJECT_DIR" \
+      -f "$PROJECT_DIR/sandbox/macos.sb" \
+      clojure -M -m fractal-engine "$@"
+    ;;
+  Linux)
+    # NOTE: UNTESTED on the maintainer's machine (darwin). bubblewrap confines the
+    # process tree: the whole FS is bound read-only, then the run workspace + temp
+    # are re-bound read-write. Network is shared (provider reachable, unfiltered).
+    # Cold caches: run `clojure -M -m fractal-engine ...` once unsandboxed first to
+    # warm .cpcache / ~/.gitlibs, or add --bind for those paths.
+    command -v bwrap >/dev/null 2>&1 || {
+      echo "fractal-sandboxed: bwrap (bubblewrap) not found; install it or run unsandboxed" >&2
+      exit 127
+    }
+    exec bwrap \
+      --ro-bind / / \
+      --dev /dev \
+      --proc /proc \
+      --tmpfs /tmp \
+      --bind "$RUNS_DIR" "$RUNS_DIR" \
+      --bind "${TMPDIR:-/tmp}" "${TMPDIR:-/tmp}" \
+      --share-net \
+      --die-with-parent \
+      clojure -M -m fractal-engine "$@"
+    ;;
+  *)
+    echo "fractal-sandboxed: unsupported OS '$os'; run unsandboxed or use a container" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,39 @@
+;; fractal-engine — macOS Seatbelt profile (best-effort OS sandbox).
+;;
+;; PHILOSOPHY: a safety net, not a prison. The engine keeps full power to READ
+;; the filesystem, spawn subprocesses, and reach the network (it MUST talk to the
+;; LLM provider). We confine exactly one thing — WRITES — to the run workspace and
+;; scratch/temp, so a confused or misbehaving model cannot modify or delete
+;; anything outside its own working area. sandbox-exec confines the whole process
+;; tree, so even a model-spawned `rm`/`grep` inherits these limits.
+;;
+;; WHAT THIS DOES NOT DO: network is not filtered. A model that reads a file can
+;; still POST its contents to an arbitrary host (exfiltration). That needs a
+;; filtering proxy — see the README "Hardened isolation" section (sandbox-runtime
+;; / container). Run only on inputs you are willing to send to your provider.
+;;
+;; Driven by `bin/fractal-sandboxed`, which supplies the -D parameters below.
+
+(version 1)
+
+;; Not a prison: everything is allowed by default…
+(allow default)
+
+;; …except writes, which we deny globally and then allow back only where the
+;; engine and the JVM legitimately need them.
+(deny file-write*)
+
+(allow file-write*
+  ;; The run workspace — journal, snapshots, projections, blobs.
+  (subpath (param "RUNS_DIR"))
+  ;; Scratch / temp (JVM perfdata, $TMPDIR, the engine's chdir-to-temp paths).
+  (subpath (param "TMPDIR"))
+  (subpath "/tmp")
+  (subpath "/private/tmp")
+  (subpath "/var/folders")
+  (subpath "/private/var/folders")
+  ;; Clojure CLI + tool caches (written on a cold start; harmless tool state).
+  (subpath (string-append (param "PROJECT_DIR") "/.cpcache"))
+  (subpath (string-append (param "HOME_DIR") "/.clojure"))
+  (subpath (string-append (param "HOME_DIR") "/.m2"))
+  (subpath (string-append (param "HOME_DIR") "/.gitlibs")))

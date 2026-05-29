@@ -1,9 +1,16 @@
 (ns fractal-engine.artifacts
+  "The artifact layer. Holds the live session state, emits events into the
+  append-only journal (the source of truth), and materializes projection files at
+  boundaries. State changes go through `emit!` -> `event/apply-event`; the table
+  files (session/messages/turns/evals/calls/snapshots) and derived views
+  (final/usage/tree) are rebuilt by `checkpoint!`, not on every event."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.pprint :as pp]
             [clojure.string :as str]
             [fractal-engine.cache :as cache]
+            [fractal-engine.event :as event]
+            [fractal-engine.journal :as journal]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.time :as time])
   (:import [java.io PushbackReader]
@@ -297,13 +304,16 @@
         vec)})
 
 (defn rebuild-derived! [state]
-  (let [{:keys [dir session messages turns evals calls final-value error]} @state
+  (let [{:keys [dir session messages turns evals calls final-ref error]} @state
         latest-turn (last turns)
         latest-final-ref (:turn/final-ref latest-turn)
         latest-final-preview (:turn/final-preview latest-turn)
-        final-ref (or latest-final-ref
-                      (when (contains? @state :final-value)
-                        (value-ref! dir final-value)))
+        final-ref (or latest-final-ref final-ref)
+        ;; Read the recorded final value only when no turn preview is available;
+        ;; the turn-final path already stores a preview, so this is rare.
+        final-value (when (and final-ref (not latest-final-preview))
+                      (read-ref dir final-ref))
+        preview (or latest-final-preview (when final-ref (project-value final-value)))
         tree (derive-tree dir session calls)
         usage (derive-usage dir calls)]
     (atomic-spit! (path dir "final.edn")
@@ -320,22 +330,38 @@
                            :final/tree-ref "tree.edn"}
                     error (assoc :final/error error)
                     final-ref (assoc :final/value-ref final-ref
-                                     :final/latest-value-preview (or latest-final-preview
-                                                                     (project-value final-value))
+                                     :final/latest-value-preview preview
                                      ;; Kept for older inspectors/tests that read this key.
-                                     :final/value-preview (or latest-final-preview
-                                                              (project-value final-value)))))
+                                     :final/value-preview preview)))
     (atomic-spit! (path dir "usage.edn") usage)
     (atomic-spit! (path dir "tree.edn") tree)))
 
-(defn- flush-lock [state]
-  (or (:flush-lock @state) state))
+(defn next-counter! [state k]
+  (get-in (swap! state update-in [:counters k] (fnil inc 0)) [:counters k]))
 
-(defn flush! [state]
-  (locking (flush-lock state)
+(defn emit!
+  "Record one event: assign its id and timestamp, append it to the journal (the
+  durable source of truth, O(1)), then fold it into the in-memory view. Serialized
+  per session so the journal order and the view stay consistent under the parallel
+  fanout of map-lm/map-rlm. The reentrant monitor lets `update-turn!`/`update-call!`
+  read-then-emit atomically. Does NOT write projection files — that is `checkpoint!`,
+  called at boundaries."
+  [state event]
+  (locking (:emit-lock @state)
+    (let [id (next-counter! state :event)
+          ev (assoc event :event/id id :event/at (time/now-str))]
+      (journal/append! (:dir @state) ev)
+      (swap! state event/apply-event ev)
+      ev)))
+
+(defn checkpoint!
+  "Materialize the projection files from the current view. Called at boundaries
+  (turn end, status change, session stop), not per event. The journal already holds
+  every event; these files are derived views for inspection, resume, and fingerprints."
+  [state]
+  (locking (:emit-lock @state)
     (let [{:keys [dir session messages turns evals calls events snapshots]} @state]
-      (doseq [sub ["children"]]
-        (ensure-dir! (path dir sub)))
+      (ensure-dir! (path dir "children"))
       (atomic-spit! (path dir "session.edn") session)
       (atomic-spit! (path dir "messages.edn") messages)
       (atomic-spit! (path dir "turns.edn") turns)
@@ -346,25 +372,23 @@
       (rebuild-derived! state)
       state)))
 
-(defn next-counter! [state k]
-  (let [v (get-in (swap! state update-in [:counters k] (fnil inc 0)) [:counters k])]
-    v))
+;; Kept name for the many boundary call sites: a flush is a checkpoint.
+(def flush! checkpoint!)
 
-(defn add-event! [state event]
-  (let [id (next-counter! state :event)]
-    (swap! state update :events conj (assoc event :event/id id :event/at (time/now-str)))
-    (flush! state)
-    id))
+(defn add-event!
+  "Emit an annotation/lifecycle event (no row change of its own). Returns the
+  event id for compatibility with existing call sites."
+  [state event]
+  (:event/id (emit! state event)))
 
 (defn add-message!
-  ([state role content] (add-message! state role content nil))
-  ([state role content turn-id]
+  ([state role content] (add-message! state role content nil nil))
+  ([state role content turn-id] (add-message! state role content turn-id nil))
+  ([state role content turn-id extra]
    (let [id (next-counter! state :message)
-         msg (cond-> {:message/id id :message/role role :message/content content}
+         msg (cond-> (merge {:message/id id :message/role role :message/content content} extra)
                turn-id (assoc :message/turn-id turn-id))]
-     (swap! state update :messages conj msg)
-     (add-event! state (cond-> {:event/type :message-added :message/id id}
-                         turn-id (assoc :turn/id turn-id)))
+     (emit! state {:event/type :message/added :message msg})
      msg)))
 
 (defn add-turn! [state turn]
@@ -380,25 +404,18 @@
                     :turn/error nil
                     :turn/usage nil}
                    turn)]
-    (swap! state update :turns conj row)
-    (swap! state update :session assoc
-           :session/turn-count (count (:turns @state))
-           :session/latest-turn-id id)
-    (add-event! state {:event/type :turn-started :turn/id id})
+    (emit! state {:event/type :turn/started :turn row})
     row))
-
-(defn update-turn! [state turn-id f & args]
-  (swap! state update :turns
-         (fn [turns]
-           (mapv (fn [t] (if (= turn-id (:turn/id t))
-                           (apply f t args)
-                           t))
-                 turns)))
-  (flush! state)
-  (first (filter #(= turn-id (:turn/id %)) (:turns @state))))
 
 (defn current-turn [state turn-id]
   (first (filter #(= turn-id (:turn/id %)) (:turns @state))))
+
+(defn update-turn! [state turn-id f & args]
+  (locking (:emit-lock @state)
+    (let [cur (current-turn state turn-id)
+          nxt (apply f cur args)]
+      (emit! state {:event/type :turn/put :turn nxt})
+      nxt)))
 
 (defn add-turn-id! [state turn-id k value]
   (when turn-id
@@ -415,52 +432,43 @@
                       :call/status :running
                       :call/started-at (time/now-str)}
                      call)]
-    (swap! state update :calls conj call')
+    (emit! state {:event/type :call/started :call call'})
     (add-turn-id! state (:call/turn-id call') :turn/call-ids id)
-    (add-event! state {:event/type :call-started :call/id id})
     call'))
 
 (defn update-call! [state call-id f & args]
-  (swap! state update :calls
-         (fn [calls]
-           (mapv (fn [c] (if (= call-id (:call/id c))
-                           (apply f c args)
-                           c))
-                 calls)))
-  (add-event! state {:event/type :call-ended
-                     :call/id call-id
-                     :call/status (:call/status (first (filter #(= call-id (:call/id %)) (:calls @state))))}))
+  (locking (:emit-lock @state)
+    (let [cur (first (filter #(= call-id (:call/id %)) (:calls @state)))
+          nxt (apply f cur args)]
+      (emit! state {:event/type :call/put :call nxt})
+      nxt)))
 
 (defn add-eval! [state eval-row]
   (let [id (next-counter! state :eval)
         row (assoc eval-row :eval/id id)]
-    (swap! state update :evals conj row)
+    (emit! state {:event/type :eval/added :eval row})
     (add-turn-id! state (:eval/turn-id row) :turn/eval-ids id)
-    (add-event! state (cond-> {:event/type :eval-ended :eval/id id :eval/status (:eval/status row)}
-                        (:eval/turn-id row) (assoc :turn/id (:eval/turn-id row))))
     row))
 
 (defn add-snapshot! [state snapshot]
   (let [id (next-counter! state :snapshot)
         row (assoc snapshot :snapshot/id id :snapshot/created-at (time/now-str))]
-    (swap! state update :snapshots conj row)
-    (add-event! state {:event/type :snapshot-written :snapshot/id id})
+    (emit! state {:event/type :snapshot/added :snapshot row})
     row))
 
 (defn update-status! [state status]
-  (swap! state update :session assoc
-         :session/status status
-         :session/ended-at (when (not= status :running) (time/now-str)))
-  (flush! state))
+  (emit! state {:event/type :session/status
+                :status status
+                :ended-at (when (not= status :running) (time/now-str))})
+  (checkpoint! state))
 
 (defn mark-final! [state value]
-  (swap! state assoc :final-value value)
-  (flush! state))
+  (let [ref (value-ref! (:dir @state) value {:path "blobs/final-value.edn"})]
+    (emit! state {:event/type :session/final :final/value-ref ref})))
 
 (defn mark-error! [state error]
-  (swap! state assoc :error error)
-  (update-status! state :error)
-  (add-event! state {:event/type :session-error :error error}))
+  (emit! state {:event/type :session/error :error error :ended-at (time/now-str)})
+  (checkpoint! state))
 
 (defn new-state!
   [{:keys [dir id kind provider parent resumed-from forked-from cache-id]}]
@@ -471,32 +479,26 @@
         cache-id' (or cache-id sid)
         kind' (or kind :root)
         prompt-metadata (if (= :child kind') prompt/child-prompt-metadata prompt/prompt-metadata)
-        state (atom {:dir (path dir)
-                     :session {:session/id sid
-                               :session/kind kind'
-                               :session/status :running
-                               :session/created-at created
-                               :session/ended-at nil
-                               :session/artifact-version artifact-version
-                               :session/surface-version surface-version
-                               :session/surface surface
-                               :session/prompt prompt-metadata
-                               :session/provider provider
-                               :session/cache-id cache-id'
-                               :session/cache (cache/session-cache cache-id')
-                               :session/turn-count 0
-                               :session/latest-turn-id nil
-                               :session/parent parent
-                               :session/resumed-from resumed-from
-                               :session/forked-from forked-from}
-                     :messages []
-                     :turns []
-                     :evals []
-                     :calls []
-                     :events []
-                     :snapshots []
-                     :flush-lock (Object.)
-                     :counters {:message 0 :turn 0 :eval 0 :call 0 :event 0 :snapshot 0 :child 0}})]
-    (flush! state)
-    (add-event! state {:event/type :session-started :session/id (:session/id (:session @state))})
+        session {:session/id sid
+                 :session/kind kind'
+                 :session/status :running
+                 :session/created-at created
+                 :session/ended-at nil
+                 :session/artifact-version artifact-version
+                 :session/surface-version surface-version
+                 :session/surface surface
+                 :session/prompt prompt-metadata
+                 :session/provider provider
+                 :session/cache-id cache-id'
+                 :session/cache (cache/session-cache cache-id')
+                 :session/turn-count 0
+                 :session/latest-turn-id nil
+                 :session/parent parent
+                 :session/resumed-from resumed-from
+                 :session/forked-from forked-from}
+        state (atom (merge event/empty-view
+                           {:dir (path dir)
+                            :emit-lock (Object.)}))]
+    (emit! state {:event/type :session/started :session session})
+    (checkpoint! state)
     state))

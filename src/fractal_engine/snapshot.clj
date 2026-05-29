@@ -125,11 +125,7 @@
              :snapshot/created-at created-at
              :snapshot/ref snapshot-ref
              :snapshot/summary (snapshot-summary var-rows)}]
-    (swap! state update :snapshots conj row)
-    (artifacts/add-event! state {:event/type :snapshot-written
-                                 :snapshot/id snapshot-id
-                                 :snapshot/kind :turn-final
-                                 :turn/id turn-id})
+    (artifacts/emit! state {:event/type :snapshot/added :snapshot row})
     row))
 
 (defn completed-turn-snapshot? [row]
@@ -206,13 +202,11 @@
 (defn source-session-id [dir]
   (:session/id (artifacts/read-edn-file (artifacts/path dir "session.edn") {})))
 
+;; The journal is the source of truth; the table files are projections of it, so
+;; the fingerprint hashes the journal plus the out-of-band lineage metadata. Child
+;; sessions fold in recursively via `session-fingerprint`.
 (def canonical-state-files
-  ["session.edn"
-   "messages.edn"
-   "turns.edn"
-   "evals.edn"
-   "calls.edn"
-   "snapshots.edn"
+  ["events.ednl"
    "lineage.edn"])
 
 (defn- regular-file? [^Path p]
@@ -241,7 +235,7 @@
                          [(.toString (.relativize root child-dir))
                           (session-fingerprint child-dir)])
                        (child-session-dirs root))]
-    (cache/sha256-string (pr-str {:fingerprint/version 2
+    (cache/sha256-string (pr-str {:fingerprint/version 3
                                   :files files
                                   :children children}))))
 

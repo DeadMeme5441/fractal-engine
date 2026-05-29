@@ -3,7 +3,9 @@
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
             [fractal-engine.cli :as cli]
+            [fractal-engine.event :as event]
             [fractal-engine.inspect :as inspect]
+            [fractal-engine.journal :as journal]
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.provider :as provider]
@@ -11,6 +13,7 @@
             [fractal-engine.resume :as resume]
             [fractal-engine.session :as session]
             [fractal-engine.snapshot :as snapshot]
+            [llm.sdk :as sdk]
             [llm.sdk.http :as sdk-http]))
 
 (defn tmp-dir [name]
@@ -22,78 +25,21 @@
 (defn scripted-cfg [responses]
   (process/config {:scripted/responses (atom (vec responses))}))
 
-(deftest prompt-contract
+(deftest kernel-boundary-in-prompts
+  ;; This is NOT a prompt-wording test. Prompts are prose we tune constantly;
+  ;; pinning their phrases would just punish rewording. The one real invariant is
+  ;; architectural: model-facing behavior must never leak the kernel's anti-concepts
+  ;; (no `context` var; no product/storage/workflow framing). That boundary holds
+  ;; for every behavior prompt, not just the root.
+  (doseq [p [prompt/system-prompt prompt/child-prompt prompt/leaf-prompt]]
+    (is (not (clojure.string/includes? p "context")))
+    (doseq [forbidden ["product" "storage" "workflow"]]
+      (is (not (clojure.string/includes? (clojure.string/lower-case p) forbidden)))))
+  ;; The six-function surface must be documented to the root, by name.
   (doseq [sym ["FINAL" "lm" "map-lm" "rlm" "map-rlm" "attach-rlm"]]
     (is (clojure.string/includes? prompt/system-prompt sym)))
-  (is (not (clojure.string/includes? prompt/system-prompt "context")))
-  (doseq [forbidden ["product" "storage" "workflow"]]
-    (is (not (clojure.string/includes? (clojure.string/lower-case prompt/system-prompt) forbidden))))
-  (is (clojure.string/includes? prompt/system-prompt "observations"))
-  (is (clojure.string/includes? prompt/system-prompt "Do not use provider tool calls or function calls"))
-  (is (clojure.string/includes? prompt/system-prompt "input -> processing -> output"))
-  (is (clojure.string/includes? prompt/system-prompt "the cheapest sufficient processing"))
-  (is (clojure.string/includes? prompt/system-prompt "Decomposition is the work, not a fallback"))
-  (is (clojure.string/includes? prompt/system-prompt "Reading raw material into your own window is the move you must justify"))
-  (is (clojure.string/includes? prompt/system-prompt "a claim, not a fact"))
-  (is (clojure.string/includes? prompt/system-prompt "Map-and-aggregate"))
-  (is (clojure.string/includes? prompt/system-prompt "Reconnoiter-then-decompose"))
-  (is (clojure.string/includes? prompt/system-prompt "Loop-until-dry"))
-  (is (clojure.string/includes? prompt/system-prompt "A full worked turn"))
-  (is (clojure.string/includes? prompt/system-prompt "Smell tests"))
-  (is (clojure.string/includes? prompt/system-prompt "No silent caps"))
-  (is (clojure.string/includes? prompt/system-prompt "Scale your decomposition to the question"))
-  (is (clojure.string/includes? prompt/system-prompt "Call FINAL only after enough observations have been inspected"))
-  (is (clojure.string/includes? prompt/system-prompt "Split where the surface is large or uncertain"))
-  (is (clojure.string/includes? prompt/system-prompt "mapped over up to 50 bounded inputs"))
-  (is (clojure.string/includes? prompt/system-prompt "recursive processing mapped over up to 50 independent sub-problems"))
-  (is (clojure.string/includes? prompt/system-prompt "up to 50 bounded inputs"))
-  (is (clojure.string/includes? prompt/system-prompt "up to 50 independent sub-problems"))
-  (is (clojure.string/includes? prompt/system-prompt "The one decision you make, again and again"))
-  (is (clojure.string/includes? prompt/system-prompt "Bounded material is broader than raw text"))
-  (is (clojure.string/includes? prompt/system-prompt "semantic interpretation instead of manually reading every line"))
-  (is (clojure.string/includes? prompt/system-prompt "A child is an investigator"))
-  (is (clojure.string/includes? prompt/system-prompt "Children should use lm and map-lm aggressively"))
-  (is (clojure.string/includes? prompt/system-prompt "do reconnaissance before solving"))
-  (is (clojure.string/includes? prompt/system-prompt "The root should coordinate and verify"))
-  (is (clojure.string/includes? prompt/system-prompt "Represent before you solve"))
-  (is (clojure.string/includes? prompt/system-prompt "Treat every large input as a surface"))
-  (is (clojure.string/includes? prompt/system-prompt "separate data from instructions"))
-  (is (clojure.string/includes? prompt/system-prompt "validate the representation"))
-  (is (clojure.string/includes? prompt/system-prompt "Do not build leaf batches, aggregate, or FINAL"))
-  (is (clojure.string/includes? prompt/system-prompt "Aggregation and exact-answer discipline"))
-  (is (clojure.string/includes? prompt/system-prompt "perform a consistency check in Clojure"))
-  (is (clojure.string/includes? prompt/system-prompt "Track answer-sensitive uncertainty"))
-  (is (clojure.string/includes? prompt/system-prompt "another leaf pass, or a child"))
-  (is (clojure.string/includes? prompt/system-prompt "cannot be resolved from the available material"))
-  (is (clojure.string/includes? prompt/system-prompt "auditable ledger var"))
-  (is (clojure.string/includes? prompt/system-prompt "Children inherit none of your vars"))
-  (is (clojure.string/includes? prompt/system-prompt "Bind large values with def"))
-  (is (clojure.string/includes? prompt/system-prompt "combined observation"))
-  (is (clojure.string/includes? prompt/system-prompt "Keep durable vars"))
-  (is (clojure.string/includes? prompt/system-prompt "A bare expression value is only an observation"))
-  (doseq [example ["Good semantic navigation" "Good leaf batch" "Good child" "Good parallel children"]]
-    (is (clojure.string/includes? prompt/system-prompt example)))
-  (is (clojure.string/includes? prompt/child-prompt "Child boundary"))
-  (is (clojure.string/includes? prompt/child-prompt "You inherit none of the parent's vars"))
-  (is (clojure.string/includes? prompt/child-prompt "do not try to solve the parent's whole mission"))
-  (is (clojure.string/includes? prompt/child-prompt "do reconnaissance before solving"))
-  (is (clojure.string/includes? prompt/child-prompt "Represent assigned material before solving it"))
-  (is (clojure.string/includes? prompt/child-prompt "Track answer-sensitive uncertainty"))
-  (is (clojure.string/includes? prompt/child-prompt "keep a ledger var"))
-  (is (clojure.string/includes? prompt/child-prompt "A bare EDN map/vector/string is only an observation"))
-  (is (clojure.string/includes? prompt/child-prompt "final-step warning"))
-  (is (clojure.string/includes? process/leaf-system-prompt "use only the supplied label set"))
-  (is (clojure.string/includes? process/leaf-system-prompt "read the whole bounded input"))
-  (is (clojure.string/includes? process/leaf-system-prompt "single probabilistic transformation"))
-  (is (clojure.string/includes? process/leaf-system-prompt "pure function whose body"))
-  (is (= prompt/prompt-metadata (prompt/metadata-for prompt/system-prompt)))
-  (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt)))
-  (is (clojure.string/includes? prompt/system-prompt "restoring its last completed turn snapshot"))
-  (is (clojure.string/includes? prompt/system-prompt "Behavioral examples"))
-  (is (clojure.string/includes? prompt/system-prompt "Bad: slurp a large text or listing"))
-  (is (clojure.string/includes? prompt/system-prompt "Good child task"))
-  (is (clojure.string/includes? prompt/system-prompt "Good prior-session reuse"))
-  (is (= 15 (:prompt/version prompt/prompt-metadata))))
+  ;; Prompt metadata stays internally consistent (hash matches content).
+  (is (= (:prompt/hash prompt/prompt-metadata) (cache/sha256-string prompt/system-prompt))))
 
 (deftest fenced-block-extraction
   (is (= ["(+ 1 2)\n"]
@@ -298,8 +244,9 @@
     (is (= [1 2 3 4] (:call/request-message-ids (second root-calls))))
     (is (= 4 (:call/request-message-count (second root-calls))))
     (is (= (:prompt/hash (:session/prompt session)) (:call/request-system-hash first-root)))
-    (is (= (:request (first root-calls))
-           (artifacts/read-ref dir (:call/request-ref (first root-calls)))))
+    ;; The request lives only under the ref now (not inline on the row), and resolves.
+    (is (nil? (:request (first root-calls))))
+    (is (contains? (artifacts/read-ref dir (:call/request-ref (first root-calls))) :request/messages))
     (is (= :scripted (:response/provider (artifacts/read-ref dir (:call/response-ref first-root)))))))
 
 (deftest large-call-request-and-response-refs-blob-and-round-trip
@@ -324,7 +271,8 @@
     (is (= "blobs/calls/call-000001-response.edn" (:path response-ref)))
     (is (.exists (java.io.File. dir "blobs/calls/call-000001-request.edn")))
     (is (.exists (java.io.File. dir "blobs/calls/call-000001-response.edn")))
-    (is (= (:request root-call) (artifacts/read-ref dir request-ref)))
+    (is (nil? (:request root-call)))
+    (is (contains? (artifacts/read-ref dir request-ref) :request/messages))
     (is (= :scripted (:response/provider (artifacts/read-ref dir response-ref))))))
 
 (deftest child-and-map-child
@@ -545,6 +493,10 @@
                                        :call/status :final
                                        :child/session-id "child-0001"
                                        :child/dir "children/child-0001"})
+    ;; Projections (usage.edn/final.edn) materialize at checkpoint, not per call.
+    ;; Child first: the parent's tree rollup reads the child's usage.edn.
+    (artifacts/checkpoint! child-state)
+    (artifacts/checkpoint! parent-state)
     (let [usage (artifacts/read-edn-file (artifacts/path dir "usage.edn") {})
           final (artifacts/read-edn-file (artifacts/path dir "final.edn") {})]
       (is (= :known (get-in usage [:usage/root :usage/status])))
@@ -678,6 +630,40 @@
                (:request/messages (:body @captured))))
         (is (= {:scope-id "fractal:test"}
                (:request/cache (:body @captured))))))))
+
+(deftest retry-is-on-by-default-and-recovers-from-transient-transport-failure
+  ;; Retrying transient transport failures is default behavior, not a flag. The
+  ;; SDK classifies before retrying, so this never re-fails a broken request --
+  ;; it is exactly what survives the vertex-gemini first-call EOF.
+  (is (true? (:retry (process/config))) "config defaults :retry on")
+  (let [attempts (atom 0)
+        cfg (process/config {:models {:root {:provider :fake :model "fake-model"}}})
+        request {:request/messages [{:message/role :user :message/content "hi"}]
+                 :request/cache {:scope-id "fractal:test"}}]
+    ;; Drive retry without real backoff sleeps.
+    (binding [sdk/*retry-sleep-fn* (fn [_ms] nil)]
+      (with-redefs [sdk-http/request
+                    (fn [_req]
+                      (if (= 1 (swap! attempts inc))
+                        ;; A dropped connection on the first attempt -- the EOF class.
+                        (throw (java.io.IOException. "EOF reached while reading"))
+                        {:status 200 :body {}}))]
+        (let [resp (provider/complete cfg :root request)]
+          (is (= 2 @attempts) "failed once, retried, then succeeded")
+          (is (= "Hello from fake provider." (provider/response-text resp)))))))
+  (testing ":retry false opts back into one-shot (the throw propagates, no retry)"
+    (let [attempts (atom 0)
+          cfg (process/config {:retry false
+                               :models {:root {:provider :fake :model "fake-model"}}})
+          request {:request/messages [{:message/role :user :message/content "hi"}]
+                   :request/cache {:scope-id "fractal:test"}}]
+      (binding [sdk/*retry-sleep-fn* (fn [_ms] nil)]
+        (with-redefs [sdk-http/request
+                      (fn [_req]
+                        (swap! attempts inc)
+                        (throw (java.io.IOException. "EOF reached while reading")))]
+          (is (thrown? Exception (provider/complete cfg :root request)))
+          (is (= 1 @attempts) "one-shot: no retry"))))))
 
 (deftest resume-restores-var
   (let [dir (tmp-dir "resume")
@@ -837,14 +823,19 @@
                                   {:dir dir :id "root"})
         _ (session/run-turn! s "save")
         before (snapshot/session-fingerprint dir)]
+    ;; Non-canonical writes (blobs, and now the derived table projections like
+    ;; messages.edn) do not move the fingerprint; only the journal does.
     (artifacts/write-edn! (artifacts/path dir "blobs/arbitrary.edn")
                           {:not :canonical})
-    (is (= before (snapshot/session-fingerprint dir)))
     (artifacts/write-edn! (artifacts/path dir "messages.edn")
                           (conj (artifacts/read-edn-file (artifacts/path dir "messages.edn") [])
-                                {:message/id 999
-                                 :message/role :observation
-                                 :message/content "canonical change"}))
+                                {:message/id 999 :message/role :observation :message/content "derived"}))
+    (is (= before (snapshot/session-fingerprint dir)))
+    ;; Appending to the journal (the source of truth) does move the fingerprint.
+    (journal/append! dir {:event/type :message/added :event/id 999
+                          :message {:message/id 999
+                                    :message/role :observation
+                                    :message/content "canonical change"}})
     (let [after-message (snapshot/session-fingerprint dir)]
       (is (not= before after-message))
       (artifacts/new-state! {:dir (artifacts/path dir "children/child-0001")
@@ -856,6 +847,71 @@
         (artifacts/write-edn! (artifacts/path dir "children/child-0001/blobs/ignored.edn")
                               {:large (apply str (repeat 5000 "x"))})
         (is (= after-child (snapshot/session-fingerprint dir)))))))
+
+(deftest provider-descriptors-drive-auth
+  ;; provider-as-value: a provider's auth is data in one table, not scattered code
+  ;; branches and prose gotchas.
+  (is (= :none (:auth (provider/descriptor :scripted))))
+  (is (= :api-key (:auth (provider/descriptor :openai))))
+  (is (= :oauth-file (:auth (provider/descriptor :codex-backend))))
+  (is (= :adc (:auth (provider/descriptor :vertex-gemini))))
+  (is (= :sdk-default (:auth (provider/descriptor :nonexistent-provider))))
+  ;; api-key-config supplies a key only for :api-key providers; other auth sources
+  ;; are the SDK's job, so the engine hands over nothing (env-independent asserts).
+  (is (nil? (provider/api-key-config :codex-backend)))
+  (is (nil? (provider/api-key-config :scripted)))
+  ;; :none auth is always satisfied; the shape is uniform data.
+  (is (true? (:satisfied? (provider/auth-status :scripted))))
+  (is (= :api-key (:auth (provider/auth-status :openai)))))
+
+(deftest per-call-timeout-finalizes-turn-as-failure
+  ;; A hung provider call is invisible until something declares it dead. The
+  ;; per-call deadline converts it into a normal provider failure that finalizes
+  ;; the turn, with :provider/timeout preserved under :error/data.
+  (let [dir (tmp-dir "timeout")
+        result (process/run-process!
+                (process/config
+                 {:call-timeout-ms 50
+                  :scripted/response-fn
+                  (fn [_]
+                    (Thread/sleep 1000)
+                    "```clojure\n(FINAL :too-late)\n```")})
+                {:dir dir :id "root" :kind :root :task "go"})
+        calls (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+        final (artifacts/read-edn-file (artifacts/path dir "final.edn") {})]
+    (is (= :error (:status result)))
+    (is (= :provider/failed (get-in result [:error :error/type])))
+    (is (= :provider/timeout (get-in result [:error :error/data :error/type])))
+    (is (= :error (:call/status (first calls))))
+    (is (= :error (:final/status final)))))
+
+(deftest journal-fold-reconstructs-state-without-replay
+  ;; The load-bearing invariant: the journal stores results, not recipes.
+  ;; apply-event is a pure projector — folding events.ednl reconstructs the exact
+  ;; materialized state, and re-invokes the provider zero times.
+  (let [dir (tmp-dir "journal-fold")
+        provider-calls (atom 0)
+        cfg (process/config
+             {:scripted/response-fn
+              (fn [_]
+                (swap! provider-calls inc)
+                "```clojure\n(def y 7)\n(FINAL {:y y})\n```")})
+        result (process/run-process! cfg {:dir dir :id "root" :kind :root :task "go"})
+        calls-during-run @provider-calls
+        ;; reconstruct purely from the journal, nothing else
+        view (event/fold (journal/read-events dir))
+        read* (fn [f] (artifacts/read-edn-file (artifacts/path dir f) nil))]
+    (is (= {:y 7} (:final-value result)))
+    (is (pos? calls-during-run))
+    ;; the fold reproduces every materialized projection exactly
+    (is (= (read* "session.edn") (:session view)))
+    (is (= (read* "messages.edn") (:messages view)))
+    (is (= (read* "turns.edn") (:turns view)))
+    (is (= (read* "evals.edn") (:evals view)))
+    (is (= (read* "calls.edn") (:calls view)))
+    (is (= (read* "events.edn") (:events view)))
+    ;; and it cost nothing: reconstruction never re-ran a single provider call
+    (is (= calls-during-run @provider-calls))))
 
 (deftest resume-restores-vars-and_messages_without_replay
   (let [dir (tmp-dir "resume-snapshot")

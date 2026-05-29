@@ -39,7 +39,8 @@ This is an early implementation. It is suitable for fake-provider development,
 artifact inspection, and live-provider smoke tests through
 [`clojure-llm-sdk`](https://github.com/DeadMeme5441/clojure-llm-sdk).
 
-The runtime executes trusted local Clojure. It is not sandboxed.
+The runtime executes model-generated Clojure with a full JVM. Run it on inputs
+you trust, or under the best-effort OS sandbox described in [Sandboxing](#sandboxing).
 
 ## Quickstart
 
@@ -143,6 +144,50 @@ fork
 own line; enter `/exit` on an empty prompt to stop the session.
 
 It does not define workflows or product-specific behavior.
+
+## Sandboxing
+
+The engine evaluates model-generated Clojure in a live JVM — it can read files,
+spawn subprocesses, and open the network. That power is the point (it is how a
+node inspects a codebase and reaches its LLM provider), but it means you must
+treat the model's code as you would any code you run locally.
+
+There is no true in-process sandbox available: the JVM `SecurityManager` was
+permanently disabled in JDK 24 ([JEP 486](https://openjdk.org/jeps/486)), and an
+interpreter-based sandbox (e.g. SCI) cannot preserve the engine's real-var /
+snapshot model. Real isolation is therefore a **process/OS-level** concern, the
+same approach used by agent code-execution tools generally.
+
+`bin/fractal-sandboxed` runs the engine under a best-effort OS sandbox:
+
+```bash
+bin/fractal-sandboxed run --fake-script simple --question "Define x and return it."
+# FRACTAL_RUNS_DIR=/path/to/workspace bin/fractal-sandboxed run ...
+```
+
+- **macOS** — `sandbox-exec` with `sandbox/macos.sb` (Seatbelt). Tested.
+- **Linux** — `bwrap` (bubblewrap). Written but **untested** on the maintainer's
+  machine; review before relying on it.
+
+**It is a safety net, not a prison.** Reads, subprocesses, compute, and the
+network stay open so the engine works normally; the sandbox confines **writes**
+to the run workspace (`runs/`) and temp, so a confused or misbehaving model
+cannot modify or delete anything outside its workspace. Because the OS sandbox
+confines the whole process tree, even a model-spawned `rm` inherits the same
+limits.
+
+**What it does NOT do: network filtering.** A node that reads a file can still
+send its contents to your LLM provider — that is the tool's purpose — or, in
+principle, to any other host. Filesystem confinement cannot prevent that; it
+needs a filtering proxy. So:
+
+- Only run the engine on inputs you are willing to send to your provider.
+- For untrusted or adversarial inputs, use a **hardened tier**: a
+  network-filtering sandbox such as
+  [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime)
+  (allowlist the provider's domain), or a container with a locked-down network
+  namespace. A future, fully self-contained option is tracked: in-process Linux
+  Landlock self-confinement.
 
 ## Anti-Goals
 

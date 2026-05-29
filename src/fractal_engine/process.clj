@@ -1,15 +1,14 @@
 (ns fractal-engine.process
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
-            [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
+            [fractal-engine.call :as call]
+            [fractal-engine.concurrent :as concurrent]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.provider :as provider]
             [fractal-engine.runtime :as runtime]
             [fractal-engine.snapshot :as snapshot]
-            [fractal-engine.time :as time])
-  (:import [java.util.concurrent Callable Executors ThreadFactory TimeUnit]))
+            [fractal-engine.time :as time]))
 
 (declare run-process! run-turn-on-state! child-root-config add-observation!)
 
@@ -19,8 +18,17 @@
    (let [base {:runs-dir "runs"
                :max-turns 25
                :max-fanout 50
+               :call-timeout-ms 120000
                :models provider/default-models
-               :retry nil}
+               ;; Retry transient transport failures by default. The SDK classifies
+               ;; errors before retrying (`:retry true` -> llm.sdk.retry/default-policy):
+               ;; it retries network/timeout/server/overloaded/rate-limit/unknown with
+               ;; jittered backoff and refuses auth/invalid-request/quota, so it never
+               ;; burns calls re-failing a broken request. This is what survives the
+               ;; vertex-gemini first-call EOF. Note: `:call-timeout-ms` wraps the whole
+               ;; retry loop (process/call-provider!), so the deadline is total wall-clock
+               ;; including backoff, not per attempt. Set :retry false for one-shot.
+               :retry true}
          models (merge-with merge provider/default-models (:models m))]
      (assoc (merge (dissoc base :models) (dissoc m :models))
             :models models))))
@@ -41,24 +49,9 @@
   {:request/messages (mapv wire-message messages)
    :request/cache cache-request})
 
-(def leaf-system-prompt
-  (str "You are a leaf: a single probabilistic transformation. One bounded input and "
-       "one query turned into one output. You are a pure function whose body happens "
-       "to be a language model. You have no tools, no REPL, no memory, and no way to "
-       "fetch anything, so do not try to discover the world; work only from the "
-       "bounded input you are given, and always read the whole bounded input before "
-       "answering. Return only what the query asks for, in the requested shape. If the "
-       "input carries identity fields such as :id, :index, :path, :handle, or :lane, "
-       "echo that identity in your output so the caller can merge results. When you "
-       "classify, use only the supplied label set, and include calibrated uncertainty "
-       "when the evidence is ambiguous instead of guessing. Do not invent counts, "
-       "totals, or facts the input does not support; if the bounded input is "
-       "insufficient, report that inside the requested shape. For EDN mode, return "
-       "exactly one EDN value with no prose, no Markdown, and no code fence."))
-
 (defn leaf-request [input query cache-request]
   {:request/messages [{:message/role :system
-                       :message/content leaf-system-prompt}
+                       :message/content prompt/leaf-prompt}
                       {:message/role :user
                        :message/content (str "Input EDN:\n" (pr-str input)
                                              "\n\nQuery:\n" query)}]
@@ -86,7 +79,10 @@
         cache-id (or (get-in @state [:session :session/cache-id])
                      (get-in @state [:session :session/id]))
         cache-purpose (if (= role :leaf) :leaf :agent)]
-    (cond-> (assoc call
+    ;; The request is stored once, under :call/request-ref. Keeping the raw
+    ;; :request inline too would log the full (growing) transcript on every root
+    ;; step into the append-only journal — O(n^2) bytes. Drop it; the ref is canonical.
+    (cond-> (assoc (dissoc call :request)
                    :call/id call-id
                    :call/provider (:provider model-cfg)
                    :call/model (:model model-cfg)
@@ -101,41 +97,39 @@
                    :call/cache-request cache-request)
       (:call/message-ids call) (assoc :call/request-message-ids (:call/message-ids call)))))
 
-(defn call-provider! [state cfg role call]
-  (let [reserved-call-id (artifacts/next-counter! state :call)
-        call-row (artifacts/add-call! state (enrich-call state cfg role call reserved-call-id))
-        call-id (:call/id call-row)
-        request (:request call)
-        response (try
-                   (provider/complete cfg role request)
-                   (catch Throwable t
-                     (let [model-cfg (get-in cfg [:models role])
-                           err {:error/type :provider/failed
-                                :error/message (.getMessage t)
-                                :error/data (ex-data t)
-                                :error/provider (:provider model-cfg)
-                                :error/model (:model model-cfg)
-                                :error/role role
-                                :error/retryable? false}]
-                       (artifacts/update-call! state call-id assoc
-                                               :call/status :error
-                                               :call/error err
-                                               :call/usage {:usage/status :unknown}
-                                               :call/cost {:cost/status :unknown}
-                                               :call/cache {:cache/status :unknown}
-                                               :call/ended-at (time/now-str))
-                       (artifacts/add-event! state {:event/type :provider-failed
-                                                    :call/id call-id
-                                                    :error err})
-                       (throw (ex-info "Provider call failed" err t)))))]
-    (artifacts/update-call! state call-id assoc
-                            :call/status :ok
-                            :call/response-ref (call-value-ref! state call-id :response response)
-                            :call/usage (:response/usage response {:usage/status :unknown})
-                            :call/cost (:response/cost response {:cost/usd :unknown})
-                            :call/cache (:response/cache response {:cache/status :unknown})
-                            :call/ended-at (time/now-str))
-    {:call-id call-id :response response}))
+(defn call-provider!
+  "A provider completion as a traced call. Returns {:call-id .. :response ..}."
+  [state cfg role call]
+  (call/traced!
+   state
+   {:build-call (fn [call-id] (enrich-call state cfg role call call-id))
+    :work (fn [_call-id]
+            (concurrent/with-deadline (:call-timeout-ms cfg)
+              (fn [] (provider/complete cfg role (:request call)))))
+    :succeed (fn [call-id response]
+               {:value {:call-id call-id :response response}
+                :patch {:call/status :ok
+                        :call/response-ref (call-value-ref! state call-id :response response)
+                        :call/usage (:response/usage response {:usage/status :unknown})
+                        :call/cost (:response/cost response {:cost/usd :unknown})
+                        :call/cache (:response/cache response {:cache/status :unknown})}})
+    :fail (fn [call-id t]
+            (let [model-cfg (get-in cfg [:models role])
+                  err {:error/type :provider/failed
+                       :error/message (.getMessage t)
+                       :error/data (ex-data t)
+                       :error/provider (:provider model-cfg)
+                       :error/model (:model model-cfg)
+                       :error/role role
+                       :error/retryable? false}]
+              (artifacts/add-event! state {:event/type :provider-failed
+                                           :call/id call-id
+                                           :error err})
+              {:patch {:call/error err
+                       :call/usage {:usage/status :unknown}
+                       :call/cost {:cost/status :unknown}
+                       :call/cache {:cache/status :unknown}}
+               :ex (ex-info "Provider call failed" err t)}))}))
 
 (defn parse-leaf [text mode]
   (case mode
@@ -154,29 +148,6 @@
                        :fanout/count-at-least (count xs)
                        :error/retryable? false}))
       xs)))
-
-(defn daemon-executor [prefix]
-  (let [counter (atom 0)]
-    (Executors/newCachedThreadPool
-     (reify ThreadFactory
-       (newThread [_ r]
-         (doto (Thread. r (str prefix "-" (swap! counter inc)))
-           (.setDaemon true)))))))
-
-(defn parallel-map-indexed [prefix f xs]
-  (let [executor (daemon-executor prefix)
-        f' (bound-fn [idx x] (f idx x))]
-    (try
-      (let [tasks (mapv (fn [idx x]
-                          (.submit executor
-                                   ^Callable
-                                   (reify Callable
-                                     (call [_] (f' idx x)))))
-                        (range) xs)]
-        (mapv #(.get %) tasks))
-      (finally
-        (.shutdownNow executor)
-        (.awaitTermination executor 5 TimeUnit/SECONDS)))))
 
 (defn session-cache-id [state]
   (or (get-in @state [:session :session/cache-id])
@@ -259,13 +230,14 @@
                                   :source/snapshot-id (:snapshot/id snapshot-row)}
                  :lineage/parents lineage-parents
                  :lineage/created-at ended-at}]
-    (swap! state assoc :messages messages)
-    (swap! state update :counters merge {:message max-message-id
-                                         :turn (long source-turn-id)})
-    (swap! state update :session assoc
-           :session/restored-from (:lineage/source lineage)
-           :session/lineage-kind lineage-kind
-           :session/latest-turn-id source-turn-id)
+    (artifacts/emit! state
+                     {:event/type :session/restored
+                      :messages messages
+                      :counters {:message max-message-id
+                                 :turn (long source-turn-id)}
+                      :session-patch {:session/restored-from (:lineage/source lineage)
+                                      :session/lineage-kind lineage-kind
+                                      :session/latest-turn-id source-turn-id}})
     (snapshot/write-restore-report! (:dir @state) restore-report)
     (snapshot/write-lineage! (:dir @state) lineage)
     (artifacts/add-event! state {:event/type :restore-end
@@ -276,6 +248,29 @@
     (artifacts/flush! state)
     {:restore-report restore-report
      :lineage lineage}))
+
+(defn child-final-value
+  "Validate a sub-session result and return its FINAL value, or throw a typed error.
+  `errs` supplies the error types for the spawning kind: {:failed .. :no-final ..}
+  (child vs attach). A child's returned value is a claim until it carries a FINAL."
+  [result cid child-rel errs]
+  (cond
+    (= :error (:status result))
+    (throw (ex-info "Child process failed"
+                    {:error/type (:failed errs)
+                     :error/message "Child process returned error"
+                     :error/data (:error result)
+                     :child/session-id cid
+                     :child/dir child-rel
+                     :error/retryable? false}))
+    (not (contains? result :final-value))
+    (throw (ex-info "Child process did not return FINAL"
+                    {:error/type (:no-final errs)
+                     :error/message "Child process returned without a FINAL value"
+                     :child/session-id cid
+                     :child/dir child-rel
+                     :error/retryable? false}))
+    :else (:final-value result)))
 
 (defn make-ops [state cfg ns-sym]
   (letfn [(leaf-call [call-type input query mode extra]
@@ -304,7 +299,7 @@
             ([inputs query mode]
              (let [inputs' (bounded-fanout-inputs :leaf cfg inputs)
                    batch-id (str "leaf-batch-" (java.util.UUID/randomUUID))
-                   results (parallel-map-indexed
+                   results (concurrent/parallel-map-indexed
                             "fractal-map-lm"
                             (fn [idx input]
                               (try
@@ -329,65 +324,48 @@
                   child-rel (str "children/" cid)
                   child-dir (artifacts/path (:dir @state) child-rel)
                   parent-cache-id (session-cache-id state)
-                  child-cache-id (str parent-cache-id "/" child-rel)
-                  call-row (artifacts/add-call! state (merge {:call/type call-type
-                                                              :call/turn-id runtime/*current-turn-id*
-                                                              :edge/type :spawned
-                                                              :call/parent-eval-id runtime/*current-eval-id*
-                                                              :child/session-id cid
-                                                              :child/cache-id child-cache-id
-                                                              :child/dir child-rel}
-                                                             extra))
-                  parent {:parent/session-id (:session/id (:session @state))
-                          :parent/cache-id parent-cache-id
-                          :parent/call-id (:call/id call-row)
-                          :parent/eval-id runtime/*current-eval-id*
-                          :parent/relative-dir ".."}]
-              (try
-                (let [result (run-process! cfg {:dir child-dir
-                                                :id cid
-                                                :cache-id child-cache-id
-                                                :kind :child
-                                                :parent parent
-                                                :task (child-task-prompt task)})
-                      value (:final-value result)]
-                  (artifacts/update-call! state (:call/id call-row) assoc
-                                          :call/status (:status result)
-                                          :call/final-ref (artifacts/value-ref! (:dir @state) value)
-                                          :call/error (:error result)
-                                          :call/ended-at (time/now-str))
-                  (cond
-                    (= :error (:status result))
-                    (throw (ex-info "Child process failed"
-                                    {:error/type :fractal/child-failed
-                                     :error/message "Child process returned error"
-                                     :error/data (:error result)
-                                     :child/session-id cid
-                                     :child/dir child-rel
-                                     :error/retryable? false}))
-                    (not (contains? result :final-value))
-                    (throw (ex-info "Child process did not return FINAL"
-                                    {:error/type :fractal/child-no-final
-                                     :error/message "Child process returned without a FINAL value"
-                                     :child/session-id cid
-                                     :child/dir child-rel
-                                     :error/retryable? false}))
-                    :else
-                    value))
-                (catch Throwable t
-                  (let [data (ex-data t)
-                        err (merge {:error/type :fractal/child-failed
-                                    :error/message (.getMessage t)
-                                    :error/data data
-                                    :child/session-id cid
-                                    :child/dir child-rel
-                                    :error/retryable? false}
-                                   (select-keys data [:error/type :child/session-id :child/dir :error/retryable?]))]
-                    (artifacts/update-call! state (:call/id call-row) assoc
-                                            :call/status :error
-                                            :call/error err
-                                            :call/ended-at (time/now-str))
-                    (throw (ex-info "Child process failed" err t)))))))
+                  child-cache-id (str parent-cache-id "/" child-rel)]
+              (call/traced!
+               state
+               {:build-call (fn [_id]
+                              (merge {:call/type call-type
+                                      :call/turn-id runtime/*current-turn-id*
+                                      :edge/type :spawned
+                                      :call/parent-eval-id runtime/*current-eval-id*
+                                      :child/session-id cid
+                                      :child/cache-id child-cache-id
+                                      :child/dir child-rel}
+                                     extra))
+                :work (fn [call-id]
+                        (let [parent {:parent/session-id (:session/id (:session @state))
+                                      :parent/cache-id parent-cache-id
+                                      :parent/call-id call-id
+                                      :parent/eval-id runtime/*current-eval-id*
+                                      :parent/relative-dir ".."}
+                              result (run-process! cfg {:dir child-dir
+                                                        :id cid
+                                                        :cache-id child-cache-id
+                                                        :kind :child
+                                                        :parent parent
+                                                        :task (child-task-prompt task)})]
+                          (child-final-value result cid child-rel
+                                             {:failed :fractal/child-failed
+                                              :no-final :fractal/child-no-final})))
+                :succeed (fn [_id value]
+                           {:value value
+                            :patch {:call/status :final
+                                    :call/final-ref (artifacts/value-ref! (:dir @state) value)}})
+                :fail (fn [_id t]
+                        (let [data (ex-data t)
+                              err (merge {:error/type :fractal/child-failed
+                                          :error/message (.getMessage t)
+                                          :error/data data
+                                          :child/session-id cid
+                                          :child/dir child-rel
+                                          :error/retryable? false}
+                                         (select-keys data [:error/type :child/session-id :child/dir :error/retryable?]))]
+                          {:patch {:call/error err}
+                           :ex (ex-info "Child process failed" err t)}))})))
           (attach-call [source-path task opts]
             (let [source-dir (artifacts/path source-path)
                   source-fingerprint (snapshot/session-fingerprint source-dir)
@@ -414,92 +392,76 @@
                   child-dir (artifacts/path (:dir @state) child-rel)
                   parent-cache-id (session-cache-id state)
                   child-cache-id (str parent-cache-id "/" child-rel)
-                  call-row (artifacts/add-call! state {:call/type :attached-child
-                                                       :call/turn-id runtime/*current-turn-id*
-                                                       :edge/type :attached
-                                                       :call/parent-eval-id runtime/*current-eval-id*
-                                                       :attach/source-path (str source-dir)
-                                                       :attach/source-fingerprint source-fingerprint
-                                                       :attach/source-turn-id (:snapshot/turn-id snapshot-row)
-                                                       :attach/source-snapshot-id (:snapshot/id snapshot-row)
-                                                       :child/session-id cid
-                                                       :child/cache-id child-cache-id
-                                                       :child/dir child-rel})
-                  parent {:parent/session-id (:session/id (:session @state))
-                          :parent/cache-id parent-cache-id
-                          :parent/call-id (:call/id call-row)
-                          :parent/eval-id runtime/*current-eval-id*
-                          :parent/relative-dir ".."}
-                  child-state (artifacts/new-state! {:dir child-dir
-                                                     :id cid
-                                                     :cache-id child-cache-id
-                                                     :kind :child
-                                                     :provider (provider-shape (child-root-config cfg :child))
-                                                     :parent parent})
-                  child-ns (runtime/session-ns-symbol cid)
-                  child-cfg (child-root-config cfg :child)
-                  child-ops (make-ops child-state child-cfg child-ns)]
-              (try
-                (artifacts/add-event! state {:event/type :attach-rlm-start
-                                             :call/id (:call/id call-row)
-                                             :snapshot/id (:snapshot/id snapshot-row)})
-                (runtime/ensure-ns! child-ns child-ops)
-                (restore-state-from-snapshot!
-                 child-state
-                 source-dir
-                 child-ns
-                 snapshot-row
-                 snapshot-blob
-                 :attached-child
-                 [{:parent/kind :child-of
-                   :parent/path (str (:dir @state))
-                   :parent/call-id (:call/id call-row)
-                   :parent/eval-id runtime/*current-eval-id*}
-                  {:parent/kind :attached-from
-                   :parent/path (str source-dir)
-                   :parent/turn-id (:snapshot/turn-id snapshot-row)
-                   :parent/snapshot-id (:snapshot/id snapshot-row)}]
-                 source-fingerprint)
-                (let [result (run-turn-on-state! child-state child-cfg child-ns task)
-                      value (:final-value result)]
-                  (artifacts/update-status! child-state (if (= :error (:status result)) :error :stopped))
-                  (artifacts/add-event! child-state {:event/type :session-stopped
-                                                     :session/id (:session/id (:session @child-state))})
-                  (artifacts/update-call! state (:call/id call-row) assoc
-                                          :call/status (:status result)
-                                          :call/final-ref (artifacts/value-ref! (:dir @state) value)
-                                          :call/error (:error result)
-                                          :call/ended-at (time/now-str))
-                  (artifacts/add-event! state {:event/type :attach-rlm-end
-                                               :call/id (:call/id call-row)
-                                               :call/status (:status result)})
-                  (cond
-                    (= :error (:status result))
-                    (throw (ex-info "Attached child returned error"
-                                    {:error/type :attach/child-error
-                                     :error/data (:error result)
-                                     :child/session-id cid
-                                     :child/dir child-rel}))
-                    (not (contains? result :final-value))
-                    (throw (ex-info "Attached child did not return FINAL"
-                                    {:error/type :attach/no-final
-                                     :child/session-id cid
-                                     :child/dir child-rel}))
-                    :else value))
-                (catch Throwable t
-                  (let [err (merge {:error/type :attach/child-error
-                                    :error/message (.getMessage t)
-                                    :child/session-id cid
-                                    :child/dir child-rel}
-                                   (select-keys (ex-data t) [:error/type :error/data]))]
-                    (artifacts/update-call! state (:call/id call-row) assoc
-                                            :call/status :error
-                                            :call/error err
-                                            :call/ended-at (time/now-str))
-                    (artifacts/add-event! state {:event/type :attach-rlm-error
-                                                 :call/id (:call/id call-row)
-                                                 :error err})
-                    (throw (ex-info "Attach RLM failed" err t)))))))
+                  child-cfg (child-root-config cfg :child)]
+              (call/traced!
+               state
+               {:build-call (fn [_id]
+                              {:call/type :attached-child
+                               :call/turn-id runtime/*current-turn-id*
+                               :edge/type :attached
+                               :call/parent-eval-id runtime/*current-eval-id*
+                               :attach/source-path (str source-dir)
+                               :attach/source-fingerprint source-fingerprint
+                               :attach/source-turn-id (:snapshot/turn-id snapshot-row)
+                               :attach/source-snapshot-id (:snapshot/id snapshot-row)
+                               :child/session-id cid
+                               :child/cache-id child-cache-id
+                               :child/dir child-rel})
+                :work (fn [call-id]
+                        (artifacts/add-event! state {:event/type :attach-rlm-start
+                                                     :call/id call-id
+                                                     :snapshot/id (:snapshot/id snapshot-row)})
+                        (let [parent {:parent/session-id (:session/id (:session @state))
+                                      :parent/cache-id parent-cache-id
+                                      :parent/call-id call-id
+                                      :parent/eval-id runtime/*current-eval-id*
+                                      :parent/relative-dir ".."}
+                              child-state (artifacts/new-state! {:dir child-dir
+                                                                 :id cid
+                                                                 :cache-id child-cache-id
+                                                                 :kind :child
+                                                                 :provider (provider-shape child-cfg)
+                                                                 :parent parent})
+                              child-ns (runtime/session-ns-symbol cid)
+                              child-ops (make-ops child-state child-cfg child-ns)]
+                          (runtime/ensure-ns! child-ns child-ops)
+                          (restore-state-from-snapshot!
+                           child-state source-dir child-ns snapshot-row snapshot-blob
+                           :attached-child
+                           [{:parent/kind :child-of
+                             :parent/path (str (:dir @state))
+                             :parent/call-id call-id
+                             :parent/eval-id runtime/*current-eval-id*}
+                            {:parent/kind :attached-from
+                             :parent/path (str source-dir)
+                             :parent/turn-id (:snapshot/turn-id snapshot-row)
+                             :parent/snapshot-id (:snapshot/id snapshot-row)}]
+                           source-fingerprint)
+                          (let [result (run-turn-on-state! child-state child-cfg child-ns task)]
+                            (artifacts/update-status! child-state (if (= :error (:status result)) :error :stopped))
+                            (artifacts/add-event! child-state {:event/type :session-stopped
+                                                               :session/id (:session/id (:session @child-state))})
+                            (child-final-value result cid child-rel
+                                               {:failed :attach/child-error
+                                                :no-final :attach/no-final}))))
+                :succeed (fn [call-id value]
+                           (artifacts/add-event! state {:event/type :attach-rlm-end
+                                                        :call/id call-id
+                                                        :call/status :final})
+                           {:value value
+                            :patch {:call/status :final
+                                    :call/final-ref (artifacts/value-ref! (:dir @state) value)}})
+                :fail (fn [call-id t]
+                        (let [err (merge {:error/type :attach/child-error
+                                          :error/message (.getMessage t)
+                                          :child/session-id cid
+                                          :child/dir child-rel}
+                                         (select-keys (ex-data t) [:error/type :error/data]))]
+                          (artifacts/add-event! state {:event/type :attach-rlm-error
+                                                       :call/id call-id
+                                                       :error err})
+                          {:patch {:call/error err}
+                           :ex (ex-info "Attach RLM failed" err t)}))})))
           (rlm [task]
             (child-call :child task {}))
           (map-rlm
@@ -507,7 +469,7 @@
             ([tasks shared-instruction]
              (let [tasks' (bounded-fanout-inputs :child cfg tasks)
                    batch-id (str "child-batch-" (java.util.UUID/randomUUID))
-                   results (parallel-map-indexed
+                   results (concurrent/parallel-map-indexed
                             "fractal-map-rlm"
                             (fn [idx task]
                               (try
@@ -611,17 +573,10 @@
                                                         :call/message-ids (mapv :message/id (:messages @state))
                                                         :request request})
                            content (provider/response-text response)
-                           assistant (artifacts/add-message! state :assistant content turn-id)]
-                       (swap! state update :messages
-                              (fn [messages]
-                                (mapv (fn [m]
-                                        (if (= (:message/id m) (:message/id assistant))
-                                          (assoc m :message/call-id call-id)
-                                          m))
-                                      messages)))
-                       (artifacts/flush! state)
+                           assistant (artifacts/add-message! state :assistant content turn-id
+                                                             {:message/call-id call-id})]
                        (artifacts/add-turn-id! state turn-id :turn/assistant-message-ids (:message/id assistant))
-                       (eval-assistant! state cfg ns-sym turn-id (assoc assistant :message/call-id call-id)))
+                       (eval-assistant! state cfg ns-sym turn-id assistant))
                      (catch clojure.lang.ExceptionInfo e
                        (if (= :provider/failed (:error/type (ex-data e)))
                          {:status :provider-error :error (ex-data e)}

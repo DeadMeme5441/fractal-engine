@@ -4,6 +4,7 @@
             [fractal-engine.inspect :as inspect]
             [fractal-engine.process :as process]
             [fractal-engine.resume :as resume]
+            [fractal-engine.scripts :as scripts]
             [fractal-engine.session :as session]))
 
 (defn arg-map [args]
@@ -21,50 +22,6 @@
   (when (and v (not= true v))
     (Long/parseLong (str v))))
 
-(defn script-for [name]
-  (case name
-    "simple" ["```clojure\n(def x 42)\nx\n```"
-              "```clojure\n(FINAL {:answer x})\n```"]
-    "lm" ["```clojure\n(def answer (lm {:text \"alpha\"} \"Return a short label.\"))\n(FINAL {:leaf answer})\n```"
-          "alpha-label"]
-    "map-lm" ["```clojure\n(def answer (map-lm [{:id 1} {:id 2}] \"Return the id as EDN.\" :edn))\n(FINAL {:leaves answer})\n```"
-              "{:id 1}"
-              "{:id 2}"]
-    "rlm" ["```clojure\n(def child (rlm \"Return FINAL {:child true}\"))\n(FINAL {:child child})\n```"
-           "```clojure\n(FINAL {:child true})\n```"]
-    "map-rlm" ["```clojure\n(def children (map-rlm [\"Return FINAL 1\" \"Return FINAL 2\"]))\n(FINAL {:children children})\n```"
-               "```clojure\n(FINAL 1)\n```"
-               "```clojure\n(FINAL 2)\n```"]
-    "resume-setup" ["```clojure\n(def saved 99)\n(FINAL {:saved saved})\n```"]
-    "resume-use" ["```clojure\n(FINAL {:restored saved})\n```"]
-    "fake-source" ["```clojure\n(def x 42)\n(FINAL {:x x})\n```"]
-    "fake-resume" ["```clojure\n(FINAL {:resumed x :plus-one (inc x)})\n```"]
-    "multi-turn-chat" ["```clojure\n(def x 42)\n(FINAL {:saved x})\n```"
-                       "```clojure\n(FINAL {:restored x})\n```"]
-    ["```clojure\n(FINAL :ok)\n```"]))
-
-(defn response-fn-for [name]
-  (case name
-    "map-lm"
-    (fn [request]
-      (let [content (:message/content (last (:request/messages request)))]
-        (cond
-          (str/includes? content "map-lm")
-          "```clojure\n(def answer (map-lm [{:id 1} {:id 2}] \"Return the id as EDN.\" :edn))\n(FINAL {:leaves answer})\n```"
-          (str/includes? content "{:id 1}") "{:id 1}"
-          (str/includes? content "{:id 2}") "{:id 2}"
-          :else "{:unknown true}")))
-    "map-rlm"
-    (fn [request]
-      (let [content (:message/content (last (:request/messages request)))]
-        (cond
-          (str/includes? content "child fan-out")
-          "```clojure\n(def children (map-rlm [\"Return FINAL 1\" \"Return FINAL 2\"]))\n(FINAL {:children children})\n```"
-          (str/includes? content "Return FINAL 1") "```clojure\n(FINAL 1)\n```"
-          (str/includes? content "Return FINAL 2") "```clojure\n(FINAL 2)\n```"
-          :else "```clojure\n(FINAL :unknown)\n```")))
-    nil))
-
 (defn cfg-from-opts [opts]
   (let [provider (keyword (or (:provider opts) "scripted"))
         model (or (:model opts) "scripted")
@@ -73,14 +30,17 @@
         child-provider (keyword (or (:child-provider opts) (name provider)))
         child-model (or (:child-model opts) model)
         script-name (:fake-script opts)
-        response-fn (response-fn-for script-name)
+        response-fn (scripts/response-fn-for script-name)
         script (when (and script-name (nil? response-fn))
-                 (atom (vec (script-for script-name))))]
+                 (atom (vec (scripts/script-for script-name))))]
     (process/config
      (cond-> {:runs-dir (or (:runs-dir opts) "runs")
               :models {:root {:provider provider :model model}
                        :leaf {:provider leaf-provider :model leaf-model}
                        :child {:provider child-provider :model child-model}}}
+       (:max-turns opts) (assoc :max-turns (parse-long-opt (:max-turns opts)))
+       (:max-fanout opts) (assoc :max-fanout (parse-long-opt (:max-fanout opts)))
+       (:call-timeout-ms opts) (assoc :call-timeout-ms (parse-long-opt (:call-timeout-ms opts)))
        response-fn (assoc :scripted/response-fn response-fn)
        script (assoc :scripted/responses script)))))
 
@@ -90,13 +50,34 @@
      :dir (artifacts/path (:runs-dir cfg) sid)}
     {}))
 
+(defn usage-line
+  "A compact, always-visible spend summary read from the materialized usage.edn —
+  the answer to runaway worry is seeing the numbers, not capping them."
+  [dir]
+  (when dir
+    (let [u (artifacts/read-edn-file (artifacts/path dir "usage.edn") nil)
+          tree (:usage/total-tree u)
+          cost (get-in u [:cost/total-tree :cost/usd])
+          kn (fn [m] (if (= :known (:status m)) (:known m) "?"))]
+      (when tree
+        (format "Usage: %s calls  tokens in=%s out=%s total=%s  cost=%s"
+                (str (:call/total-tree-count tree (:call/count tree)))
+                (str (kn (:tokens/input tree)))
+                (str (kn (:tokens/output tree)))
+                (str (kn (:tokens/total tree)))
+                (if (= :known (:status cost))
+                  (format "$%.4f" (double (:known cost)))
+                  (str "(" (name (get-in u [:cost/total-tree :cost/status] :unknown)) ")")))))))
+
 (defn print-result [result]
   (println "Session:" (str (:dir result)))
   (when (:turn-id result)
     (println "Turn:" (:turn-id result)))
   (println "Status:" (:status result))
   (when (contains? result :final-value)
-    (println "Final:" (pr-str (:final-value result)))))
+    (println "Final:" (pr-str (:final-value result))))
+  (when-let [line (usage-line (:dir result))]
+    (println line)))
 
 (defn run-command [opts]
   (let [cfg (cfg-from-opts opts)
@@ -138,7 +119,9 @@
                     (println "Turn:" (:turn-id result))
                     (if (= :error (:status result))
                       (println "Error:" (pr-str (:error result)))
-                      (println "Final:" (pr-str (:final-value result)))))
+                      (println "Final:" (pr-str (:final-value result))))
+                    (when-let [line (usage-line (:dir result))]
+                      (println line)))
                   (recur)))))))
 
 (defn resume-command [opts]
@@ -161,7 +144,7 @@
 
 (defn usage []
   (println "fractal-engine commands:")
-  (println "  run --question TEXT [--session ID] [--runs-dir DIR] [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--fake-script simple]")
+  (println "  run --question TEXT [--session ID] [--runs-dir DIR] [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--max-turns N] [--max-fanout N] [--fake-script simple]")
   (println "  chat [--session ID] [--runs-dir DIR] [--dir runs/session-id] [--fake-script multi-turn-chat]  # /send submits a message")
   (println "  inspect --dir runs/session-id [--tree --snapshots --handles --json]")
   (println "  resume --dir runs/session-id --question TEXT [--turn N] [--session session-id] [--fake-script resume-use]")
