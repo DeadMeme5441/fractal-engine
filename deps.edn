@@ -5,7 +5,7 @@
         cheshire/cheshire {:mvn/version "5.13.0"}
         com.deadmeme5441/clojure-llm-sdk
         {:git/url "https://github.com/DeadMeme5441/clojure-llm-sdk"
-         :git/sha "22792ff0294e034e29f1d3a8f37540b931763e3c"}}
+         :git/sha "37458c825b97fabd120c70189eb9bf6e89d45c23"}}
  :aliases
  {:test
   {:extra-paths ["test"]
