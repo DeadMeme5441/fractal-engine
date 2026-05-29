@@ -1,5 +1,6 @@
 (ns fractal-engine.session
-  (:require [fractal-engine.artifacts :as artifacts]
+  (:require [clojure.string :as str]
+            [fractal-engine.artifacts :as artifacts]
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.runtime :as runtime]
@@ -22,8 +23,14 @@
     ops))
 
 (defn start-session!
+  "Start a fresh session. Opts may carry an `:overlay` — an extra, session-level
+  system instruction appended to the base behavior in the single system message.
+  It is a standing specialization for the whole session (e.g. codebrain's brain
+  role), stated once at birth and carried across every turn and resume via the
+  message history; it is NOT the per-turn task. Kept to one combined system
+  message so it is provider-agnostic (some adapters honor only the first system)."
   ([cfg] (start-session! cfg {}))
-  ([cfg {:keys [dir id kind parent cache-id]}]
+  ([cfg {:keys [dir id kind parent cache-id overlay]}]
    (let [cfg (process/config cfg)
          effective-cfg (process/child-root-config cfg kind)
          sid (or id (artifacts/session-id))
@@ -35,10 +42,11 @@
                                       :provider (process/provider-shape effective-cfg)
                                       :parent parent})
          ns-sym (runtime/session-ns-symbol sid)
-         ops (install! state effective-cfg ns-sym)]
-     (artifacts/add-message! state :system (if (= :child kind)
-                                             prompt/child-prompt
-                                             prompt/system-prompt))
+         ops (install! state effective-cfg ns-sym)
+         base (if (= :child kind) prompt/child-prompt prompt/system-prompt)]
+     (artifacts/add-message! state :system (if (str/blank? (str overlay))
+                                             base
+                                             (str base "\n\n" overlay)))
      (session-handle state effective-cfg ns-sym ops))))
 
 (defn run-turn! [session user-message]

@@ -26,8 +26,8 @@ recursions. It is built in the spirit of
 
 **Get it running:** [Requirements](#requirements) · [Install](#install) ·
 [Quickstart (no API keys)](#quickstart-no-api-keys) · [Where runs live](#where-runs-live-fractal) ·
-[The `fractal` CLI](#the-fractal-cli) · [Going live: providers](#going-live-providers) ·
-[Troubleshooting](#troubleshooting)
+[The `fractal` CLI](#the-fractal-cli) · [codebrain](#codebrain--a-code-discovery-brain) ·
+[Going live: providers](#going-live-providers) · [Troubleshooting](#troubleshooting)
 
 **Understand it:** [How the loop works](#how-the-loop-works) · [The six functions](#the-six-functions) ·
 [Artifacts & the journal](#artifacts--the-journal) · [The trust layer](#the-trust-layer) ·
@@ -35,7 +35,7 @@ recursions. It is built in the spirit of
 [Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
 
 **Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/CLI.md`](docs/CLI.md) ·
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/CODEBRAIN.md`](docs/CODEBRAIN.md)
 
 ---
 
@@ -193,6 +193,24 @@ children.
 
 **Exit codes:** `0` final · `1` error · `2` no-final · `3` timeout · `5` confabulation
 suspected. So you can gate on them: `fractal verify <run> --deep --root . && deploy`.
+
+## codebrain — a code-discovery brain
+
+`fractal codebrain` is a thin product surface that points the engine at a codebase:
+it builds itself a **repo map** (by fanning children over the subsystems, not by a
+regex dump), keeps it on disk like `bd` keeps its db, and then answers a coding
+agent's questions about the code with small, **cited** EDN — so the agent spends
+its context on the change, not on reading the tree.
+
+```bash
+fractal codebrain init --path ./src --provider vertex-gemini --model gemini-3.1-pro-preview
+fractal codebrain ask  "Where are CLI verbs registered and what's the handler contract?"
+fractal codebrain map        # show the persisted map  ·  status  # freshness + HEAD
+```
+
+Born once (the build is the amortized cost); each `ask` resumes the warm brain and
+runs cheap. Full setup, auth for every provider, and the answer shape:
+[`docs/CODEBRAIN.md`](docs/CODEBRAIN.md).
 
 ## Going live: providers
 

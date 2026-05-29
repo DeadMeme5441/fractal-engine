@@ -53,4 +53,20 @@
           (clojure.string/includes? content "Return FINAL 1") "```clojure\n(FINAL 1)\n```"
           (clojure.string/includes? content "Return FINAL 2") "```clojure\n(FINAL 2)\n```"
           :else "```clojure\n(FINAL :unknown)\n```")))
+    ;; codebrain offline plumbing: content-sensitive so it survives separate CLI
+    ;; processes (the brain is born in one process, resumed in another). The build
+    ;; turn defs+FINALs a tiny map; the ask turn FINALs a cited answer that reads
+    ;; the warm `repo-map` var — proving the overlay+resume wiring end to end
+    ;; without any real exploration or provider cost.
+    "codebrain"
+    (fn [request]
+      (let [content (:message/content (last (:request/messages request)))]
+        (cond
+          (clojure.string/includes? content "Build (or rebuild) your repo map")
+          "```clojure\n(def repo-map {:root \"r\" :overview \"toy repo\" :languages [\"clojure\"] :subsystems [{:subsystem \"core\" :purpose \"the loop\" :key-files [{:path \"a.clj\" :role \"entry\" :symbols [\"f\"]}]}] :where-to-look [{:topic \"loop\" :start [\"a.clj\"]}] :entrypoints [{:path \"a.clj\" :what \"main\"}]})\n(FINAL repo-map)\n```"
+
+          (clojure.string/includes? content "Coding-agent query")
+          "```clojure\n(FINAL {:answer (str \"the map knows \" (count (:subsystems repo-map)) \" subsystem(s); root=\" (:root repo-map)) :evidence [{:file \"a.clj\" :lines \"1-2\" :quote \"f\"}] :files-read [\"a.clj\"] :pointers [{:what \"start here\" :file \"a.clj\" :lines \"1\"}] :missing [] :map-stale? false})\n```"
+
+          :else "```clojure\n(FINAL :ok)\n```")))
     nil))

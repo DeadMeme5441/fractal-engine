@@ -1194,3 +1194,44 @@
                        {:exe "fractal" :run "demo"})]
           (is (clojure.string/includes? summary "●"))
           (is (clojure.string/includes? summary "fractal show demo")))))))
+
+(deftest codebrain-overlay-and-persistent-brain
+  ;; codebrain is a session-level overlay + persistent (disk-backed) brain on top
+  ;; of the engine. We prove the wiring with the scripted provider: birth builds
+  ;; and persists a map, and a later ask — in the SAME way a fresh CLI process
+  ;; would — resumes the brain and computes from the WARM `repo-map` var, which
+  ;; only exists if the overlay'd session was restored.
+  (testing "the overlay is a single combined system message (provider-agnostic)"
+    (let [dir (tmp-dir "cb-overlay")
+          s   (session/start-session!
+               (process/config {:runs-dir dir})
+               {:id "ov" :dir (str dir "/ov") :overlay "OVERLAY-MARKER"})
+          systems (filter #(= :system (:message/role %)) (:messages @(:state s)))]
+      (session/stop-session! s)
+      (is (= 1 (count systems)) "exactly one system message, not two")
+      (is (clojure.string/includes? (:message/content (first systems)) "OVERLAY-MARKER"))
+      (is (clojure.string/includes? (:message/content (first systems)) "FINAL")
+          "the base behavior is still present under the overlay")))
+  (testing "init builds + persists a map, ask resumes the warm var, status tracks HEAD"
+    (let [dir (tmp-dir "cb-brain")
+          init (agentcli/dispatch "codebrain"
+                                  ["init" "--path" dir "--fake-script" "codebrain" "--runs-dir" dir])]
+      (is (= 0 (:exit init)))
+      (is (clojure.string/includes? (:out init) "codebrain born"))
+      (let [m (fractal-engine.codebrain/load-map (fractal-engine.codebrain/brain-dir dir))]
+        (is (= 1 (count (:subsystems m))) "the built map was persisted to disk"))
+      ;; a separate dispatch call = a fresh cfg/atom, like a new CLI process
+      (let [ask (agentcli/dispatch "codebrain"
+                                   ["ask" "how many subsystems?" "--fake-script" "codebrain" "--runs-dir" dir])]
+        (is (= 0 (:exit ask)))
+        (is (clojure.string/includes? (:out ask) "the map knows 1 subsystem")
+            "the answer was computed from the resumed, warm repo-map var"))
+      (let [{:keys [out exit]} (agentcli/dispatch "codebrain" ["status" "--runs-dir" dir])]
+        (is (= 0 exit))
+        (is (clojure.string/includes? out "turns  1"))
+        (is (clojure.string/includes? out "t0001")))))
+  (testing "ask before init is an actionable error"
+    (let [dir (tmp-dir "cb-empty")
+          {:keys [exit out]} (agentcli/dispatch "codebrain" ["ask" "x" "--runs-dir" dir])]
+      (is (= 1 exit))
+      (is (clojure.string/includes? out "build one first")))))

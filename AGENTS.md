@@ -40,10 +40,14 @@ The engine is layered by concern (full map in [`docs/ARCHITECTURE.md`](docs/ARCH
 - **provider** — the LLM adapter boundary
 - **read surface** — a journal-folding projection and the trust layer (provenance,
   claim-vs-evidence), rendered by the `fractal` CLI
-- **product** — the CLI (and, later, a TUI / MCP adapter)
+- **product** — the CLI, and `codebrain` (a code-discovery brain; see
+  [`docs/CODEBRAIN.md`](docs/CODEBRAIN.md)) — and, later, a TUI / MCP adapter
 
 Do not add storage, memory, workflow, product, repository-analysis, or task-template
-concepts to the compute kernel. Those belong in layers *around* the kernel.
+concepts to the compute kernel. Those belong in layers *around* the kernel — which is
+exactly where `codebrain` lives: it is two prompts plus persistence on top of the
+engine (a session-level overlay carried in the message history), and it changes
+nothing in the kernel or the behavior prompt.
 
 ## Current status
 

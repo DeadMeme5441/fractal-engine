@@ -30,6 +30,7 @@
             [clojure.walk :as walk]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cli :as cli]
+            [fractal-engine.codebrain :as codebrain]
             [fractal-engine.journal :as journal]
             [fractal-engine.projection :as proj]
             [fractal-engine.provenance :as prov]
@@ -395,7 +396,8 @@
              "  fractal chat   [run]            talk to it — persistent, resumable\n"
              "  fractal run    \"<task>\" [--provider P --model M --fake-script S]\n"
              "  fractal resume <run> \"<task>\" [--turn N]\n"
-             "  fractal fork   <run> \"<task>\" [--turn N --name NAME]\n\n"
+             "  fractal fork   <run> \"<task>\" [--turn N --name NAME]\n"
+             "  fractal codebrain <init|ask|map|status>   persistent code-discovery brain\n\n"
              "read (see what happened):\n"
              "  fractal show   <run> [node]     detail; the hub. node defaults to root\n"
              "  fractal tree   <run>            addressable run tree\n"
@@ -415,6 +417,8 @@
 (def verbs
   {;; drive
    "chat" cmd-chat "run" cmd-run "resume" cmd-resume "fork" cmd-fork
+   ;; codebrain — a persistent code-discovery brain (its own sub-grammar)
+   "codebrain" codebrain/command "cb" codebrain/command
    ;; read
    "show" cmd-show "tree" cmd-tree "prime" cmd-prime "ls" cmd-ls "list" cmd-ls
    "verify" cmd-verify "trace" cmd-trace "cost" cmd-cost "leaves" cmd-leaves
