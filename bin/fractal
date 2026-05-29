@@ -9,7 +9,14 @@
 #   clojure -T:build uber
 # Without the jar it falls back to running from source (slower; runs from the repo).
 set -euo pipefail
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# resolve through symlinks so a `fractal` symlink on PATH still finds the repo/jar
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ $src != /* ]] && src="$dir/$src"
+done
+here="$(cd -P "$(dirname "$src")/.." && pwd)"
 jar="$here/target/fractal.jar"
 if [[ -f "$jar" ]]; then
   exec java -jar "$jar" "$@"
