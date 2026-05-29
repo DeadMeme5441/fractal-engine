@@ -19,12 +19,4 @@
   ;; (runtime eval), so we ship an uberjar:  clojure -T:build uber
   :build
   {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
-   :ns-default build}
-
-  ;; SPIKE (future human TUI, bead fcd): fulcro-tui as the 3-pane chat+inspector.
-  ;; Isolated alias; not part of the CLI or its uberjar.
-  :inspector
-  {:extra-paths ["spike"]
-   :extra-deps {io.github.fulcrologic/fulcro-tui
-                {:git/sha "69bdcb9ea6d5e779ddae8030567bc75487df1e19"}}
-   :main-opts ["-m" "spike.inspector"]}}}
+   :ns-default build}}}

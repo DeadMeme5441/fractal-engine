@@ -11,3 +11,6 @@ runs/
 .dolt/
 *.db
 .beads-credential-key
+
+# internal dev/collaboration guidance — kept local, not for the public tree
+CLAUDE.md
