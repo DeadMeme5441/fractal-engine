@@ -19,8 +19,10 @@
   2 no-final · 3 timeout · 5 confabulation-suspected). A drive verb prints the run's
   name so it chains straight into a read verb — `fractal run \"…\"` → `fractal verify
   <run>`. A node address is `root`, `child-0001`, or `child-0001/child-0004` (the
-  leading `root/` is implied). `<run>` is a path (`runs/foo`) or a bare name resolved
-  under the runs dir (`foo` → `runs/foo`). Provider/model flags match the engine:
+  leading `root/` is implied). `<run>` is a path (`.fractal/foo`) or a bare name
+  resolved under the runs dir (`foo` → `.fractal/foo`). Runs live in `.fractal/` in
+  the directory you invoke from (discovered up the tree like git/bd); override with
+  `--runs-dir DIR`. Provider/model flags match the engine:
   `--provider`, `--model`, `--leaf-model`, `--child-model`, `--fake-script`,
   `--max-turns`, `--max-fanout`, `--call-timeout-ms`."
   (:require [cheshire.core :as json]
@@ -61,7 +63,7 @@
   "Resolve a run token to a dir: an existing path wins; otherwise `<runs-dir>/<token>`.
   Returns the dir string or nil."
   [token {:keys [runs-dir]}]
-  (let [runs-dir (or runs-dir "runs")]
+  (let [runs-dir (or runs-dir (cli/default-runs-dir))]
     (cond
       (dir? token) token
       (dir? (str runs-dir "/" token)) (str runs-dir "/" token)
@@ -113,7 +115,7 @@
     (if-let [dir (resolve-run token flags)]
       (f dir token)
       (err (format "no such run: %s (looked for a dir or %s/%s)"
-                   token (or (:runs-dir flags) "runs") token)))
+                   token (or (:runs-dir flags) (cli/default-runs-dir)) token)))
     (err "missing <run> argument")))
 
 (defn cmd-show [pos flags]
@@ -240,7 +242,7 @@
          :exit 0}))))
 
 (defn cmd-ls [_pos flags]
-  (let [runs-dir (or (:runs-dir flags) "runs")
+  (let [runs-dir (or (:runs-dir flags) (cli/default-runs-dir))
         root (File. ^String runs-dir)]
     (if-not (.isDirectory root)
       (err (str "no runs dir: " runs-dir))
@@ -326,7 +328,7 @@
     (fn [dir token]
       (let [task    (or (second pos) (:task flags) "Continue.")
             new-dir (or (:new-dir flags)
-                        (str (or (:runs-dir flags) "runs") "/"
+                        (str (or (:runs-dir flags) (cli/default-runs-dir)) "/"
                              (or (:name flags) (artifacts/session-id))))
             result  (resume/fork! (cli/cfg-from-opts (flags->opts flags)) dir new-dir task
                                   (cond-> {} (:turn flags) (assoc :turn (cli/parse-long-opt (:turn flags)))))]

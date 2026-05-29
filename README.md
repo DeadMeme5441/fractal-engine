@@ -3,14 +3,8 @@
 A small **recursive language-model compute engine**. A model drives a persistent
 Clojure REPL: it writes fenced Clojure, the host evaluates it and returns a compact
 observation, and the loop repeats until the model calls `(FINAL value)`. Some of the
-functions the model can call are themselves language models — so a problem can be
-*decomposed* into sub-problems, each solved by a fresh recursion of the same loop.
-
-It is a from-scratch JVM/Clojure engine built in the spirit of
-[Recursive Language Models](https://github.com/alexzhang13/rlm) (Alex Zhang et al.):
-instead of stuffing everything into one context window, the model **offloads its
-input into a REPL it can program against and call sub-models inside of**. See
-[Relevant reading](#relevant-reading).
+functions the model can call are *themselves* language models — so a problem can be
+decomposed into sub-problems, each solved by a fresh recursion of the same loop.
 
 ```clojure
 ;; the model writes this; the host evaluates it and feeds back the result
@@ -19,125 +13,142 @@ input into a REPL it can program against and call sub-models inside of**. See
 (FINAL {:n (count files) :summaries summaries})
 ```
 
+**Why this shape?** Large contexts are expensive and lossy. Instead of stuffing
+everything into one window, fractal-engine gives the model a programming environment
+and lets it decide how to read its own input — slicing with ordinary code, judging
+bounded pieces with cheap model calls, and handing whole sub-problems to fresh
+recursions. It is built in the spirit of
+[Recursive Language Models](https://github.com/alexzhang13/rlm) (Alex Zhang et al.).
+
 ---
 
 ## Table of contents
 
-- [Why](#why) · [How the loop works](#how-the-loop-works) · [The six functions](#the-six-functions)
-- [Install](#install) · [Quickstart](#quickstart)
-- [The `fractal` CLI](#the-fractal-cli) — drive the engine and read what it did
-- [Live providers](#live-providers) · [Artifacts & the journal](#artifacts--the-journal)
-- [The trust layer](#the-trust-layer) · [Resume & fork](#resume--fork) · [Sandboxing](#sandboxing)
-- [Architecture](#architecture) · [Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
-- Deep docs: [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/CLI.md`](docs/CLI.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+**Get it running:** [Requirements](#requirements) · [Install](#install) ·
+[Quickstart (no API keys)](#quickstart-no-api-keys) · [Where runs live](#where-runs-live-fractal) ·
+[The `fractal` CLI](#the-fractal-cli) · [Going live: providers](#going-live-providers) ·
+[Troubleshooting](#troubleshooting)
+
+**Understand it:** [How the loop works](#how-the-loop-works) · [The six functions](#the-six-functions) ·
+[Artifacts & the journal](#artifacts--the-journal) · [The trust layer](#the-trust-layer) ·
+[Resume & fork](#resume--fork) · [Sandboxing](#sandboxing) · [Architecture](#architecture) ·
+[Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
+
+**Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/CLI.md`](docs/CLI.md) ·
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ---
 
-## Why
+## Requirements
 
-Large contexts are expensive and lossy. The usual fix is retrieval; the recursive-LM
-fix is different: **give the model a programming environment and let it decide how to
-read its own input.** It can parse and slice with ordinary code, judge bounded pieces
-with cheap model calls, and hand whole sub-problems to fresh recursions — spending the
-expensive, powerful processing only where the work actually needs it.
+You need two things, both free and cross-platform (macOS, Linux, Windows/WSL):
 
-`fractal-engine` is the smallest engine that makes that real:
+| | What | Check it | Get it |
+|---|---|---|---|
+| **JDK 21+** | A Java runtime (the engine evaluates Clojure on the JVM) | `java -version` | [Temurin](https://adoptium.net/), [Homebrew](https://formulae.brew.sh/formula/openjdk) `brew install openjdk@21`, or your package manager |
+| **Clojure CLI** | The `clojure` / `clj` build+run tool | `clojure --version` | [clojure.org/guides/install_clojure](https://clojure.org/guides/install_clojure) |
 
-- **One loop, used everywhere.** The root, every child, and every leaf run the *same*
-  evaluate-observe-until-`FINAL` loop. There is no separate "planner" or "executor."
-- **Three kinds of processing, one shape.** Everything is `input -> processing ->
-  output`; only the *kind* of processing varies — deterministic (plain Clojure),
-  probabilistic (a leaf, whose body is a model), recursive (a child, which runs this
-  whole loop on a sub-problem).
-- **Results, not recipes.** Every step is recorded as an event in an append-only
-  journal. Re-reading a run never re-runs a model call.
-- **A trust layer.** A model's answer is a *claim*. The engine can check the claim's
-  cited evidence against the actual source files — first with a free grep, then, if you
-  ask, by handing the claim back to the engine to adversarially re-verify.
-
-It is deliberately tiny. Storage, retrieval, workflows, and product surfaces live in
-*layers around* the kernel — never in it (see [Anti-goals](#anti-goals)).
-
-## How the loop works
-
-1. Conversation messages are the model's working transcript.
-2. The model replies with one or more fenced ` ```clojure ` blocks.
-3. The host evaluates them, in order, in a **persistent namespace** (vars survive
-   across steps and turns).
-4. The host appends a compact **observation** message (values are projected, not dumped).
-5. Steps repeat until the model calls `(FINAL value)`, which ends the **turn** and
-   returns `value`.
-
-A session is long-lived. `(FINAL value)` completes the current turn; it does **not**
-end the session — the same history, REPL vars, and cache scope are available to the
-next turn. That is what makes a session a *persistent brain you can keep talking to.*
-
-## The six functions
-
-The entire model-facing surface is six functions, plus ordinary Clojure:
-
-| function | kind | what it does |
-|---|---|---|
-| `(FINAL value)` | — | end the current turn and return `value` to the caller |
-| `(lm input query [mode])` | probabilistic | one bounded input → one model judgment (`:string`/`:edn`) |
-| `(map-lm inputs query [mode])` | probabilistic | `lm` mapped over up to 50 inputs, in parallel |
-| `(rlm task)` | recursive | run this whole loop on a sub-problem; returns its `FINAL` |
-| `(map-rlm tasks [shared])` | recursive | `rlm` over up to 50 independent sub-problems, in parallel |
-| `(attach-rlm path task [opts])` | recursive | resume a prior session as a child, then run `task` |
-
-A **leaf** (`lm`/`map-lm`) is the non-recursive base case: a pure function whose body
-happens to be a model. A **child** (`rlm`/`map-rlm`) is a full recursion of the loop.
-There is **no magic `context` variable** — working state lives in REPL vars the model
-defines with `def`. See [`docs/CONCEPTS.md`](docs/CONCEPTS.md) for the model in depth.
-
----
+There is no native binary on purpose — the engine compiles and runs model-generated
+code at runtime, so it ships as a JVM uberjar. Tested on OpenJDK 21 and Clojure CLI
+1.12.
 
 ## Install
 
-Requires a JVM (21+) and the [Clojure CLI](https://clojure.org/guides/install_clojure).
-Native-image is intentionally **out** (the engine evaluates code at runtime); we ship an
-uberjar.
+Clone, build the uberjar, and put `fractal` on your `PATH`:
 
 ```bash
 git clone https://github.com/DeadMeme5441/fractal-engine.git
 cd fractal-engine
-clojure -T:build uber          # -> target/fractal.jar  (lean: engine + cheshire, no UI deps)
 
-# put `fractal` on your PATH (optional)
-ln -s "$PWD/bin/fractal" ~/.local/bin/fractal
-fractal help
+clojure -T:build uber            # -> target/fractal.jar   (prints: built target/fractal.jar)
+
+# put `fractal` on your PATH (any dir on your PATH works; ~/.local/bin is common)
+mkdir -p ~/.local/bin
+ln -sf "$PWD/bin/fractal" ~/.local/bin/fractal
+
+fractal help                     # should print the verb list
 ```
 
-`bin/fractal` runs the jar from any working directory and falls back to running from
-source (`clojure -M -m fractal-engine`) if the jar isn't built. You can always invoke
-the engine directly without building:
+`bin/fractal` prefers the built jar (fast startup; runs in whatever directory you
+invoke it from) and resolves symlinks, so a `fractal` symlink anywhere on your `PATH`
+still finds the repo. If the jar isn't built it transparently falls back to running
+from source.
+
+**Prefer not to build?** Skip the uberjar and run the engine straight from source
+(slower startup, and it runs from the repo directory):
 
 ```bash
-clojure -M -m fractal-engine <verb> ...
+clojure -M -m fractal-engine <verb> ...      # e.g. clojure -M -m fractal-engine help
 ```
 
-## Quickstart
+## Quickstart (no API keys)
 
-No API keys needed — the default provider is an **offline scripted** fake:
+The default provider is an **offline scripted fake** — no keys, no network, no spend.
+Run a scripted task end to end:
 
 ```bash
-# drive: run a scripted task end to end
 fractal run "Define x and return it." --fake-script simple
-#   run session-…  ● final   {:answer 42}
-#   next: fractal show session-…   ·   fractal verify session-…
-
-# read: inspect what happened
-fractal show <run>            # node detail: steps, leaves, children, final
-fractal tree <run>            # the whole addressable run tree
 ```
 
-Run the tests:
+You should see something like:
+
+```text
+run session-3269ffb5-65ba-41c8-921b-c4a1d8beebd8
+● {:answer 42}   $? · 2 calls
+  next: fractal show session-3269ffb5-65ba-41c8-921b-c4a1d8beebd8   ·   fractal verify session-3269ffb5-65ba-41c8-921b-c4a1d8beebd8
+```
+
+That is a full run: the green `●` means the model reached `(FINAL …)`, `{:answer 42}`
+is the final value, and `$? · 2 calls` is the spend summary — `$?` because the
+scripted provider has no real pricing (a live run shows a dollar amount here).
+
+**Did it work?** Two checks:
 
 ```bash
-clojure -M:test
+ls .fractal/                # a run directory appeared here (see "Where runs live")
+fractal ls                  # ○ session-…  s2 c0 final
 ```
 
----
+Now look inside what it did:
+
+```bash
+fractal show <run>          # node detail: steps, leaves, children, final
+fractal tree <run>          # the whole addressable run tree
+```
+
+`<run>` is the `session-…` name printed above (or copy it from `fractal ls`).
+`fractal show` prints the run's steps — the exact Clojure the model wrote and the
+observation the host fed back at each step — ending in the `FINAL` value.
+
+Run the test suite to confirm a healthy checkout (all offline, no keys):
+
+```bash
+clojure -M:test                # Ran 40 tests containing 424 assertions. 0 failures, 0 errors.
+```
+
+Other offline scenarios are available via `--fake-script`: `simple`, `lm`, `map-lm`,
+`rlm`, `map-rlm`, `multi-turn-chat`, and more (see `src/fractal_engine/scripts.clj`).
+
+## Where runs live: `.fractal/`
+
+Every session writes a directory. Like `git` and `bd`, `fractal` keeps its data in a
+**`.fractal/` directory in the directory you invoke it from**, and finds it the same
+way git finds `.git`:
+
+- If a `.fractal/` already exists in the current directory **or any ancestor**, that
+  one is reused — so running from a subdirectory still lands in the project's runs.
+- Otherwise a fresh `.fractal/` is created in the current directory on first write.
+
+So `cd ~/some-project && fractal run "…"` just works, and keeps that project's runs
+with that project. Point it somewhere else for a single command with `--runs-dir`:
+
+```bash
+fractal run "…" --runs-dir /tmp/scratch-runs       # write here instead of ./.fractal
+fractal ls       --runs-dir /tmp/scratch-runs       # read from there too
+```
+
+`.fractal/` is git-ignored by default. A `<run>` argument is either a path
+(`.fractal/foo`) or a bare name resolved under the runs dir (`foo` → `.fractal/foo`).
 
 ## The `fractal` CLI
 
@@ -178,17 +189,15 @@ fractal stream <run>          # journal events as JSONL
 
 A **node address** is `root`, `child-0001`, or `child-0001/child-0004` — the leading
 `root/` is implied. Drilling is just following the addresses a node view prints for its
-children. A `<run>` is a path (`runs/foo`) or a bare name resolved under the runs dir.
+children.
 
 **Exit codes:** `0` final · `1` error · `2` no-final · `3` timeout · `5` confabulation
 suspected. So you can gate on them: `fractal verify <run> --deep --root . && deploy`.
 
----
-
-## Live providers
+## Going live: providers
 
 Provider calls go through [`clojure-llm-sdk`](https://github.com/DeadMeme5441/clojure-llm-sdk).
-Select provider and model per role (root / leaf / child can differ — a common, cheap
+Select provider and model per role — root / leaf / child can differ (a common, cheap
 split is a strong root with cheaper children and leaves):
 
 ```bash
@@ -200,30 +209,81 @@ fractal run "Map this repo's subsystems with evidence." \
 ```
 
 Credentials come from environment variables (an ignored `.env` is read for local dev —
-never commit secrets). Two non-obvious provider facts:
+never commit secrets). Two non-obvious provider facts that will cost you time if you
+miss them:
 
-- **Codex OAuth** is the provider keyword `codex-backend` (plain `codex` is the API-key
-  path); it reads `~/.codex/auth.json`.
+- **Codex OAuth** is the provider keyword `codex-backend` (plain `codex` is the
+  API-key path). It reads `~/.codex/auth.json`.
 - **Vertex Gemini** (`vertex-gemini`) needs `GOOGLE_CLOUD_PROJECT` and
   `GOOGLE_CLOUD_LOCATION` **exported into the JVM environment** (the `.env` loader does
-  not push them to `System/getenv`) plus Application Default Credentials.
+  *not* push them to `System/getenv`), plus Application Default Credentials
+  (`gcloud auth application-default login`).
 
-> ⚠️ **Root-model strength is decisive.** A weak root will confabulate past its own
+> **Root-model strength is decisive.** A weak root will confabulate past its own
 > correct observations. Don't put a mini model at the root when you care about the
 > answer.
 
-> ⚠️ **Live runs cost money and can hang.** There is no engine-level budget/timeout
+> **Live runs cost money and can hang.** There is no engine-level budget/timeout
 > governor yet. Always leash live runs: `--call-timeout-ms`, `--max-turns`,
 > `--max-fanout`, and run them in the background with monitoring.
 
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `fractal: command not found` | The symlink isn't on your `PATH`. Confirm the target dir is on `PATH` (`echo $PATH`), or just run `./bin/fractal` from the repo. |
+| `java: command not found` / `UnsupportedClassVersionError` | No JDK, or older than 21. `bin/fractal` runs the jar with `java`. Install JDK 21+ and ensure `java -version` reports 21 or newer. |
+| `Could not find or load main class` / jar missing | The uberjar isn't built. Run `clojure -T:build uber` (creates `target/fractal.jar`). Without it, `bin/fractal` falls back to source — that needs `clojure` on your `PATH`. |
+| `no such run: <name>` | Runs resolve under `.fractal/` of the directory you're in (or an ancestor). Run `fractal ls` to see what's there, `cd` to the project, or pass `--runs-dir <dir>`. |
+| Live provider: `unauthorized` / auth errors | `codex-backend` needs `~/.codex/auth.json`; `vertex-gemini` needs `GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION` exported into the JVM env and valid ADC. See [Going live](#going-live-providers). |
+| Vertex first-call hang / `EOF` | A known cold-start transport hiccup. Retry is on by default and the SDK retries transient EOF/timeout with backoff; if a call truly hangs, your `--call-timeout-ms` bounds the whole retry loop (total wall-clock). |
+| A live run hangs for minutes | There's no governor yet — kill it and re-run leashed: `--call-timeout-ms`, `--max-turns`, `--max-fanout`, in the background. |
+
+---
+
+## How the loop works
+
+1. Conversation messages are the model's working transcript.
+2. The model replies with one or more fenced ` ```clojure ` blocks.
+3. The host evaluates them, in order, in a **persistent namespace** (vars survive
+   across steps and turns).
+4. The host appends a compact **observation** message (values are projected, not dumped).
+5. Steps repeat until the model calls `(FINAL value)`, which ends the **turn** and
+   returns `value`.
+
+A session is long-lived. `(FINAL value)` completes the current turn; it does **not**
+end the session — the same history, REPL vars, and cache scope are available to the
+next turn. That is what makes a session a *persistent brain you can keep talking to.*
+
+## The six functions
+
+The entire model-facing surface is six functions, plus ordinary Clojure:
+
+| function | kind | what it does |
+|---|---|---|
+| `(FINAL value)` | — | end the current turn and return `value` to the caller |
+| `(lm input query [mode])` | probabilistic | one bounded input → one model judgment (`:string`/`:edn`) |
+| `(map-lm inputs query [mode])` | probabilistic | `lm` mapped over up to 50 inputs, in parallel |
+| `(rlm task)` | recursive | run this whole loop on a sub-problem; returns its `FINAL` |
+| `(map-rlm tasks [shared])` | recursive | `rlm` over up to 50 independent sub-problems, in parallel |
+| `(attach-rlm path task [opts])` | recursive | resume a prior session as a child, then run `task` |
+
+Everything is `input -> processing -> output`; only the *kind* of processing varies —
+**deterministic** (plain Clojure), **probabilistic** (a *leaf*, `lm`/`map-lm`, whose
+body is a model), or **recursive** (a *child*, `rlm`/`map-rlm`, a full recursion of the
+loop). A leaf is the non-recursive base case. There is **no magic `context` variable** —
+working state lives in REPL vars the model defines with `def`. The root, every child,
+and every leaf run the *same* loop; there is no separate "planner" or "executor." See
+[`docs/CONCEPTS.md`](docs/CONCEPTS.md) for the model in depth.
+
 ## Artifacts & the journal
 
-Every session writes a directory. The **source of truth** is `events.ednl`, an
-append-only event log (one EDN form per line); everything else is a **projection** of
-it, materialized at turn boundaries for convenient reading.
+Every session writes a directory under `.fractal/`. The **source of truth** is
+`events.ednl`, an append-only event log (one EDN form per line); everything else is a
+**projection** of it, materialized at turn boundaries for convenient reading.
 
 ```text
-runs/<session-id>/
+.fractal/<session-id>/
   events.ednl        # append-only journal — the source of truth
   session.edn  messages.edn  turns.edn  evals.edn  calls.edn  snapshots.edn
   final.edn  usage.edn  tree.edn        # derived views
@@ -253,8 +313,8 @@ auditable in two layers:
 
 The floor and the judge are complementary: grep answers *"are the cited symbols real?"*;
 the judge answers *"does the code actually mean what's claimed?"* In practice the judge
-catches confabulations the grep waves through (a claim can cite real symbols and still
-misread what they do). Details in [`docs/CONCEPTS.md`](docs/CONCEPTS.md#the-trust-layer).
+catches confabulations the grep waves through. Details in
+[`docs/CONCEPTS.md`](docs/CONCEPTS.md#the-trust-layer).
 
 ```bash
 fractal verify <run> child-0001 --root /path/to/repo          # grep floor

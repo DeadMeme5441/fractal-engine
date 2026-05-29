@@ -5,6 +5,7 @@
 .nrepl-port
 target/
 runs/
+.fractal/
 .env
 
 # Beads / Dolt files (added by bd init)

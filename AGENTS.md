@@ -12,8 +12,9 @@ This repository is public and open source. **Treat every tracked file as public-
 Never commit or mention private workplace details, internal repository names, ticket
 identifiers, company or customer names, local secret paths, API keys, private hostnames,
 or copied proprietary content — in tracked files, commit messages, or commit metadata.
-Run runs (`runs/`), `.env`, and the Beads working data (`.beads/`) are gitignored and
-hold the only place such content may legitimately appear locally; keep it there.
+Session runs (`.fractal/`, the default; `runs/` if you override `--runs-dir`), `.env`,
+and the Beads working data (`.beads/`) are gitignored and hold the only place such
+content may legitimately appear locally; keep it there.
 
 ## Project shape
 

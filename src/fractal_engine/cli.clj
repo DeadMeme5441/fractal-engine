@@ -22,6 +22,21 @@
   (when (and v (not= true v))
     (Long/parseLong (str v))))
 
+(defn default-runs-dir
+  "Where runs live when neither `--runs-dir` nor an explicit dir is given. Mirrors
+  how git and `bd` find their data dir: if a `.fractal/` already exists in the
+  current directory or any ancestor, reuse it; otherwise default to `.fractal` in
+  the current directory (created on first write). So `fractal` works wherever you
+  invoke it, and from a subdirectory it still finds the project's runs. Override the
+  location per-invocation with `--runs-dir DIR`."
+  []
+  (let [cwd (java.io.File. (System/getProperty "user.dir"))]
+    (loop [d (.getCanonicalFile cwd)]
+      (cond
+        (nil? d)                                       (str (java.io.File. cwd ".fractal"))
+        (.isDirectory (java.io.File. d ".fractal"))    (str (java.io.File. d ".fractal"))
+        :else                                          (recur (.getParentFile d))))))
+
 (defn cfg-from-opts [opts]
   (let [provider (keyword (or (:provider opts) "scripted"))
         model (or (:model opts) "scripted")
@@ -34,7 +49,7 @@
         script (when (and script-name (nil? response-fn))
                  (atom (vec (scripts/script-for script-name))))]
     (process/config
-     (cond-> {:runs-dir (or (:runs-dir opts) "runs")
+     (cond-> {:runs-dir (or (:runs-dir opts) (default-runs-dir))
               :models {:root {:provider provider :model model}
                        :leaf {:provider leaf-provider :model leaf-model}
                        :child {:provider child-provider :model child-model}}}

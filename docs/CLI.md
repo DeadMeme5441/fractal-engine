@@ -13,8 +13,9 @@ or directly as `clojure -M -m fractal-engine …`.
 
 ## Conventions
 
-- **`<run>`** — a run directory path (`runs/foo`) or a bare name resolved under the runs
-  dir (`foo` → `<runs-dir>/foo`). The runs dir defaults to `runs/` (override with
+- **`<run>`** — a run directory path (`.fractal/foo`) or a bare name resolved under the
+  runs dir (`foo` → `<runs-dir>/foo`). The runs dir defaults to `.fractal/` in the
+  directory you invoke from, discovered up the tree like git/`bd` (override with
   `--runs-dir`).
 - **`[node]`** — a node address within a run: `root` (default), `child-0001`, or a path
   like `child-0001/child-0004`. The leading `root/` is implied. A node view prints the
@@ -140,7 +141,7 @@ These mirror the engine's configuration and apply to `run` / `resume` / `fork` /
 | `--leaf-provider` / `--leaf-model` | provider/model for leaves (`lm`/`map-lm`) |
 | `--child-provider` / `--child-model` | provider/model for children (`rlm`/`map-rlm`) |
 | `--fake-script NAME` | offline scripted provider (`simple`, `lm`, `map-lm`, `rlm`, `map-rlm`, …) |
-| `--runs-dir DIR` | where run directories live (default `runs/`) |
+| `--runs-dir DIR` | where run directories live (default `.fractal/` in the invocation dir) |
 | `--name ID` | name the session (otherwise a UUID) |
 | `--max-turns N` | leash: max turns |
 | `--max-fanout N` | leash: max parallel fanout |
