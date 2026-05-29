@@ -1,5 +1,8 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.4"}
+        ;; cheshire backs the CLI's --json/--jsonl. It already arrives transitively
+        ;; via the SDK; pinned explicitly so the uberjar bundles it deterministically.
+        cheshire/cheshire {:mvn/version "5.13.0"}
         com.deadmeme5441/clojure-llm-sdk
         {:git/url "https://github.com/DeadMeme5441/clojure-llm-sdk"
          :git/sha "22792ff0294e034e29f1d3a8f37540b931763e3c"}}
@@ -9,4 +12,19 @@
    :extra-deps {io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1"
                  :git/sha "dfb30dd"}}
-   :main-opts ["-m" "cognitect.test-runner"]}}}
+   :main-opts ["-m" "cognitect.test-runner"]}
+
+  ;; Uberjar build for the `fractal` CLI (the agent use surface). The CLI carries
+  ;; none of the TUI's fulcro deps — just base + cheshire. Native-image is OUT
+  ;; (runtime eval), so we ship an uberjar:  clojure -T:build uber
+  :build
+  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
+   :ns-default build}
+
+  ;; SPIKE (future human TUI, bead fcd): fulcro-tui as the 3-pane chat+inspector.
+  ;; Isolated alias; not part of the CLI or its uberjar.
+  :inspector
+  {:extra-paths ["spike"]
+   :extra-deps {io.github.fulcrologic/fulcro-tui
+                {:git/sha "69bdcb9ea6d5e779ddae8030567bc75487df1e19"}}
+   :main-opts ["-m" "spike.inspector"]}}}
