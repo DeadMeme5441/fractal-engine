@@ -3,12 +3,16 @@
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
             [fractal-engine.cli :as cli]
+            [fractal-engine.agentcli :as agentcli]
             [fractal-engine.event :as event]
             [fractal-engine.inspect :as inspect]
             [fractal-engine.journal :as journal]
             [fractal-engine.process :as process]
+            [fractal-engine.projection :as projection]
             [fractal-engine.prompt :as prompt]
+            [fractal-engine.provenance :as provenance]
             [fractal-engine.provider :as provider]
+            [fractal-engine.render :as render]
             [fractal-engine.runtime :as runtime]
             [fractal-engine.resume :as resume]
             [fractal-engine.session :as session]
@@ -1018,3 +1022,175 @@
     (is (seq (get-in structured [:handles :snapshots])))
     (is (some #(= :no-completed-turn-snapshot (:kind %))
               (:open-problems structured)))))
+
+;; ── inspector surface (projection / provenance / render / agent CLI) ──────────
+;;
+;; One event stream, two renderings (SPEC §5). These tests build a real run with
+;; the scripted provider — a root that spawns one child which FINALs an evidenced
+;; claim plus a fabricated one citing a temp source file we control — then exercise
+;; the read-side substrate end to end. Hermetic: no dependency on gitignored runs/.
+
+(defn- widget-source! []
+  ;; A real file the child's evidence will cite. Distinctive code tokens so the
+  ;; claim-vs-evidence grep has something true to find — and something false to miss.
+  (let [f (java.io.File/createTempFile "widget" ".py")]
+    (spit f (str "class WidgetEngine:\n"
+                 "    def compute_widget_total(self, items):\n"
+                 "        return sum(quantize_widget(i) for i in items)\n"))
+    (.getAbsolutePath f)))
+
+(defn- build-inspector-run! []
+  (let [dir  (tmp-dir "inspector")
+        src  (widget-source!)
+        resp (fn [request]
+               (let [content (str (:message/content (last (:request/messages request))))]
+                 (cond
+                   ;; the child investigating the widget file
+                   (clojure.string/includes? content "WIDGET-CHILD")
+                   (str "```clojure\n(FINAL {:name \"widget\"\n"
+                        "  :risks [{:description \"real risk\""
+                        "           :evidence \"" src ": compute_widget_total iterates items via WidgetEngine and quantize_widget\"}\n"
+                        "          {:description \"hallucinated risk\""
+                        "           :evidence \"" src ": nonexistent_quantum_handler invokes flux_capacitor_drainer\"}]})\n```")
+                   ;; the root, after the child returns: finalize
+                   (clojure.string/includes? content "Observation")
+                   "```clojure\n(FINAL {:done true :child kid})\n```"
+                   ;; the root's first step: spawn the child
+                   :else
+                   "```clojure\n(def kid (rlm \"WIDGET-CHILD investigate the widget source file\"))\n{:spawned true}\n```")))
+        cfg  (process/config {:scripted/response-fn resp})
+        s    (session/start-session! cfg {:dir dir :id "root"})]
+    (session/run-turn! s "Analyze the widget service.")
+    (session/stop-session! s)
+    {:dir dir :src src}))
+
+(deftest projection-folds-journal-into-addressable-tree
+  (let [{:keys [dir]} (build-inspector-run!)
+        root (projection/load-node dir)]
+    (testing "root node folds from the journal (not the .edn projections)"
+      (is (= "root" (:address root)))
+      (is (= :root (:kind root)))
+      (is (pos? (count (:steps root))))
+      (is (= 1 (count (:children root))) "one child spawned"))
+    (testing "child address resolves and drills"
+      (let [caddr (:address (first (:children root)))
+            child (projection/load-at dir caddr)]
+        (is (= "root/child-0001" caddr))
+        (is (= :child (:kind child)))
+        (is (map? (:final child)))
+        (is (= "widget" (:name (:final child))))))
+    (testing "node-dir resolves nested addresses, nil for bad ones"
+      (is (some? (projection/node-dir dir "root")))
+      (is (some? (projection/node-dir dir "root/child-0001")))
+      (is (nil? (projection/node-dir dir "root/child-9999"))))
+    (testing "tree is recursive and counts match"
+      (let [t (projection/tree dir)]
+        (is (= 1 (count (:children t))))
+        (is (= "root/child-0001" (:address (first (:children t)))))))))
+
+(deftest provenance-claim-vs-evidence-catches-confabulation
+  (let [{:keys [dir src]} (build-inspector-run!)
+        final (:final (projection/load-at dir "root/child-0001"))
+        checks (provenance/check-claims final)
+        by-label (into {} (map (juxt :label identity) checks))]
+    (testing "every evidenced claim is extracted and parsed"
+      (is (= 2 (count checks)))
+      (is (every? #(= src (:file %)) checks)))
+    (testing "a grounded claim is supported"
+      (is (= :supported (:verdict (get by-label "real risk")))))
+    (testing "a fabricated claim is flagged unsupported"
+      (is (= :unsupported (:verdict (get by-label "hallucinated risk"))))
+      (is (seq (get-in (get by-label "hallucinated risk") [:identifiers :missing]))))
+    (testing "summary surfaces the confabulation"
+      (let [s (provenance/summarize checks)]
+        (is (true? (:confabulation-suspected s)))
+        (is (= :suspect (:overall s)))))
+    (testing "a missing file is reported, not crashed"
+      (let [c (provenance/check-claims {:evidence "/no/such/file.py: anything"})]
+        (is (= :file-missing (:verdict (first c))))))))
+
+(deftest render-produces-formatted-recursive-read-surface
+  (binding [render/*color* false]
+    (let [{:keys [dir]} (build-inspector-run!)]
+      (testing "tree renders addresses and counts"
+        (let [t (render/tree-str dir)]
+          (is (clojure.string/includes? t "root"))
+          (is (clojure.string/includes? t "child-0001"))))
+      (testing "node view ends with drill commands for children"
+        (let [out (render/node-str (projection/load-node dir)
+                                   {:exe "fractal" :run "widget"})]
+          (is (clojure.string/includes? out "children (1)"))
+          (is (clojure.string/includes? out "fractal show widget child-0001"))))
+      (testing "verify view names verdicts"
+        (let [final (:final (projection/load-at dir "root/child-0001"))
+              out (render/verify-str "root/child-0001" final)]
+          (is (clojure.string/includes? out "supported"))
+          (is (clojure.string/includes? out "UNSUPPORTED")))))))
+
+(deftest agentcli-dispatch-verbs-and-exit-codes
+  (let [{:keys [dir]} (build-inspector-run!)]
+    (testing "arg parsing splits positionals and flags"
+      (is (= {:pos ["show" "run" "child-0001"] :flags {:json true}}
+             (agentcli/parse-args ["show" "run" "child-0001" "--json"]))))
+    (testing "node-address normalizes the implied root/ prefix"
+      (is (= "root" (agentcli/node-address nil)))
+      (is (= "root" (agentcli/node-address "root")))
+      (is (= "root/child-0001" (agentcli/node-address "child-0001")))
+      (is (= "root/child-0001" (agentcli/node-address "root/child-0001"))))
+    (testing "show resolves a run by path and exits 0 when a final exists"
+      (let [{:keys [out exit]} (agentcli/dispatch "show" [dir])]
+        (is (= 0 exit))
+        (is (clojure.string/includes? out "node root"))))
+    (testing "drilling a child works and exit reflects its final"
+      (let [{:keys [exit]} (agentcli/dispatch "show" [dir "child-0001"])]
+        (is (= 0 exit))))
+    (testing "verify exits 5 when confabulation is suspected"
+      (let [{:keys [out exit]} (agentcli/dispatch "verify" [dir "child-0001"])]
+        (is (= 5 exit))
+        (is (clojure.string/includes? out "UNSUPPORTED"))))
+    (testing "--json emits parseable output"
+      (let [{:keys [out]} (agentcli/dispatch "show" [dir "child-0001" "--json"])
+            parsed (cheshire.core/parse-string out true)]
+        (is (= "root/child-0001" (:address parsed)))))
+    (testing "stream emits one JSON object per journal event"
+      (let [{:keys [out]} (agentcli/dispatch "stream" [dir])
+            lines (clojure.string/split-lines out)]
+        (is (pos? (count lines)))
+        (is (every? #(map? (cheshire.core/parse-string %)) lines))))
+    (testing "unknown verb and missing run are usage errors (exit 1)"
+      (is (= 1 (:exit (agentcli/dispatch "bogus" []))))
+      (is (= 1 (:exit (agentcli/dispatch "show" ["/no/such/run"])))))))
+
+(deftest agentcli-drive-verbs-and-chat-pieces
+  (testing "run drives the engine and reports a chainable run name + exit by final"
+    (let [dir (tmp-dir "drive")
+          {:keys [out exit]} (agentcli/dispatch
+                              "run" ["save x" "--fake-script" "simple"
+                                     "--runs-dir" dir "--name" "r1"])]
+      (is (= 0 exit))
+      (is (clojure.string/includes? out "run r1"))
+      (is (clojure.string/includes? out "fractal show r1"))
+      (testing "the produced run reads back through the same surface"
+        (let [{:keys [exit]} (agentcli/dispatch "show" ["r1" "--runs-dir" dir])]
+          (is (= 0 exit))))))
+  (testing "run --json yields a parseable result with the final value"
+    (let [dir (tmp-dir "drive-json")
+          {:keys [out]} (agentcli/dispatch
+                         "run" ["save x" "--fake-script" "simple"
+                                "--runs-dir" dir "--name" "rj" "--json"])
+          parsed (cheshire.core/parse-string out true)]
+      (is (= "rj" (:run parsed)))
+      (is (= 42 (get-in parsed [:final :answer])))))
+  (testing "progress + turn summary render from a real run"
+    (let [{:keys [dir]} (build-inspector-run!)
+          counts (render/progress-counts dir)
+          root   (projection/load-node dir)]
+      (is (= 1 (:children counts)) "one child spawned")
+      (is (pos? (:steps counts)))
+      (is (clojure.string/includes? (render/progress-line counts) "thinking"))
+      (binding [render/*color* false]
+        (let [summary (render/turn-summary-str
+                       root {:dir dir :status :final :final-value (:final root)}
+                       {:exe "fractal" :run "demo"})]
+          (is (clojure.string/includes? summary "●"))
+          (is (clojure.string/includes? summary "fractal show demo")))))))
