@@ -1,10 +1,9 @@
 .DS_Store
 .cpcache/
-.clj-kondo/.cache/
+.clj-kondo/
 .lsp/
 .nrepl-port
 target/
-build_spec/
 runs/
 .env
 
