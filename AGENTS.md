@@ -1,77 +1,84 @@
-# Agent Instructions
+# Agent & contributor guide
 
-This repository is a public, open-source project. Treat every tracked file as
-public-facing. (`CLAUDE.md` complements this file with collaboration notes; the
-rules here are canonical.)
+This is the canonical guide for working in `fractal-engine` — whether you're a human
+contributor or an AI agent. It defines the project's shape, its hard invariants, and how
+to develop and validate changes. Start with the [README](README.md) for the user view
+and [`docs/`](docs/) for depth; this file is the boundary that keeps the engine honest.
 
-## Public-Safe Boundary
+This repository is public and open source. **Treat every tracked file as public-facing.**
 
-Do not commit or mention private workplace details, internal repository names,
-ticket identifiers, company names, customer names, local secret paths, API keys,
-private hostnames, or copied proprietary content.
+## Public-safe boundary
 
-## Project Shape
+Never commit or mention private workplace details, internal repository names, ticket
+identifiers, company or customer names, local secret paths, API keys, private hostnames,
+or copied proprietary content — in tracked files, commit messages, or commit metadata.
+Run runs (`runs/`), `.env`, and the Beads working data (`.beads/`) are gitignored and
+hold the only place such content may legitimately appear locally; keep it there.
+
+## Project shape
 
 Keep the compute engine small and strict. Everything is
-`input -> processing -> output`; only the *kind* of processing varies — ordinary
-Clojure is deterministic, `lm`/`map-lm` are probabilistic, `rlm`/`map-rlm` are
-recursive.
+`input -> processing -> output`; only the *kind* of processing varies — ordinary Clojure
+is deterministic, `lm`/`map-lm` are probabilistic (a *leaf*), `rlm`/`map-rlm` are
+recursive (a *child*).
 
 - conversation messages are the model's working transcript
 - the model emits fenced Clojure
-- the host evaluates that Clojure in a persistent namespace
-- the host returns projected observations as messages
-- the process repeats until `(FINAL value)`; a session stays live across turns
-- the only special model-facing functions are `FINAL`, `lm`, `map-lm`, `rlm`,
-  `map-rlm`, and `attach-rlm`
-- there is **no magic `context` var**; working state lives in REPL vars the model
-  defines
+- the host evaluates it in a persistent namespace and returns projected observations
+- the loop repeats until `(FINAL value)`; a session stays live across turns
+- the only model-facing functions are `FINAL`, `lm`, `map-lm`, `rlm`, `map-rlm`,
+  `attach-rlm`
+- there is **no magic `context` var** — working state lives in REPL vars the model defines
 
-Do not add storage, memory, workflow, product, repository-analysis, or task
-template concepts to the compute kernel. Those belong in layers around the
-kernel.
+The engine is layered by concern (full map in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)):
 
-## Current Status
+- **compute engine** — the agent + persistent REPL loop, fanout, child/attach
+- **journal & projections** — an append-only event log (`events.ednl`, the source of
+  truth) plus pure folds into views
+- **persistence** — snapshot / restore / resume / fork / lineage
+- **provider** — the LLM adapter boundary
+- **read surface** — a journal-folding projection and the trust layer (provenance,
+  claim-vs-evidence), rendered by the `fractal` CLI
+- **product** — the CLI (and, later, a TUI / MCP adapter)
 
-Early but real. Validated live end-to-end on two provider stacks (a strong root
-plus cheaper child/leaf models), including emergent recursive decomposition
-(`map-rlm`) on real repositories with evidence-cited results. Prompt is at
-version 15; tests green. Known limitations, documented and not yet built: no
-engine-level budget/timeout governor, no sandbox (the engine runs trusted local
-Clojure), no storage/retrieval data layer, and `attach-rlm` has no
-prior-session discoverability index.
+Do not add storage, memory, workflow, product, repository-analysis, or task-template
+concepts to the compute kernel. Those belong in layers *around* the kernel.
+
+## Current status
+
+Early but real, validated live end-to-end. The engine decomposes real problems on real
+codebases with cheap-child / strong-root model splits, including emergent recursive
+fanout (`map-rlm`) with evidence-cited results. The `fractal` CLI is the use surface
+(drive + read, `--json`, meaningful exit codes), and the trust layer catches
+confabulation by checking cited evidence against source (grep floor + `--deep` engine
+judge). Behavior prompt is at version 15; tests green.
+
+Known limitations, documented and not yet built:
+
+- no engine-level budget/timeout governor (leash live runs yourself)
+- no true in-process sandbox (the engine runs trusted local Clojure; a best-effort OS
+  sandbox is provided — see the README)
+- no storage/retrieval data layer
+- `attach-rlm` has no prior-session discoverability index
+- the live `--deep` verify judge is itself a model's judgment (grounded in quotes you
+  can inspect, but a weak verifier can misjudge — use a strong model, or a panel)
 
 ## Invariants (do not break)
 
-- The model-facing surface is exactly the six functions above — no convenience
-  functions, no revived retired names. New patterns belong in the model's own
-  session via `defn`, not in the engine API.
-- The system prompt must not contain the substrings `context`, `product`,
-  `storage`, or `workflow` (enforced by the `prompt-contract` test).
+- The model-facing surface is **exactly the six functions** above — no convenience
+  functions, no revived retired names. New patterns belong in the model's own session
+  via `defn`, not in the engine API.
+- The behavior prompt must not contain the substrings `context`, `product`, `storage`,
+  or `workflow` (enforced by the `prompt-contract` test).
 - `prompt-contract` pins exact phrases and the `prompt-version`. If you change
-  `src/fractal_engine/prompt.clj` or `leaf-system-prompt` in `process.clj`, update
-  the test in lockstep and bump `prompt-version`.
+  `src/fractal_engine/prompt.clj` or the leaf system prompt in `process.clj`, update the
+  test in lockstep and bump `prompt-version`.
 - Only the compute engine belongs in core runtime namespaces.
+- The journal stores **results, not recipes** — folding it must never re-run a model.
 
-## Development Workflow
+## Develop & validate
 
-This project tracks work with **Beads** (`bd`) — use it for all task tracking,
-not TodoWrite or markdown files. Create an issue before non-trivial work, claim
-it when you start, and close it when done.
-
-```bash
-bd prime                 # recover context after compaction / new session
-bd ready                 # ready-to-work issues (no blockers)
-bd show <id>             # details + dependencies
-bd update <id> --claim
-bd close <id>
-bd create --title="..." --description="..." --type=task|feature|bug --priority=2
-```
-
-Use `bd remember "insight"` for durable cross-session knowledge (`bd memories
-<keyword>` to search). Avoid `bd edit` — it opens an editor and blocks.
-
-For code changes, validate before closing work and report results plainly:
+Run the tests before claiming anything is done, and report results plainly:
 
 ```bash
 clojure -M:test
@@ -79,37 +86,38 @@ git diff --check
 git status --short --branch
 ```
 
-Offline development uses the fake/scripted provider (no keys). For live provider
-validation, two non-obvious facts: the Codex OAuth provider keyword is
-`:codex-backend` (plain `:codex` is the API-key path), and Vertex Gemini
-(`:vertex-gemini`) needs `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`
-exported into the JVM environment — the `.env` loader does not push them to
-`System/getenv`. Root-model strength matters: weak roots confabulate past their
-own observations. Live runs cost real money and can hang, so always leash them
-(timeout + background + monitor) until a governor exists.
+Offline development uses the fake/scripted provider (no keys): `--fake-script <name>`.
+Inspect any run with `fractal show <run>` / `fractal tree <run>`. Build the binary with
+`clojure -T:build uber`.
 
-Keep commits narrow and intentional. If a file is already dirty, understand
-whether the change is yours before editing it. Never revert unrelated user work.
-Do not perform git operations unless explicitly asked.
+Two non-obvious live-provider facts: the Codex OAuth provider keyword is `codex-backend`
+(plain `codex` is the API-key path), and Vertex Gemini (`vertex-gemini`) needs
+`GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` **exported into the JVM environment**
+(the `.env` loader does not push them to `System/getenv`). Root-model strength is
+decisive — weak roots confabulate past their own observations. **Live runs cost money
+and can hang; always leash them** (`--call-timeout-ms`, `--max-turns`, `--max-fanout`,
+background + monitor) until a governor exists.
 
-## Design Discipline
+Keep commits narrow and intentional. If a file is already dirty, understand whether the
+change is yours before editing. Don't perform git operations unless asked.
 
-Before implementing a large feature, write or update a spec. The spec should
-define:
+### Task tracking
 
-- model-facing surface
-- runtime responsibilities
-- artifact responsibilities
-- failure semantics
-- tests and live validation
-- explicit anti-goals
+This project tracks work with Beads (`bd`) — use it for task tracking rather than
+ad-hoc markdown. Its working data lives in `.beads/` (gitignored, local-only, no remote).
 
-The most important architectural rule is separation of concerns:
+```bash
+bd ready                 # ready-to-work issues
+bd show <id>             # details + dependencies
+bd update <id> --claim   # claim work
+bd close <id>            # finish
+```
 
-- compute engine: agent plus persistent REPL loop
-- artifact layer: trace, inspectability, process tree, resume snapshots
-- provider layer: LLM adapter boundary
-- storage layer: optional future handles, indexes, blobs, retrieval
-- product layer: CLI, UI, MCP, workflows, skill packs
+## Design discipline
 
-Only the compute engine belongs in core runtime namespaces.
+Before implementing a large feature, write or update a spec defining: the model-facing
+surface, runtime responsibilities, artifact responsibilities, failure semantics, tests
+and live validation, and explicit anti-goals. Refinement means **decomplection** (pull
+braided concerns apart so hard features become small decorators over one seam), not
+relocation. Validate on real, hard cases — never toy demos — and never trust pretty
+output: check cited evidence against the source (that's what the trust layer is for).
