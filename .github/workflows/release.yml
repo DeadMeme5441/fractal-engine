@@ -1,0 +1,51 @@
+name: release
+
+# Build the uberjar and publish a GitHub release whenever a v* tag is pushed.
+# Cutting a release is then just:
+#   git tag -a v1.2.3 -F notes.md   # the tag's annotation becomes the release notes
+#   git push origin v1.2.3
+# The workflow at the tagged commit is the one that runs, so the tag must point at
+# a commit that already contains this file.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write          # needed to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Clojure CLI
+        run: |
+          curl -fsSL -O https://github.com/clojure/brew-install/releases/latest/download/posix-install.sh
+          chmod +x posix-install.sh
+          sudo ./posix-install.sh
+          clojure --version
+
+      - name: Build uberjar
+        run: clojure -T:build uber      # -> target/fractal.jar
+
+      - name: Smoke-test the jar
+        run: java -jar target/fractal.jar help
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            target/fractal.jar \
+            --title "fractal-engine ${GITHUB_REF_NAME}" \
+            --notes-from-tag \
+            --verify-tag

@@ -54,6 +54,31 @@ code at runtime, so it ships as a JVM uberjar. Tested on OpenJDK 21 and Clojure 
 
 ## Install
 
+The engine runs on any platform with a **JDK 21+** — it ships as a single
+self-contained uberjar (a native binary is out: the core loop `eval`s
+model-emitted Clojure at run time, which needs the JVM and the Clojure compiler
+present).
+
+### Download the prebuilt jar (no build)
+
+Grab `fractal.jar` from the [latest release](https://github.com/DeadMeme5441/fractal-engine/releases/latest):
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL -o ~/.local/bin/fractal.jar \
+  https://github.com/DeadMeme5441/fractal-engine/releases/latest/download/fractal.jar
+
+# run it directly…
+java -jar ~/.local/bin/fractal.jar help
+
+# …or drop a tiny wrapper on your PATH so `fractal` just works:
+printf '#!/usr/bin/env bash\nexec java -jar "$HOME/.local/bin/fractal.jar" "$@"\n' > ~/.local/bin/fractal
+chmod +x ~/.local/bin/fractal
+fractal help
+```
+
+### Build from source
+
 Clone, build the uberjar, and put `fractal` on your `PATH`:
 
 ```bash
