@@ -286,7 +286,7 @@
              "  fractal codebrain map [--json]       show the persisted repo map\n"
              "  fractal codebrain status             freshness + brain HEAD\n\n"
              (r/c :dim "the brain serves a coding agent: it explores the code so the agent doesn't have to.\n")
-             (r/c :dim "leash live runs: --max-turns N --max-fanout N --call-timeout-ms MS"))
+             (r/c :dim "leash live runs: --max-turns N --max-fanout N --max-leaf-concurrency N --call-timeout-ms MS"))
    :exit 0})
 
 (def ^:private subverbs

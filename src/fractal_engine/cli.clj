@@ -55,6 +55,7 @@
                        :child {:provider child-provider :model child-model}}}
        (:max-turns opts) (assoc :max-turns (parse-long-opt (:max-turns opts)))
        (:max-fanout opts) (assoc :max-fanout (parse-long-opt (:max-fanout opts)))
+       (:max-leaf-concurrency opts) (assoc :max-leaf-concurrency (parse-long-opt (:max-leaf-concurrency opts)))
        (:call-timeout-ms opts) (assoc :call-timeout-ms (parse-long-opt (:call-timeout-ms opts)))
        response-fn (assoc :scripted/response-fn response-fn)
        script (assoc :scripted/responses script)))))
@@ -159,7 +160,7 @@
 
 (defn usage []
   (println "fractal-engine commands:")
-  (println "  run --question TEXT [--session ID] [--runs-dir DIR] [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--max-turns N] [--max-fanout N] [--fake-script simple]")
+  (println "  run --question TEXT [--session ID] [--runs-dir DIR] [--provider openai --model MODEL] [--leaf-provider openai --leaf-model MODEL] [--child-provider openai --child-model MODEL] [--max-turns N] [--max-fanout N] [--max-leaf-concurrency N] [--fake-script simple]")
   (println "  chat [--session ID] [--runs-dir DIR] [--dir runs/session-id] [--fake-script multi-turn-chat]  # /send submits a message")
   (println "  inspect --dir runs/session-id [--tree --snapshots --handles --json]")
   (println "  resume --dir runs/session-id --question TEXT [--turn N] [--session session-id] [--fake-script resume-use]")

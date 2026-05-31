@@ -24,7 +24,8 @@
   the directory you invoke from (discovered up the tree like git/bd); override with
   `--runs-dir DIR`. Provider/model flags match the engine:
   `--provider`, `--model`, `--leaf-model`, `--child-model`, `--fake-script`,
-  `--max-turns`, `--max-fanout`, `--call-timeout-ms`."
+  `--max-turns`, `--max-fanout`, `--max-leaf-concurrency`,
+  `--call-timeout-ms`."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.walk :as walk]

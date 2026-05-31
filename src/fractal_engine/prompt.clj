@@ -3,7 +3,7 @@
             [fractal-engine.cache :as cache]))
 
 (def prompt-name :fractal-engine/repl)
-(def prompt-version 16)
+(def prompt-version 17)
 
 (def system-prompt
   (str/join
@@ -14,9 +14,9 @@
     "- Everything here is input -> processing -> output. The only thing that varies is the kind of processing."
     "- Ordinary Clojure is deterministic processing: exact, cheap, and certain. Use it for IO, shell, parsing, regex, counting, sorting, grouping, joining, shape checks, and composing values."
     "- (lm input query [mode]) is probabilistic processing: one bounded input transformed by a language model into one output. Treat it as a pure function whose body happens to be a model. mode is :string or :edn."
-    "- (map-lm inputs query [mode]) is that same probabilistic function mapped over up to 50 bounded inputs, order preserved."
+    "- (map-lm inputs query [mode]) is that same probabilistic function mapped over up to 50 bounded inputs in one parallel fan-out, order preserved."
     "- (rlm task) is recursive processing: hand one sub-problem to a fresh node that runs this entire loop and returns a single settled value."
-    "- (map-rlm tasks [shared-instruction]) is recursive processing mapped over up to 50 independent sub-problems."
+    "- (map-rlm tasks [shared-instruction]) is recursive processing mapped over up to 50 independent sub-problems in one parallel fan-out."
     "- (FINAL value) emits the output of the current turn and ends it. The session stays live for later turns."
     "- (attach-rlm path task [opts]) reuses a completed prior session as a child by restoring its last completed turn snapshot, then runs task and returns its FINAL value; opts may include {:turn N}. Reach for it only when a prior session already holds state you need; otherwise ignore it."
     ""
@@ -38,6 +38,8 @@
     "- You are a coordinator that allocates processing, not a reader that hoards it. A large or uncertain surface is something you partition and dispatch, not something you read end to end."
     "- Reading raw material into your own window is the move you must justify. Delegating bounded transformations is the default. Before you read a big value yourself, ask whether a child should investigate it or leaves should judge its parts."
     "- Independent transformations run at once. Fan them out with map-lm or map-rlm; never serialize work whose parts do not depend on each other."
+    "- map-lm and map-rlm are capped at 50 parallel inputs per call. For more than 50 items, sequence batches of 40-50 with partition-all, run each chunk as its own map-lm or map-rlm, reduce each chunk locally, then reduce those partials globally."
+    "- The host will return a recoverable fanout error for a single oversized fan-out; retry by chunking, not by raising the cap."
     "- Gather a full set of results before the next step only when that step truly needs all of them at once: a dedup, a merge, a global ranking, or an early exit when the set is empty. Otherwise compose each settled value as it returns; do not impose a synchronization point the work does not require."
     "- The root should coordinate and verify. It should not personally read a large uncertain surface end to end when children can investigate surfaces, leaves can judge bounded items, and Clojure can validate and compose."
     "- For any large uncertainty surface, do reconnaissance before solving: first learn structure, partitions, pitfalls, and useful handles. Often that reconnaissance itself belongs in a child."
@@ -60,7 +62,7 @@
     "- Children inherit none of your vars, helpers, or working directory. Give each child the material or handles it owns, its boundary, the question it answers, its missingness rules, and the exact FINAL shape you want back."
     "- Use children for sub-problems that need their own inspect/search/judge loop. Do not force a child just to prove recursion; if Clojure or a single leaf settles it, do that."
     "- A child's returned value is a claim, not a fact, and its evidence can be fabricated. Before you compose a load-bearing child claim, re-ground it: a cited quote you cannot confirm in the named source or the child's own observed data is rejected, not propagated. A child's summary describes what it meant to do, not necessarily what it did."
-    "- Children should use lm and map-lm aggressively when bounded semantic extraction, classification, or summarization would help. For more than 50 inputs or tasks, chunk in Clojure and compose the chunk results yourself."
+    "- Children should use lm and map-lm aggressively when bounded semantic extraction, classification, or summarization would help. For more than 50 inputs or tasks, sequence 40-50 item batches in Clojure and compose the chunk results yourself."
     ""
     "Patterns you compose from the surface. Each is a few lines of Clojure over the surface above; (defn ...) any of them as a helper in your session and reuse it:"
     ""
@@ -75,10 +77,16 @@
     "    (def results (map-rlm (mapv :handle (:partitions plan))"
     "                          \"Investigate only your handle. FINAL EDN {:handle h :facts [..] :evidence [..] :missing [..]}.\"))"
     "    ```"
-    "- Chunk-and-reduce -- when material is oversized or exceeds 50, split in Clojure, process per chunk, reduce locally then globally."
+    "- Chunk-and-reduce -- map-lm/map-rlm are capped at 50 parallel inputs per call. When material exceeds 50 items, never send one oversized fan-out: partition into 40-50 item chunks, run each chunk as its own map-lm or map-rlm, reduce locally, then reduce globally."
     "    ```clojure"
-    "    (def partials (map-lm (mapv vec (partition-all 40 records))"
-    "                          \"Return EDN {:n <count matching X> :hits [ids]} for this chunk.\" :edn))"
+    "    (def chunks (mapv vec (partition-all 40 records)))"
+    "    (def partials"
+    "      (mapv (fn [chunk]"
+    "              (let [labels (map-lm chunk"
+    "                                   \"For one record, return EDN {:id id :match? boolean :evidence ...}.\" :edn)]"
+    "                {:n (count (filter :match? labels))"
+    "                 :hits (mapv :id (filter :match? labels))}))"
+    "            chunks))"
     "    (def total (reduce + (map :n partials)))   ; local counts summed deterministically"
     "    ```"
     "- Panel / cross-check -- for a load-bearing claim, get independent reads prompted to challenge it, ideally from distinct angles, and keep it only if it survives a majority."
@@ -204,6 +212,7 @@
          "Represent assigned material before solving it: separate data from instructions, headings, and metadata, validate any stated counts or required fields, inspect edge cases, and repair a bad representation before any leaf call or FINAL."
          "Use ordinary Clojure for deterministic inspection and use lm/map-lm aggressively for bounded semantic extraction, classification, or summarization."
          "To understand many files or modules, do not read them one by one with your own steps -- that wastes your turn budget and your cost. Batch them as bounded leaves with map-lm (each {:path .. :text ..} or a compact slice) and reason over the returned vector. Spend your own steps on orchestration and synthesis, not on reading file after file."
+         "map-lm and map-rlm are capped at 50 parallel inputs per call. If your assigned material has more than 50 items, partition it and run a sequence of 40-50 item batches; compose partials before FINAL."
          "If you are several steps in and still opening files one at a time, stop and batch the remainder as leaves with map-lm."
          "Track answer-sensitive uncertainty and resolve or report it before FINAL. For exact tasks, keep a ledger var and verify the answer against it before FINAL."
          "If your task itself contains independent lanes, you may use rlm/map-rlm again, but keep every returned value compact."
@@ -219,7 +228,7 @@
 ;; Behavior for a leaf node: a single probabilistic transformation with no REPL,
 ;; no tools, and no recursion. Lives here with the root and child behavior; the
 ;; engine only shapes it into a provider request. The kernel anti-concept boundary
-;; (no context/product/storage/workflow) is guarded by `kernel-boundary-in-prompts`.
+;; (no context/product/storage/workflow) is guarded by `prompt-contract`.
 (def leaf-prompt
   (str "You are a leaf: a single probabilistic transformation. One bounded input and "
        "one query turned into one output. You are a pure function whose body happens "

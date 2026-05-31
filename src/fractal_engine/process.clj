@@ -18,6 +18,7 @@
    (let [base {:runs-dir "runs"
                :max-turns 25
                :max-fanout 50
+               :max-leaf-concurrency 50
                :call-timeout-ms 120000
                :models provider/default-models
                ;; Retry transient transport failures by default. The SDK classifies
@@ -29,9 +30,19 @@
                ;; retry loop (process/call-provider!), so the deadline is total wall-clock
                ;; including backoff, not per attempt. Set :retry false for one-shot.
                :retry true}
-         models (merge-with merge provider/default-models (:models m))]
-     (assoc (merge (dissoc base :models) (dissoc m :models))
-            :models models))))
+         models (merge-with merge provider/default-models (:models m))
+         cfg (dissoc (assoc (merge (dissoc base :models) (dissoc m :models))
+                            :models models)
+                     :leaf-concurrency/limiter
+                     :leaf-concurrency/max)
+         max-leaf-concurrency (:max-leaf-concurrency cfg)
+         limiter (when (and max-leaf-concurrency (pos? max-leaf-concurrency))
+                   (if (and (:leaf-concurrency/limiter m)
+                            (= (:leaf-concurrency/max m) max-leaf-concurrency))
+                     (:leaf-concurrency/limiter m)
+                     (concurrent/semaphore max-leaf-concurrency)))]
+     (cond-> (assoc cfg :leaf-concurrency/max max-leaf-concurrency)
+       limiter (assoc :leaf-concurrency/limiter limiter)))))
 
 (defn provider-shape [cfg]
   {:root (get-in cfg [:models :root])
@@ -104,8 +115,11 @@
    state
    {:build-call (fn [call-id] (enrich-call state cfg role call call-id))
     :work (fn [_call-id]
-            (concurrent/with-deadline (:call-timeout-ms cfg)
-              (fn [] (provider/complete cfg role (:request call)))))
+            (let [complete! #(concurrent/with-deadline (:call-timeout-ms cfg)
+                               (fn [] (provider/complete cfg role (:request call))))]
+              (if (= :leaf role)
+                (concurrent/with-permit (:leaf-concurrency/limiter cfg) complete!)
+                (complete!))))
     :succeed (fn [call-id response]
                {:value {:call-id call-id :response response}
                 :patch {:call/status :ok
@@ -146,7 +160,8 @@
                        :fanout/kind kind
                        :fanout/max max-fanout
                        :fanout/count-at-least (count xs)
-                       :error/retryable? false}))
+                       :fanout/strategy "Partition inputs into batches of 40-50, call map-lm/map-rlm once per batch, reduce chunk results locally, then reduce globally."
+                       :error/retryable? true}))
       xs)))
 
 (defn session-cache-id [state]

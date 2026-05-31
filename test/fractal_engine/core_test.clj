@@ -29,12 +29,19 @@
 (defn scripted-cfg [responses]
   (process/config {:scripted/responses (atom (vec responses))}))
 
-(deftest kernel-boundary-in-prompts
-  ;; This is NOT a prompt-wording test. Prompts are prose we tune constantly;
-  ;; pinning their phrases would just punish rewording. The one real invariant is
-  ;; architectural: model-facing behavior must never leak the kernel's anti-concepts
-  ;; (no `context` var; no product/storage/workflow framing). That boundary holds
-  ;; for every behavior prompt, not just the root.
+(deftest prompt-contract
+  (is (= 17 prompt/prompt-version))
+  ;; Most prose can change, but these phrases are part of the model-facing contract:
+  ;; the six-function surface, the bounded fan-out rule, and the recovery strategy.
+  (doseq [phrase ["map-lm and map-rlm are capped at 50 parallel inputs per call."
+                  "For more than 50 items, sequence batches of 40-50 with partition-all, run each chunk as its own map-lm or map-rlm, reduce each chunk locally, then reduce those partials globally."
+                  "The host will return a recoverable fanout error for a single oversized fan-out; retry by chunking, not by raising the cap."
+                  "Chunk-and-reduce -- map-lm/map-rlm are capped at 50 parallel inputs per call."]]
+    (is (clojure.string/includes? prompt/system-prompt phrase)))
+  (is (clojure.string/includes?
+       prompt/child-prompt
+       "If your assigned material has more than 50 items, partition it and run a sequence of 40-50 item batches; compose partials before FINAL."))
+  ;; The architectural boundary holds for every behavior prompt, not just the root.
   (doseq [p [prompt/system-prompt prompt/child-prompt prompt/leaf-prompt]]
     (is (not (clojure.string/includes? p "context")))
     (doseq [forbidden ["product" "storage" "workflow"]]
@@ -51,6 +58,15 @@
   (is (= ["(def x 1)\n" "x\n"]
          (runtime/extract-clojure-blocks "```clj\n(def x 1)\n```\n```clojure\nx\n```")))
   (is (empty? (runtime/extract-clojure-blocks "```python\n1\n```"))))
+
+(deftest leaf-concurrency-config-is-defaulted-configurable-and-preserved
+  (is (= 50 (:max-leaf-concurrency (process/config))))
+  (is (= 7 (:max-leaf-concurrency (cli/cfg-from-opts {:max-leaf-concurrency "7"}))))
+  (let [cfg (process/config {:max-leaf-concurrency 3})
+        normalized-again (process/config cfg)]
+    (is (some? (:leaf-concurrency/limiter cfg)))
+    (is (identical? (:leaf-concurrency/limiter cfg)
+                    (:leaf-concurrency/limiter normalized-again)))))
 
 (deftest eval-observations-are-compact-control-surface
   (let [ns-sym (symbol (str "fractal.test.obs." (java.util.UUID/randomUUID)))
@@ -440,7 +456,7 @@
     (is (= :final (:turn/status (first child-turns))))
     (is (= 1 (count child-snapshots)))))
 
-(deftest map-fanout-is-capped-for-leaves-and-children
+(deftest map-fanout-is-capped-for-leaves-and-children-with-recoverable-error
   (let [dir (tmp-dir "fanout-cap")
         result (process/run-process!
                 (scripted-cfg ["```clojure\n(def leaf-error (try (map-lm (range 51) \"return EDN\" :edn) (catch Exception e (ex-data e))))\n(def child-error (try (map-rlm (range 51)) (catch Exception e (ex-data e))))\n(FINAL {:leaf (select-keys leaf-error [:error/type :fanout/kind :fanout/max :fanout/count-at-least])\n        :child (select-keys child-error [:error/type :fanout/kind :fanout/max :fanout/count-at-least])})\n```"])
@@ -456,6 +472,49 @@
             :fanout/max 50
             :fanout/count-at-least 51}
            (:child value)))))
+
+(deftest fanout-exceeded-error-tells-the-model-how-to-retry
+  (let [dir (tmp-dir "fanout-retry")
+        result (process/run-process!
+                (scripted-cfg ["```clojure\n(def e (try (map-lm (range 51) \"return EDN\" :edn) (catch Exception e (ex-data e))))\n(FINAL (select-keys e [:error/type :error/retryable? :fanout/strategy]))\n```"])
+                {:dir dir :id "root" :kind :root :task "fanout retry"})]
+    (is (= {:error/type :fractal/fanout-exceeded
+            :error/retryable? true
+            :fanout/strategy "Partition inputs into batches of 40-50, call map-lm/map-rlm once per batch, reduce chunk results locally, then reduce globally."}
+           (:final-value result)))))
+
+(deftest max-leaf-concurrency-is-global-across-child-leaves
+  (let [dir (tmp-dir "leaf-concurrency")
+        active-leaves (atom 0)
+        max-active-leaves (atom 0)
+        response-fn (fn [request]
+                      (let [messages (:request/messages request)
+                            system-content (:message/content (first messages))
+                            content (:message/content (last messages))]
+                        (cond
+                          (= prompt/leaf-prompt system-content)
+                          (let [active (swap! active-leaves inc)]
+                            (swap! max-active-leaves max active)
+                            (try
+                              (Thread/sleep 25)
+                              "{:ok true}"
+                              (finally
+                                (swap! active-leaves dec))))
+
+                          (clojure.string/includes? content "leaf concurrency stress")
+                          "```clojure\n(def children (map-rlm (mapv #(str \"lane-\" %) (range 4))))\n(FINAL children)\n```"
+
+                          (clojure.string/includes? content "Assigned child task:")
+                          "```clojure\n(def leaves (map-lm (mapv (fn [i] {:id i}) (range 6)) \"leaf echo\" :edn))\n(FINAL leaves)\n```"
+
+                          :else
+                          "```clojure\n(FINAL :unexpected)\n```")))
+        cfg (process/config {:max-leaf-concurrency 2
+                             :scripted/response-fn response-fn})
+        result (process/run-process! cfg {:dir dir :id "root" :kind :root :task "leaf concurrency stress"})]
+    (is (= :final (:status result)))
+    (is (<= @max-active-leaves 2))
+    (is (= 0 @active-leaves))))
 
 (deftest usage-rollup-known-unknown-partial-and-children
   (let [dir (tmp-dir "usage")

@@ -1,10 +1,9 @@
 (ns fractal-engine.concurrent
-  "Bounded parallel fanout — the concurrency mechanism, independent of what is
-  being fanned out. `map-lm` and `map-rlm` are the only callers today; the engine
-  semantics live elsewhere. Threads are daemons so a stuck provider call never
-  pins JVM shutdown, and bindings propagate via bound-fn so dynamic vars
-  (current turn/eval ids) survive the thread hop."
-  (:import [java.util.concurrent Callable ExecutionException Executors ThreadFactory TimeUnit TimeoutException]))
+  "Bounded parallel fanout and small concurrency governors, independent of what
+  is being fanned out. The engine semantics live elsewhere. Threads are daemons
+  so a stuck provider call never pins JVM shutdown, and bindings propagate via
+  bound-fn so dynamic vars (current turn/eval ids) survive the thread hop."
+  (:import [java.util.concurrent Callable ExecutionException Executors Semaphore ThreadFactory TimeUnit TimeoutException]))
 
 (defn daemon-executor [prefix]
   (let [counter (atom 0)]
@@ -32,6 +31,24 @@
       (finally
         (.shutdownNow executor)
         (.awaitTermination executor 5 TimeUnit/SECONDS)))))
+
+(defn semaphore [n]
+  (when (and n (pos? n))
+    (Semaphore. (int n) true)))
+
+(defn with-permit
+  "Run `thunk` while holding one permit from `sem`. A nil semaphore means
+  unlimited. The permit bounds the work inside the thunk; callers decide whether
+  queue wait belongs inside any deadline."
+  [^Semaphore sem thunk]
+  (if sem
+    (do
+      (.acquire sem)
+      (try
+        (thunk)
+        (finally
+          (.release sem))))
+    (thunk)))
 
 (defn with-deadline
   "Run `thunk` under a wall-clock bound. If it doesn't finish within `timeout-ms`,
