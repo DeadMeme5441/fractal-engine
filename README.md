@@ -26,17 +26,18 @@ recursions. It is built in the spirit of
 
 **Get it running:** [Requirements](#requirements) · [Install](#install) ·
 [Quickstart (no API keys)](#quickstart-no-api-keys) · [Where runs live](#where-runs-live-fractal) ·
-[The `fractal` CLI](#the-fractal-cli) · [codebrain](#codebrain--a-code-discovery-brain) ·
-[Going live: providers](#going-live-providers) · [Troubleshooting](#troubleshooting)
+[Use as a Clojure dependency](#use-as-a-clojure-dependency) · [The `fractal` CLI](#the-fractal-cli) ·
+[codebrain](#codebrain--a-code-discovery-brain) · [Going live: providers](#going-live-providers) ·
+[Troubleshooting](#troubleshooting)
 
 **Understand it:** [How the loop works](#how-the-loop-works) · [The six functions](#the-six-functions) ·
 [Artifacts & the journal](#artifacts--the-journal) · [The trust layer](#the-trust-layer) ·
 [Resume & fork](#resume--fork) · [Sandboxing](#sandboxing) · [Architecture](#architecture) ·
 [Evaluations](#evaluations) · [Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
 
-**Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/CLI.md`](docs/CLI.md) ·
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/CODEBRAIN.md`](docs/CODEBRAIN.md) ·
-[`docs/EVALS.md`](docs/EVALS.md)
+**Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/API.md`](docs/API.md) ·
+[`docs/CLI.md`](docs/CLI.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
+[`docs/CODEBRAIN.md`](docs/CODEBRAIN.md) · [`docs/EVALS.md`](docs/EVALS.md)
 
 ---
 
@@ -149,7 +150,7 @@ observation the host fed back at each step — ending in the `FINAL` value.
 Run the test suite to confirm a healthy checkout (all offline, no keys):
 
 ```bash
-clojure -M:test                # Ran 40 tests containing 424 assertions. 0 failures, 0 errors.
+clojure -M:test                # Ran 49 tests containing 476 assertions. 0 failures, 0 errors.
 ```
 
 Other offline scenarios are available via `--fake-script`: `simple`, `lm`, `map-lm`,
@@ -175,6 +176,51 @@ fractal ls       --runs-dir /tmp/scratch-runs       # read from there too
 
 `.fractal/` is git-ignored by default. A `<run>` argument is either a path
 (`.fractal/foo`) or a bare name resolved under the runs dir (`foo` → `.fractal/foo`).
+
+## Use as a Clojure dependency
+
+The engine is published to [Clojars](https://clojars.org/net.clojars.deadmeme5441/fractal-engine).
+Add it to `deps.edn`:
+
+```clojure
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.1.1"}}}
+```
+
+The CLI is one consumer of the engine. Clojure applications should prefer the stable
+facade namespace, `fractal-engine.api`, instead of reaching into runtime namespaces
+such as `process`, `session`, `projection`, or `provenance`.
+
+```clojure
+(require '[fractal-engine.api :as fe])
+
+(def cfg
+  (fe/config {:runs-dir ".fractal"
+              :models {:root  {:provider :scripted :model "scripted"}
+                       :leaf  {:provider :scripted :model "scripted"}
+                       :child {:provider :scripted :model "scripted"}}}))
+
+(def s
+  (fe/start-session! cfg {:id "demo"
+                          :dir ".fractal/demo"
+                          :overlay "Additional application role instructions can go here."}))
+
+(def result
+  (fe/run-turn! s "Define x and FINAL {:answer 42}."))
+
+(fe/stop-session! s)
+(fe/load-node (:dir result))
+```
+
+The overlay is session-level specialization: it is appended once to the base system
+message and carried in the transcript. It does not add functions to the model-facing
+surface or change engine behavior. That surface remains exactly `FINAL`, `lm`,
+`map-lm`, `rlm`, `map-rlm`, and `attach-rlm`.
+
+Applications may put their own Clojure namespaces on the classpath and ask the model,
+through the overlay or task prompt, to require and use them. Run artifacts stay
+engine-shaped and can be read with `fe/load-node`, `fe/load-at`, `fe/tree`,
+`fe/journal-events`, and the claim/provenance helpers. Full reference:
+[`docs/API.md`](docs/API.md).
 
 ## The `fractal` CLI
 
@@ -430,6 +476,7 @@ namespaces. Full map in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 | persistence | snapshot / restore / resume / fork / lineage | `snapshot` `resume` `session` |
 | provider | the LLM adapter boundary | `provider` |
 | read surface | journal-folding projection + the trust layer | `projection` `provenance` `render` |
+| public API | stable Clojure facade for library consumers | `api` |
 | product | the `fractal` CLI | `agentcli` `cli` |
 
 ## Anti-goals
@@ -446,7 +493,7 @@ on purpose.
   the spirit of (REPL-as-context, recursive self-calls).
   [Repo](https://github.com/alexzhang13/rlm).
 - `AGENTS.md` — the design boundary and invariants for contributors and agents.
-- `docs/CONCEPTS.md`, `docs/CLI.md`, `docs/ARCHITECTURE.md` — deep dives.
+- `docs/CONCEPTS.md`, `docs/API.md`, `docs/CLI.md`, `docs/ARCHITECTURE.md` — deep dives.
 
 ## License
 

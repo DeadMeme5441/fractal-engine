@@ -3,6 +3,7 @@
 `fractal` is the engine's use surface: one grammar to **drive** the engine and **read**
 what it did. It's designed to feel like `bd` — short verbs, a positional address
 instead of flag ceremony, run-name resolution, and output that prints the next command.
+For Clojure library use, prefer the stable facade in [`docs/API.md`](API.md).
 
 ```
 fractal <verb> <subject> [args] [--flags]

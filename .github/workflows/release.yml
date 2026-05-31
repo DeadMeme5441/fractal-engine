@@ -1,11 +1,16 @@
 name: release
 
-# Build the uberjar and publish a GitHub release whenever a v* tag is pushed.
+# On every v* tag this does BOTH halves of a release:
+#   1. publishes the thin library jar to Clojars
+#      (net.clojars.deadmeme5441/fractal-engine), and
+#   2. builds the `fractal` CLI uberjar and attaches it to a GitHub release.
 # Cutting a release is then just:
 #   git tag -a v1.2.3 -F notes.md   # the tag's annotation becomes the release notes
 #   git push origin v1.2.3
-# The workflow at the tagged commit is the one that runs, so the tag must point at
-# a commit that already contains this file.
+# The version is derived from the tag (minus the `v`) and threaded into the build
+# via RELEASE_VERSION, so the tag, jar name, and pom never drift. The workflow at
+# the tagged commit is the one that runs, so the tag must point at a commit that
+# already contains this file.
 
 on:
   push:
@@ -34,8 +39,32 @@ jobs:
           sudo ./posix-install.sh
           clojure --version
 
+      - name: Derive version from tag
+        id: ver
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Releasing version $V"
+
+      - name: Run tests
+        run: clojure -M:test
+
+      - name: Build library jar
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+        run: clojure -T:build jar      # -> target/fractal-engine-<version>.jar
+
+      - name: Publish library to Clojars
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+          CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
+          CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
+        run: |
+          clojure -X:deploy \
+            :artifact "\"target/fractal-engine-${{ steps.ver.outputs.version }}.jar\""
+
       - name: Build uberjar
-        run: clojure -T:build uber      # -> target/fractal.jar
+        run: clojure -T:build uber      # -> target/fractal.jar (cleans target first)
 
       - name: Smoke-test the jar
         run: java -jar target/fractal.jar help

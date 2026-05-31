@@ -24,8 +24,8 @@ the compute engine lives in core runtime namespaces. This is the map.
    └────────────────────────────────┘   └───────────────┬────────────────────┘
                                                          │
                                           ┌──────────────▼───────────────┐
-                                          │ product: the `fractal` CLI    │
-                                          │   agentcli · cli              │
+                                          │ public use surfaces           │
+                                          │   api · agentcli · cli        │
                                           └───────────────────────────────┘
 ```
 
@@ -82,6 +82,14 @@ ever re-produced is work that never completed.
   back to the engine for the `--deep` judge.
 - **`render`** — pure text rendering of nodes, trees, verify reports, cost, and the
   live chat turn summary. Returns strings; never prints or exits.
+
+### Public API
+- **`api`** — the stable Clojure facade for external consumers. It wraps generic
+  session drive (`config`, `start-session!`, `run-turn!`, `stop-session!`,
+  `resume-session!`, `fork-session!`, `run-task!`), journal-backed reads
+  (`load-node`, `load-at`, `tree`, `journal-events`), trust/provenance helpers, and
+  provider auth data. It deliberately does not expose runtime eval internals or
+  CLI-oriented rendering strings.
 
 ### Product
 - **`agentcli`** — the `fractal` verb dispatch (drive + read), `--json`, exit codes, the

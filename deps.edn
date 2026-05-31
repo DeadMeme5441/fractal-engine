@@ -3,9 +3,7 @@
         ;; cheshire backs the CLI's --json/--jsonl. It already arrives transitively
         ;; via the SDK; pinned explicitly so the uberjar bundles it deterministically.
         cheshire/cheshire {:mvn/version "5.13.0"}
-        com.deadmeme5441/clojure-llm-sdk
-        {:git/url "https://github.com/DeadMeme5441/clojure-llm-sdk"
-         :git/sha "37458c825b97fabd120c70189eb9bf6e89d45c23"}}
+        net.clojars.deadmeme5441/clojure-llm-sdk {:mvn/version "0.1.0"}}
  :aliases
  {:test
   {:extra-paths ["test"]
@@ -36,4 +34,21 @@
   {:extra-paths ["evals/src" "evals/resources" "evals/test"]
    :extra-deps {io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-   :main-opts ["-m" "cognitect.test-runner" "-d" "evals/test"]}}}
+   :main-opts ["-m" "cognitect.test-runner" "-d" "evals/test"]}
+
+  ;; Publish the thin library jar to Clojars. Reads CLOJARS_USERNAME /
+  ;; CLOJARS_PASSWORD (a Clojars deploy token) from the environment. Build
+  ;; first, then deploy:
+  ;;   clojure -T:build jar
+  ;;   clojure -X:deploy :artifact '"target/fractal-engine-0.1.1.jar"'
+  ;; CI does both on a v* tag (see .github/workflows/release.yml), alongside
+  ;; the uberjar GitHub release.
+  :deploy
+  {:replace-deps {slipset/deps-deploy {:mvn/version "0.2.2"}}
+   :exec-fn deps-deploy.deps-deploy/deploy
+   :exec-args {:installer :remote
+               :sign-releases? false
+               ;; b/write-pom emits the pom under the class-dir, not the repo
+               ;; root where deps-deploy looks by default.
+               :pom-file "target/classes/META-INF/maven/net.clojars.deadmeme5441/fractal-engine/pom.xml"
+               :artifact "target/fractal-engine-0.1.1.jar"}}}}
