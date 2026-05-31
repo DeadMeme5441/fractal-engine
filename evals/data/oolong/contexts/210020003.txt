@@ -1,0 +1,8 @@
+The following lines contain 1 movie reviews, one per line. Each review has a sentiment that can be classified as either 'positive' or 'negative.' There are no neutral reviews.
+
+You will be asked to answer questions about the aggregate label statistics across all 1 examples in this dataset. Do not try to guess, estimate, or approximate the result. Calculate the exact answer given these datapoints.
+
+Date: Jan 06, 2023 || User: 91904 || Instance: this movie is just an excuse for the writer to make a film out of 2 failed scripts.<br /><br />its characters are just an assembly of characters with cliché tragic or comic attributes the sum total of which is neurotic dialog like only woody Allen could write. woman love this because its like looking in the mirror so they will enjoy this film probably<br /><br />this movies was not enjoyed by me however because there was no car chase and also the film didn't have any fights. there was also no drug lords or gang bangers. Not to mention a lack of snakes. This film had no snakes. Not my cup of tea and maybe not yours ether so think about what I have said before you find yourself watching this film.<br /><br />Unless of course you resemble a female have weight issues man issues enjoy sex and the city and ally mcbeal then this is meaningful for you.
+Recall: the preceding lines contain 1 movie reviews, one per line. Each review has a sentiment that can be classified as either 'positive' or 'negative.' There are no neutral reviews.
+
+You will be asked to answer questions about the aggregate label statistics across all 1 examples in this dataset. Do not try to guess, estimate, or approximate the result. Calculate the exact answer given these datapoints.

@@ -32,10 +32,11 @@ recursions. It is built in the spirit of
 **Understand it:** [How the loop works](#how-the-loop-works) · [The six functions](#the-six-functions) ·
 [Artifacts & the journal](#artifacts--the-journal) · [The trust layer](#the-trust-layer) ·
 [Resume & fork](#resume--fork) · [Sandboxing](#sandboxing) · [Architecture](#architecture) ·
-[Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
+[Evaluations](#evaluations) · [Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
 
 **Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/CLI.md`](docs/CLI.md) ·
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/CODEBRAIN.md`](docs/CODEBRAIN.md)
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/CODEBRAIN.md`](docs/CODEBRAIN.md) ·
+[`docs/EVALS.md`](docs/EVALS.md)
 
 ---
 
@@ -269,6 +270,23 @@ miss them:
 > **Live runs cost money and can hang.** There is no engine-level budget/timeout
 > governor yet. Always leash live runs: `--call-timeout-ms`, `--max-turns`,
 > `--max-fanout`, and run them in the background with monitoring.
+
+## Evaluations
+
+The repository includes a small eval harness under [`evals/`](evals/README.md).
+It is an external consumer of the engine behind the `:evals` deps alias, not part of
+the shipped runtime or model-facing surface.
+
+The current public v17 run covers OOLONG-synth and FanOutQA long-context examples
+with a strong-root / cheap-leaf model split. Headline results:
+
+| benchmark | n | headline | spend |
+|---|--:|---:|--:|
+| OOLONG-synth | 15 | exact accuracy `0.867` | `$3.3989` |
+| FanOutQA | 15 | loose accuracy `0.695`; semantic audit `11/15` | `$4.5360` |
+
+See [`docs/EVALS.md`](docs/EVALS.md) for exact commands, aggregate outputs, scorer
+caveats, and what the results do and do not establish.
 
 ## Troubleshooting
 

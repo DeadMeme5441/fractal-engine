@@ -1,0 +1,487 @@
+{:manifest
+ {:repro/split nil,
+  :engine/prompt-hash
+  "sha256:35cbe8bf6e4928e0a5ddf2ff188c7ceb38ae42d833bcad02e3616d96bf8ada17",
+  :repro/created-at "2026-05-31T07:47:11.797854Z",
+  :repro/benchmark "oolong",
+  :engine/prompt-version 17,
+  :engine/git-dirty? true,
+  :repro/version 1,
+  :seed nil,
+  :models
+  {:root {:provider "vertex-gemini", :model "gemini-3.5-flash"},
+   :leaf
+   {:provider "vertex-gemini", :model "gemini-3.1-flash-lite-preview"},
+   :child {:provider "vertex-gemini", :model "gemini-3.5-flash"}},
+  :repro/command
+  "clojure -M:evals run --runs-dir evals/results/oolong-v17/runs --leaf-model gemini-3.1-flash-lite-preview --child-provider vertex-gemini --leaf-provider vertex-gemini --child-model gemini-3.5-flash --mode engine --benchmark oolong --out evals/results/oolong-v17 --call-timeout-ms 180000 --max-turns 1000000 --budget-usd 50 --provider vertex-gemini --data evals/data/oolong-smart.jsonl --model gemini-3.5-flash",
+  :repro/mode "engine",
+  :notes nil,
+  :engine/git-sha "78444eedd7261ef344998911f66a1918bfbe6e6e",
+  :limits
+  {:limit nil,
+   :budget-usd 50.0,
+   :max-turns 1000000,
+   :max-fanout nil,
+   :call-timeout-ms 180000},
+  :dataset
+  #:dataset{:path "evals/data/oolong-smart.jsonl",
+            :count 15,
+            :sha256
+            "6aef2c84ee678bc4c930399da48dfd16eb52e78bb73ea14310bdfeca925f47ff"},
+  :engine/prompt-name "repl"},
+ :summary
+ {:engine
+  {:ablation-honored-n 0,
+   :numeric-accuracy-mean 0.9983638743455497,
+   :accuracy 0.8666666666666667,
+   :n 15,
+   :stopped-early? false,
+   :n-scored 15,
+   :children-spawned-total 0,
+   :ablation-violated-n 0,
+   :total-cost-usd 3.3988520500000003,
+   :n-errors 0,
+   :spent-usd 3.3988520500000003,
+   :loose-accuracy-mean nil,
+   :wall-ms-mean 95714.0,
+   :tokens-total 6721220,
+   :n-correct 13}},
+ :runs
+ {:engine
+  [{:cost-usd 0.44066225,
+    :correct? 0,
+    :tokens-in 561870,
+    :children-spawned 0,
+    :numeric-accuracy 0.9869109947643979,
+    :mode :engine,
+    :final
+    {:answer 377,
+     :method
+     "Parsed 661 reviews, batched them into chunks of 45, ran parallel map-lm sentiment labeling, and aggregated the 'negative' counts in Clojure.",
+     :checks
+     {:total-parsed-reviews 661,
+      :positive-count 284,
+      :negative-count 377,
+      :all-aligned? true,
+      :total-consistent? true},
+     :missing []},
+    :tokens-out 30014,
+    :gold [382],
+    :status :final,
+    :id "218020027",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-1d8e79ab-9549-4329-8ee4-db0ea160f5bf",
+    :wall-ms 156529,
+    :raw-predicted 377,
+    :predicted 377,
+    :tokens-total 918440,
+    :answer_type :count}
+   {:cost-usd 0.04788705,
+    :correct? 1,
+    :tokens-in 25105,
+    :children-spawned 0,
+    :numeric-accuracy 1.0,
+    :mode :engine,
+    :final
+    {:answer "User: 84614",
+     :method
+     "Parsed User ID using regex from metadata line headers and aggregated frequencies in Clojure",
+     :checks
+     {:parsed-records 661,
+      :stated-records 661,
+      :all-parsed? true,
+      :unique-users 218,
+      :top-user-id "84614",
+      :top-user-count 16,
+      :second-user-id "59799",
+      :second-user-count 15},
+     :missing []},
+    :tokens-out 765,
+    :gold [84614],
+    :status :final,
+    :id "218020029",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-903ac0f6-c0b6-4df7-9829-5718ea451e0f",
+    :wall-ms 29577,
+    :raw-predicted "User: 84614",
+    :predicted 84614,
+    :tokens-total 49788,
+    :answer_type :count}
+   {:cost-usd 0.07860405,
+    :correct? 1,
+    :tokens-in 38395,
+    :children-spawned 0,
+    :numeric-accuracy 1.0,
+    :mode :engine,
+    :final
+    {:answer 18,
+     :method
+     "Regex extraction of Date from each line starting with 'Date: ', followed by frequency analysis in Clojure.",
+     :checks
+     {:total-records-extracted 661,
+      :total-dates-extracted 661,
+      :unique-dates 508,
+      :frequencies-count 661,
+      :frequency-distribution {1 375, 2 114, 3 18, 4 1},
+      :dates-with-3-freqs 18},
+     :missing []},
+    :tokens-out 1253,
+    :gold [18],
+    :status :final,
+    :id "218020039",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-4516114d-e6ce-4406-aad6-14f4d809df28",
+    :wall-ms 33926,
+    :raw-predicted 18,
+    :predicted 18,
+    :tokens-total 104981,
+    :answer_type :count}
+   {:cost-usd 0.87075175,
+    :correct? 1,
+    :tokens-in 753623,
+    :children-spawned 0,
+    :mode :engine,
+    :final
+    {:answer "Label: negative",
+     :method
+     "Parsed 661 reviews into individual lines, ran sentiment classification in parallel chunks using map-lm, parsed the result EDN strings with a robust substring reader, and computed frequency aggregates in Clojure.",
+     :checks
+     {:total-lines 668,
+      :data-lines-count 661,
+      :parsed-count 661,
+      :counts {:positive 289, :negative 372},
+      :sum-consistent true},
+     :missing []},
+    :tokens-out 36716,
+    :gold ["negative"],
+    :status :final,
+    :id "218020024",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-e574f19d-4996-4403-b433-04b70f8dff8d",
+    :wall-ms 353940,
+    :raw-predicted "Label: negative",
+    :predicted "negative",
+    :tokens-total 2205926,
+    :answer_type :label,
+    :match :exact}
+   {:cost-usd 0.4290893,
+    :correct? 1,
+    :tokens-in 512512,
+    :children-spawned 0,
+    :mode :engine,
+    :final
+    {:answer "Label: positive",
+     :method
+     "Filtered dataset to User 55015 (8 reviews), classified each using map-lm panels, aggregated deterministically in Clojure.",
+     :checks
+     {:total-reviews 661,
+      :user-55015-reviews 8,
+      :positive-count 4,
+      :negative-count 4,
+      :global-positive-count 288,
+      :global-negative-count 373,
+      :tie-detected true},
+     :missing []},
+    :tokens-out 15625,
+    :gold ["positive" "negative"],
+    :status :final,
+    :id "218020031",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-4dee6786-1e11-481a-95df-509a591bf3fa",
+    :wall-ms 234357,
+    :raw-predicted "Label: positive",
+    :predicted "positive",
+    :tokens-total 922379,
+    :answer_type :label,
+    :match :exact}
+   {:cost-usd 0.6041045,
+    :correct? 1,
+    :tokens-in 632065,
+    :children-spawned 0,
+    :mode :engine,
+    :final
+    {:answer "Answer: positive is more common before 2022-10-17",
+     :method
+     "Chunked 661 reviews into groups of 45, classified sentiment via map-lm, aligned sequentially to preserve IDs, then aggregated relative frequencies deterministically in Clojure.",
+     :checks
+     {:reviews-exactly-on-2022-10-17 2,
+      :total-parsed-reviews 661,
+      :positive-on-or-after-2022-10-17 226,
+      :reviews-on-or-after-2022-10-17 535,
+      :note
+      "Relative frequency of positive sentiment before 2022-10-17 is 46.83% vs 42.21% strictly after (or 42.24% on-or-after), making it 'more common' relatively. In terms of absolute counts, positive is 59 before vs 225 strictly after.",
+      :positive-ratio-on-or-after 0.4224299065420561,
+      :positive-ratio-strictly-after 0.4221388367729831,
+      :positive-before-2022-10-17 59,
+      :reviews-before-2022-10-17 126,
+      :positive-ratio-before 0.4682539682539683,
+      :positive-strictly-after-2022-10-17 225,
+      :reviews-strictly-after-2022-10-17 533},
+     :missing []},
+    :tokens-out 35092,
+    :gold ["more common"],
+    :status :final,
+    :id "218020040",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-86edb6ae-6f52-426d-afe2-6f593b489f28",
+    :wall-ms 265155,
+    :raw-predicted "Answer: positive is more common before 2022-10-17",
+    :predicted "positive is more common before 2022 10 17",
+    :tokens-total 1181121,
+    :answer_type :label,
+    :match :pred-contains-gold}
+   {:cost-usd 0.13042585,
+    :correct? 1,
+    :tokens-in 131880,
+    :children-spawned 0,
+    :numeric-accuracy 1.0,
+    :mode :engine,
+    :final
+    {:answer 32,
+     :method
+     "Separated the 81 movie reviews, mapped classification over parallel chunks, resolved an ambiguity in review 26 via panel consensus, and aggregated the count in Clojure.",
+     :checks
+     {:total-parsed 81,
+      :stated-count 81,
+      :positive-count 49,
+      :negative-count 32},
+     :missing []},
+    :tokens-out 4716,
+    :gold [32],
+    :status :final,
+    :id "215020019",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-f026269a-38f3-482d-b404-c5ce2e50a086",
+    :wall-ms 47092,
+    :raw-predicted 32,
+    :predicted 32,
+    :tokens-total 209667,
+    :answer_type :count}
+   {:cost-usd 0.0750285,
+    :correct? 1,
+    :tokens-in 41299,
+    :children-spawned 0,
+    :numeric-accuracy 1.0,
+    :mode :engine,
+    :final
+    {:answer "User: 54134",
+     :method
+     "Parsed user IDs from 81 movie review records using regular expressions and computed frequencies in Clojure.",
+     :checks
+     {:total-lines 88,
+      :data-lines 81,
+      :parsed-users 81,
+      :unique-users 29,
+      :sum-of-frequencies 81,
+      :top-user-count 13},
+     :missing []},
+    :tokens-out 745,
+    :gold [54134],
+    :status :final,
+    :id "215020021",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-21c920f4-f46b-4e1a-9da5-c6f0fd6571b9",
+    :wall-ms 26876,
+    :raw-predicted "User: 54134",
+    :predicted 54134,
+    :tokens-total 85331,
+    :answer_type :count}
+   {:cost-usd 0.0837714,
+    :correct? 1,
+    :tokens-in 45846,
+    :children-spawned 0,
+    :numeric-accuracy 1.0,
+    :mode :engine,
+    :final
+    {:answer 5,
+     :method
+     "Extracted dates from all 81 lines using regex, then computed frequencies in Clojure",
+     :checks
+     {:total-lines 88,
+      :data-lines 81,
+      :parsed-dates 81,
+      :frequencies-sum 81,
+      :date-counts {1 71, 2 5},
+      :twice-dates
+      ["Nov 27, 2022"
+       "Apr 08, 2022"
+       "Jun 13, 2025"
+       "Oct 20, 2022"
+       "Oct 31, 2024"]},
+     :missing []},
+    :tokens-out 755,
+    :gold [5],
+    :status :final,
+    :id "215020030",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-b1f2dab5-26f8-4325-8924-3b0fb4ed829c",
+    :wall-ms 27671,
+    :raw-predicted 5,
+    :predicted 5,
+    :tokens-total 101942,
+    :answer_type :count}
+   {:cost-usd 0.28759645,
+    :correct? 1,
+    :tokens-in 184320,
+    :children-spawned 0,
+    :mode :engine,
+    :final
+    {:answer "Label: positive",
+     :method
+     "Parsed reviews with lookahead regex splitter, classified individual reviews with map-lm in 2 batches of 40 and 1 batch of 1, and counted sentiments in Clojure.",
+     :checks
+     {:total-reviews 81, :positive 49, :negative 32, :all-valid? true},
+     :missing []},
+    :tokens-out 5534,
+    :gold ["positive"],
+    :status :final,
+    :id "215020016",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-6b032d8d-fe8c-4e90-b15e-3a843f414df6",
+    :wall-ms 88891,
+    :raw-predicted "Label: positive",
+    :predicted "positive",
+    :tokens-total 459133,
+    :answer_type :label,
+    :match :exact}
+   {:cost-usd 0.19350985,
+    :correct? 1,
+    :tokens-in 163685,
+    :children-spawned 0,
+    :mode :engine,
+    :final
+    {:answer "Answer: negative is less common before 2024-04-26",
+     :method
+     "Categorized 81 reviews using map-lm; parsed dates; compared percentage of negative reviews before vs after 2024-04-26 (36.0% vs 46.7%)",
+     :checks
+     {:total-reviews 81,
+      :before-2024-04-26 {:total 50, :negative 18, :percentage 36.0},
+      :after-2024-04-26 {:total 30, :negative 14, :percentage 46.67},
+      :on-2024-04-26 {:total 1, :negative 0, :percentage 0.0},
+      :note-absolute-count
+      "Absolute count of negative reviews before is 18, which is greater than after (14). Relative frequency/percentage is lower before (36.0% vs 46.67%)."},
+     :missing []},
+    :tokens-out 9297,
+    :gold ["less common"],
+    :status :final,
+    :id "215020031",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-db3b8ed3-025e-4e8b-9da4-67a3df5f0861",
+    :wall-ms 86422,
+    :raw-predicted "Answer: negative is less common before 2024-04-26",
+    :predicted "negative is less common before 2024 04 26",
+    :tokens-total 271003,
+    :answer_type :label,
+    :match :pred-contains-gold}
+   {:cost-usd 0.0317956,
+    :correct? 1,
+    :tokens-in 17617,
+    :children-spawned 0,
+    :numeric-accuracy 1.0,
+    :mode :engine,
+    :final
+    {:answer 0,
+     :method
+     "Parsed the single review and classified its sentiment using a language model, then counted positives in Clojure.",
+     :checks {:parsed-count 1, :positive-count 0, :negative-count 1},
+     :missing []},
+    :tokens-out 463,
+    :gold [0],
+    :status :final,
+    :id "210020003",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-d4f0f540-1ae0-4ef7-9dd6-67c2f7991739",
+    :wall-ms 15828,
+    :raw-predicted 0,
+    :predicted 0,
+    :tokens-total 33226,
+    :answer_type :count}
+   {:cost-usd 0.0424815,
+    :correct? 1,
+    :tokens-in 21435,
+    :children-spawned 0,
+    :numeric-accuracy 1.0,
+    :mode :engine,
+    :final
+    {:answer 4,
+     :method
+     "Extracted dates from the 4 parsed data lines, computed frequencies in Clojure, counted those appearing exactly 1 time.",
+     :checks
+     {:total-lines 11,
+      :data-lines-count 4,
+      :parsed-dates-count 4,
+      :parsed-dates
+      ("Mar 08, 2022" "Mar 07, 2024" "Jan 31, 2025" "Jan 19, 2025"),
+      :date-frequencies
+      {"Mar 08, 2022" 1,
+       "Mar 07, 2024" 1,
+       "Jan 31, 2025" 1,
+       "Jan 19, 2025" 1}},
+     :missing []},
+    :tokens-out 507,
+    :gold [4],
+    :status :final,
+    :id "211020008",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-9dd9bc5a-937e-458c-a54c-ff287b9fdd76",
+    :wall-ms 20381,
+    :raw-predicted 4,
+    :predicted 4,
+    :tokens-total 61004,
+    :answer_type :count}
+   {:cost-usd 0.021662,
+    :correct? 1,
+    :tokens-in 10852,
+    :children-spawned 0,
+    :mode :engine,
+    :final
+    {:answer "Label: negative",
+     :method
+     "Parsed the single review, classified with lm, and computed most common label in Clojure",
+     :checks {:parsed 1, :stated 1, :consistent true},
+     :missing []},
+    :tokens-out 353,
+    :gold ["negative"],
+    :status :final,
+    :id "210020000",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-ef0c365d-0f2b-4601-9848-79032c93d5af",
+    :wall-ms 15910,
+    :raw-predicted "Label: negative",
+    :predicted "negative",
+    :tokens-total 32390,
+    :answer_type :label,
+    :match :exact}
+   {:cost-usd 0.061482,
+    :correct? 0,
+    :tokens-in 30577,
+    :children-spawned 0,
+    :mode :engine,
+    :final
+    {:answer
+     "Answer: positive is the same frequency before 2024-03-07",
+     :method
+     "Parsed records and converted dates to ISO; classified sentiment with map-lm; filtered and counted positive labels before vs after 2024-03-07 in Clojure.",
+     :checks
+     {:total-parsed 4,
+      :before-count 1,
+      :after-count 2,
+      :on-count 1,
+      :positive-before-count 1,
+      :positive-after-count 1},
+     :missing []},
+    :tokens-out 1425,
+    :gold ["more common"],
+    :status :final,
+    :id "211020009",
+    :run-dir
+    "evals/results/oolong-v17/runs/session-19768cf9-8432-43d9-af65-caf8b27d1311",
+    :wall-ms 33155,
+    :raw-predicted
+    "Answer: positive is the same frequency before 2024-03-07",
+    :predicted "positive is the same frequency before 2024 03 07",
+    :tokens-total 84889,
+    :answer_type :label,
+    :match :none}]},
+ :budget {:combined-spent-usd 3.3988520500000003, :budget-usd 50.0}}

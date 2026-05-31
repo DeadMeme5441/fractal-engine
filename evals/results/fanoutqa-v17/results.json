@@ -1,0 +1,414 @@
+{
+  "manifest" : {
+    "repro/split" : null,
+    "engine/prompt-hash" : "sha256:35cbe8bf6e4928e0a5ddf2ff188c7ceb38ae42d833bcad02e3616d96bf8ada17",
+    "repro/created-at" : "2026-05-31T08:11:56.004015Z",
+    "repro/benchmark" : "fanoutqa",
+    "engine/prompt-version" : 17,
+    "engine/git-dirty?" : true,
+    "repro/version" : 1,
+    "seed" : null,
+    "models" : {
+      "root" : {
+        "provider" : "vertex-gemini",
+        "model" : "gemini-3.5-flash"
+      },
+      "leaf" : {
+        "provider" : "vertex-gemini",
+        "model" : "gemini-3.1-flash-lite-preview"
+      },
+      "child" : {
+        "provider" : "vertex-gemini",
+        "model" : "gemini-3.5-flash"
+      }
+    },
+    "repro/command" : "clojure -M:evals run --runs-dir evals/results/fanoutqa-v17/runs --leaf-model gemini-3.1-flash-lite-preview --child-provider vertex-gemini --leaf-provider vertex-gemini --child-model gemini-3.5-flash --mode engine --benchmark fanoutqa --out evals/results/fanoutqa-v17 --call-timeout-ms 180000 --max-turns 1000000 --budget-usd 50 --provider vertex-gemini --data evals/data/fanoutqa-smart.jsonl --model gemini-3.5-flash",
+    "repro/mode" : "engine",
+    "notes" : null,
+    "engine/git-sha" : "78444eedd7261ef344998911f66a1918bfbe6e6e",
+    "limits" : {
+      "limit" : null,
+      "budget-usd" : 50.0,
+      "max-turns" : 1000000,
+      "max-fanout" : null,
+      "call-timeout-ms" : 180000
+    },
+    "dataset" : {
+      "dataset/path" : "evals/data/fanoutqa-smart.jsonl",
+      "dataset/count" : 15,
+      "dataset/sha256" : "21a5724f08b1e740db40352fbf760d19b0b5bcf06569d785a130e1b3241d686f"
+    },
+    "engine/prompt-name" : "repl"
+  },
+  "summary" : {
+    "engine" : {
+      "ablation-honored-n" : 0,
+      "numeric-accuracy-mean" : null,
+      "accuracy" : 0.5333333333333333,
+      "n" : 15,
+      "stopped-early?" : false,
+      "n-scored" : 15,
+      "children-spawned-total" : 0,
+      "ablation-violated-n" : 0,
+      "total-cost-usd" : 4.5360494000000005,
+      "n-errors" : 0,
+      "spent-usd" : 4.5360494000000005,
+      "loose-accuracy-mean" : 0.6950000000000001,
+      "wall-ms-mean" : 91577.53333333334,
+      "tokens-total" : 7129764,
+      "n-correct" : 8
+    }
+  },
+  "runs" : {
+    "engine" : [ {
+      "cost-usd" : 0.92397115,
+      "correct?" : 1,
+      "tokens-in" : 2135087,
+      "missed" : [ ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Harry Potter and the Philosopher's Stone: 26 June 1997", "Harry Potter and the Chamber of Secrets: 2 July 1998 (UK) / 2 June 1999 (US)", "Harry Potter and the Prisoner of Azkaban: 8 July 1999 (UK) / 8 September 1999 (US)", "Harry Potter and the Goblet of Fire: 8 July 2000", "Harry Potter and the Order of the Phoenix: 21 June 2003", "Harry Potter and the Half-Blood Prince: 16 July 2005", "Harry Potter and the Deathly Hallows: 21 July 2007", "Harry Potter and the Cursed Child: 2016", "Fantastic Beasts and Where to Find Them: 2001", "Quidditch Through the Ages: 2001", "The Tales of Beedle the Bard: 4 December 2008", "Hogwarts: An Incomplete and Unreliable Guide: 2016", "Short Stories from Hogwarts of Power, Politics and Pesky Poltergeists: 2016", "Short Stories from Hogwarts of Heroism, Hardship and Dangerous Hobbies: 2016" ],
+        "evidence" : [ "*Harry Potter and the Philosopher's Stone* was published by Bloomsbury, the publisher of all *Harry Potter* books in the United Kingdom, on 26 June 1997.", "originally published in the UK on 2 July 1998 and in the US on 2 June 1999.", "*Harry Potter and the Prisoner of Azkaban* was published a year later in the UK on 8 July 1999 and in the US on 8 September 1999", "[68] *Harry Potter and the Goblet of Fire* was published on 8 July 2000 at the same time by Bloomsbury and Scholastic.", "It was published worldwide in English on 21 June 2003.", "[71] *Harry Potter and the Half-Blood Prince* was published on 16 July 2005", "[72][73] The seventh and final novel, *Harry Potter and the Deathly Hallows*, was published on 21 July 2007", "In 2016, *Harry Potter and the Cursed Child* was released, a two-part play written by Jack Thorne based on an original story by Rowling, Thorne, and John Tiffany.", "In 2001, she released *Fantastic Beasts and Where to Find Them* (a purported Hogwarts textbook) and *Quidditch Through the Ages* (a book Harry reads for fun).", "The book was published internationally on 4 December 2008.", "In 2016, she released three new e-books: *Hogwarts: An Incomplete and Unreliable Guide*, *Short Stories from Hogwarts of Power, Politics and Pesky Poltergeists*\nand *Short Stories from Hogwarts of Heroism, Hardship and Dangerous Hobbies*.[264]" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 7,
+      "tokens-out" : 26433,
+      "gold" : [ "26 June 1997", "2 July 1998", "8 July 1999", "8 July 2000", "21 June 2003", "16 July 2005", "21 July 2007" ],
+      "status" : "final",
+      "id" : "0055931d81c8e924",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-8086324c-ff35-4b7d-9204-4fac6d1c3aa1",
+      "wall-ms" : 210496,
+      "loose-accuracy" : 1.0,
+      "predicted" : [ "Harry Potter and the Philosopher's Stone: 26 June 1997", "Harry Potter and the Chamber of Secrets: 2 July 1998 (UK) / 2 June 1999 (US)", "Harry Potter and the Prisoner of Azkaban: 8 July 1999 (UK) / 8 September 1999 (US)", "Harry Potter and the Goblet of Fire: 8 July 2000", "Harry Potter and the Order of the Phoenix: 21 June 2003", "Harry Potter and the Half-Blood Prince: 16 July 2005", "Harry Potter and the Deathly Hallows: 21 July 2007", "Harry Potter and the Cursed Child: 2016", "Fantastic Beasts and Where to Find Them: 2001", "Quidditch Through the Ages: 2001", "The Tales of Beedle the Bard: 4 December 2008", "Hogwarts: An Incomplete and Unreliable Guide: 2016", "Short Stories from Hogwarts of Power, Politics and Pesky Poltergeists: 2016", "Short Stories from Hogwarts of Heroism, Hardship and Dangerous Hobbies: 2016" ],
+      "tokens-total" : 2174529,
+      "n-found" : 7
+    }, {
+      "cost-usd" : 0.42199555,
+      "correct?" : 0,
+      "tokens-in" : 391089,
+      "missed" : [ "yes", "no", "yes", "no", "yes", "yes", "no", "yes" ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Samuel L. Jackson" ],
+        "evidence" : [ "In 2022, he received the Academy Honorary Award as \"a cultural icon whose dynamic work has resonated across genres and generations and audiences worldwide\".", "At the 12th Annual Governors Awards, friend and actor Denzel Washington presented Jackson with his Oscar." ],
+        "missing" : [ ]
+      },
+      "n-gold" : 8,
+      "tokens-out" : 6003,
+      "gold" : [ "yes", "no", "yes", "no", "yes", "yes", "no", "yes" ],
+      "status" : "final",
+      "id" : "29242cc91b49e88e",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-c1d4cb62-c23e-41ba-912d-5a158e88786d",
+      "wall-ms" : 87638,
+      "loose-accuracy" : 0.0,
+      "predicted" : [ "Samuel L. Jackson" ],
+      "tokens-total" : 597203,
+      "n-found" : 0
+    }, {
+      "cost-usd" : 0.2014472,
+      "correct?" : 0,
+      "tokens-in" : 210399,
+      "missed" : [ "GUU, GUC, GUA, and GUG", "AUU, AUC, and AUA", "UUA, UUG, CUU, CUC, CUA, and CUG", "UUU and UUC", "ACU, ACC, ACA, and ACG", "CAU and CAC", "AAA and AAG" ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Valine: GUU, GUC, GUA, GUG", "Isoleucine: AUU, AUC, AUA", "Leucine: UUA, UUG, CUU, CUC, CUA, CUG", "Methionine: AUG (in standard genetic code; AUA also encodes for methionine in the mitochondrial genome of several organisms)", "Phenylalanine: UUU, UUC", "Tryptophan: UGG", "Threonine: ACU, ACC, ACA, ACG", "Histidine: CAU, CAC", "Lysine: AAA, AAG" ],
+        "evidence" : [ "It is encoded by all codons starting with GU (GUU, GUC, GUA, and GUG).", "It is encoded by the codons AUU, AUC, and AUA.", "It is encoded by the codons UUA, UUG, CUU, CUC, CUA, and CUG.", "It is encoded by the codon AUG.", "In the mitochondrial genome of several organisms, including metazoa and yeast, the codon AUA also encodes for methionine.", "It is encoded by the codons UUU and UUC.", "It is encoded by the codon UGG.", "It is encoded by all the codons starting AC (ACU, ACC, ACA, and ACG).", "It is encoded by the codons CAU and CAC.", "It is encoded by the codons AAA and AAG." ],
+        "missing" : [ ]
+      },
+      "n-gold" : 9,
+      "tokens-out" : 3575,
+      "gold" : [ "GUU, GUC, GUA, and GUG", "AUU, AUC, and AUA", "UUA, UUG, CUU, CUC, CUA, and CUG", "AUG", "UUU and UUC", "UGG", "ACU, ACC, ACA, and ACG", "CAU and CAC", "AAA and AAG" ],
+      "status" : "final",
+      "id" : "71552a38345f892e",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-ec0f0bad-bc46-4534-a203-68e927dbc166",
+      "wall-ms" : 69428,
+      "loose-accuracy" : 0.2222222222222222,
+      "predicted" : [ "Valine: GUU, GUC, GUA, GUG", "Isoleucine: AUU, AUC, AUA", "Leucine: UUA, UUG, CUU, CUC, CUA, CUG", "Methionine: AUG (in standard genetic code; AUA also encodes for methionine in the mitochondrial genome of several organisms)", "Phenylalanine: UUU, UUC", "Tryptophan: UGG", "Threonine: ACU, ACC, ACA, ACG", "Histidine: CAU, CAC", "Lysine: AAA, AAG" ],
+      "tokens-total" : 365992,
+      "n-found" : 2
+    }, {
+      "cost-usd" : 0.15649175,
+      "correct?" : 0,
+      "tokens-in" : 89432,
+      "missed" : [ "37", "35", "35", "48", "45" ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Lena Dunham: Born May 13, 1986 (38 years old as of November 2024)", "Allison Williams: Born April 13, 1988 (36 years old as of November 2024)", "Jemima Kirke: Born April 26, 1985 (39 years old as of November 2024)", "Zosia Mamet: Born February 2, 1988 (36 years old as of November 2024)", "Adam Driver: Born November 19, 1983 (40 years old as of November 2024)", "Alex Karpovsky: Born September 23, 1975 (49 years old as of November 2024)", "Andrew Rannells: Born August 23, 1978 (46 years old as of November 2024)", "Ebon Moss-Bachrach: Born March 19, 1977 (47 years old as of November 2024)", "Jake Lacy: Born February 14, 1985 (39 years old as of November 2024)" ],
+        "evidence" : [ "Lena Dunham: \"(1986-05-13) May 13, 1986\"", "Allison Williams: \"(1988-04-13) April 13, 1988\"", "Jemima Kirke: \"(1985-04-26) 26 April 1985\"", "Zosia Mamet: \"(1988-02-02) February 2, 1988\"", "Adam Driver: \"(1983-11-19) November 19, 1983\"", "Alex Karpovsky: \"(1975-09-23) September 23, 1975\"", "Andrew Rannells: \"(1978-08-23) August 23, 1978\"", "Ebon Moss-Bachrach: \"(1977-03-19) March 19, 1977\"", "Jake Lacy: \"(1985-02-14) February 14, 1985\"" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 9,
+      "tokens-out" : 4827,
+      "gold" : [ "37", "35", "38", "35", "40", "48", "45", "46", "38" ],
+      "status" : "final",
+      "id" : "ae1c3cec94b75e55",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-90fa4443-e233-4664-b16b-6d3ef62c7b6e",
+      "wall-ms" : 59366,
+      "loose-accuracy" : 0.4444444444444444,
+      "predicted" : [ "Lena Dunham: Born May 13, 1986 (38 years old as of November 2024)", "Allison Williams: Born April 13, 1988 (36 years old as of November 2024)", "Jemima Kirke: Born April 26, 1985 (39 years old as of November 2024)", "Zosia Mamet: Born February 2, 1988 (36 years old as of November 2024)", "Adam Driver: Born November 19, 1983 (40 years old as of November 2024)", "Alex Karpovsky: Born September 23, 1975 (49 years old as of November 2024)", "Andrew Rannells: Born August 23, 1978 (46 years old as of November 2024)", "Ebon Moss-Bachrach: Born March 19, 1977 (47 years old as of November 2024)", "Jake Lacy: Born February 14, 1985 (39 years old as of November 2024)" ],
+      "tokens-total" : 209579,
+      "n-found" : 4
+    }, {
+      "cost-usd" : 0.07666865,
+      "correct?" : 0,
+      "tokens-in" : 29985,
+      "missed" : [ "31869 acres", "1085 acres", "1015 acres" ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Brown: 143 acres", "Columbia: 299 acres (total), 32 acres (main campus), and >11.33 acres (Manhattanville site)", "Cornell: 745 acres", "Dartmouth: 31,869 acres total; also owns 4,500 acres of Mount Moosilauke and a 27,000-acre tract of land", "Harvard: 209 acres", "Pennsylvania: 1,085 acres (total); 299 acres (University City campus); 694 acres (New Bolton Center); 92 acres (Morris Arboretum)", "Princeton: Main campus: 600 acres; Additional property: more than 520 acres", "Yale: 1,015 total acres, comprising 260 acres in downtown New Haven and 500 acres of athletic facilities in western New Haven" ],
+        "evidence" : [ "Brown campus size evidence: \"143 acres (0.58 km2)\"", "Columbia campus size evidence: \"Large city, 299 acres; 32 acres (13 ha), in Morningside Heights; more than two-thirds of a 17 acres (6.9 ha) site\"", "Cornell campus size evidence: \"745 acres (301 ha)\"", "Dartmouth campus size evidence: \"31,869 acres (128.97 km2) (total) | Occurrence 10: In addition to its campus in Hanover, Dartmouth owns 4,500 acres (18 km2) of Mount Moosilauke in the White Mountains and a 27,000-acre (110 km2) tract of land\"", "Harvard campus size evidence: \"209 acres (85 ha)\"", "Pennsylvania campus size evidence: \"1,085 acres (4.39 km2) (total); 299 acres (1.21 km2), University City campus; 694 acres (2.81 km2), New Bolton Center; 92 acres (0.37 km2), Morris Arboretum\"", "Princeton campus size evidence: \"600 acres (2.4 km2) main campus... university also owns more than 520 acres (2.1 km2) of property in West Windsor Township\"", "Yale campus size evidence: \"Midsize city, 1,015 acres (411 ha); Yale's central campus in downtown New Haven covers 260 acres (1.1 km2); the university holds 500 acres (2.0 km2) of athletic facilities\"" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 8,
+      "tokens-out" : 3538,
+      "gold" : [ "31869 acres", "1085 acres", "1015 acres", "745 acres", "600 acres", "299 acres", "209 acres", "143 acres" ],
+      "status" : "final",
+      "id" : "ff866ee3e2bf4820",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-4c6131d6-f317-4bb0-865e-9b5692c2684b",
+      "wall-ms" : 34251,
+      "loose-accuracy" : 0.625,
+      "predicted" : [ "Brown: 143 acres", "Columbia: 299 acres (total), 32 acres (main campus), and >11.33 acres (Manhattanville site)", "Cornell: 745 acres", "Dartmouth: 31,869 acres total; also owns 4,500 acres of Mount Moosilauke and a 27,000-acre tract of land", "Harvard: 209 acres", "Pennsylvania: 1,085 acres (total); 299 acres (University City campus); 694 acres (New Bolton Center); 92 acres (Morris Arboretum)", "Princeton: Main campus: 600 acres; Additional property: more than 520 acres", "Yale: 1,015 total acres, comprising 260 acres in downtown New Haven and 500 acres of athletic facilities in western New Haven" ],
+      "tokens-total" : 90965,
+      "n-found" : 5
+    }, {
+      "cost-usd" : 0.4974572,
+      "correct?" : 0,
+      "tokens-in" : 258154,
+      "missed" : [ "1965" ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Antoine de Saint-Exupéry: 1900", "Agatha Christie: 1890", "Cao Xueqin: 1710 (with scholarly debate suggesting 1715, or between 1715 and 1724)", "J. R. R. Tolkien: 1892", "Charles Dickens: Year of birth is not present in the evidence", "J. K. Rowling: Year of birth is not present in the evidence" ],
+        "evidence" : [ "Antoine de Saint-Exupéry: 'Born | Antoine Maries Jean-Baptiste Roger de Saint-Exupéry\n(1900-06-29)29 June 1900Lyon, France'", "Agatha Christie: 'Dame Agatha Mary Clarissa Christie, Lady Mallowan, DBE (née Miller; 15 September 1890 – 12 January 1976)'", "Cao Xueqin: 'Born | (1710-04-04)4 April 1710Nanjing, China' and 'It would be fair however to confine Cao's birth date to between 1715 and 1724'", "J. R. R. Tolkien: 'John Ronald Reuel Tolkien CBE FRSL (/ˈruːl ˈtɒlkiːn/, ROOL TOL-keen;[a] 3 January 1892 – 2 September 1973)'" ],
+        "missing" : [ "Birth year of Charles Dickens (author of 'A Tale of Two Cities') is not mentioned in the provided text.", "Birth year of J. K. Rowling (author of 'Harry Potter and the Philosopher's Stone') is not mentioned in the provided text." ]
+      },
+      "n-gold" : 5,
+      "tokens-out" : 8297,
+      "gold" : [ "1890", "1900", "1965", "1892", "1710" ],
+      "status" : "final",
+      "id" : "00065f204bddb94d",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-eed24684-6d79-4648-92e8-10a3ca0a1c9a",
+      "wall-ms" : 116856,
+      "loose-accuracy" : 0.8,
+      "predicted" : [ "Antoine de Saint-Exupéry: 1900", "Agatha Christie: 1890", "Cao Xueqin: 1710 (with scholarly debate suggesting 1715, or between 1715 and 1724)", "J. R. R. Tolkien: 1892", "Charles Dickens: Year of birth is not present in the evidence", "J. K. Rowling: Year of birth is not present in the evidence" ],
+      "tokens-total" : 601867,
+      "n-found" : 4
+    }, {
+      "cost-usd" : 0.06589545,
+      "correct?" : 1,
+      "tokens-in" : 30350,
+      "missed" : [ ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "WMT", "AMZN", "XOM", "AAPL", "UNH" ],
+        "evidence" : [ "Walmart Inc.\n| Traded as\n | * NYSE: WMT", "Amazon.com, Inc.\n| Traded as\n | * Nasdaq: AMZN", "ExxonMobil Corporation\n| Traded as\n | * NYSE: XON (1973–1999)[2]\n* NYSE: XOM (1999–present)", "Apple Inc.\n| Traded as\n | * Nasdaq: AAPL", "UnitedHealth Group Incorporated\n| Traded as\n | * NYSE: UNH" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 5,
+      "tokens-out" : 1888,
+      "gold" : [ "WMT", "AMZN", "XOM", "AAPL", "UNH" ],
+      "status" : "final",
+      "id" : "3d0739b161908b67",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-0994f944-75ad-4fb3-a52d-6a3508eb8635",
+      "wall-ms" : 29037,
+      "loose-accuracy" : 1.0,
+      "predicted" : [ "WMT", "AMZN", "XOM", "AAPL", "UNH" ],
+      "tokens-total" : 71222,
+      "n-found" : 5
+    }, {
+      "cost-usd" : 0.12219755,
+      "correct?" : 1,
+      "tokens-in" : 137725,
+      "missed" : [ ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "1. \"We Belong Together\" (First-listed songwriter: Mariah Carey)", "2. \"Hollaback Girl\" (First-listed songwriter: Gwen Stefani)", "3. \"Let Me Love You\" (First-listed songwriter: Scott Storch)", "4. \"Since U Been Gone\" (First-listed songwriter: Max Martin)", "5. \"1, 2 Step\" (First-listed songwriter: Ciara Harris)" ],
+        "evidence" : [ "Songwriters | * Mariah Carey\n* Jermaine Dupri\n* Manuel Seal\n* Johntá Austin\n* Kenneth Edmonds\n* Darnell Bristol\n* Bobby Womack\n* Patrick Moten\n* Sandra Sully", "Songwriters | * Gwen Stefani\n* Pharrell Williams\n* Chad Hugo", "Songwriters | * Scott Storch\n* Kameron Houff\n* Shaffer Smith", "Songwriters | * Max Martin\n* Lukasz Gottwald", "Songwriters | * Ciara Harris\n* Phalon Alexander\n* Missy Elliott" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 5,
+      "tokens-out" : 2866,
+      "gold" : [ "Mariah Carey", "Gwen Stefani", "Scott Storch", "Max Martin", "Ciara Harris" ],
+      "status" : "final",
+      "id" : "723f3438d520f693",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-f3944f17-5183-42c6-b563-302dbd862a2a",
+      "wall-ms" : 81551,
+      "loose-accuracy" : 1.0,
+      "predicted" : [ "1. \"We Belong Together\" (First-listed songwriter: Mariah Carey)", "2. \"Hollaback Girl\" (First-listed songwriter: Gwen Stefani)", "3. \"Let Me Love You\" (First-listed songwriter: Scott Storch)", "4. \"Since U Been Gone\" (First-listed songwriter: Max Martin)", "5. \"1, 2 Step\" (First-listed songwriter: Ciara Harris)" ],
+      "tokens-total" : 181542,
+      "n-found" : 5
+    }, {
+      "cost-usd" : 0.06502215,
+      "correct?" : 1,
+      "tokens-in" : 34219,
+      "missed" : [ ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Agatha Christie: 15 September 1890", "Jules Verne: 8 February 1828", "William Shakespeare: Date of birth unknown (baptised 26 April 1564, traditionally observed on 23 April 1564)", "Enid Blyton: 11 August 1897", "Barbara Cartland: 9 July 1901" ],
+        "evidence" : [ "Born | Agatha Mary Clarissa Miller\n(1890-09-15)15 September 1890Torquay, Devon, England", "Born | Jules Gabriel Verne\n(1828-02-08)8 February 1828Nantes, Brittany, France", "He was born in Stratford-upon-Avon, where he was baptised on 26 April 1564. His date of birth is unknown, but is traditionally observed on 23 April, Saint George's Day.", "Born | Enid Mary Blyton\n(1897-08-11)11 August 1897East Dulwich, London, England", "Born | Mary Barbara Hamilton Cartland\n(1901-07-09)9 July 1901Edgbaston, Birmingham, England" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 5,
+      "tokens-out" : 2262,
+      "gold" : [ "1890", "1828", "1564", "1897", "1901" ],
+      "status" : "final",
+      "id" : "c0ca99cbbb908c7d",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-5bdbca62-5eb8-4864-8f69-e584409d9551",
+      "wall-ms" : 34037,
+      "loose-accuracy" : 1.0,
+      "predicted" : [ "Agatha Christie: 15 September 1890", "Jules Verne: 8 February 1828", "William Shakespeare: Date of birth unknown (baptised 26 April 1564, traditionally observed on 23 April 1564)", "Enid Blyton: 11 August 1897", "Barbara Cartland: 9 July 1901" ],
+      "tokens-total" : 75351,
+      "n-found" : 5
+    }, {
+      "cost-usd" : 0.12130245,
+      "correct?" : 1,
+      "tokens-in" : 63245,
+      "missed" : [ ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Avatar (directed by James Cameron)", "Avengers: Endgame (directed by Anthony Russo and Joe Russo)", "Avatar: The Way of Water (directed by James Cameron)", "Titanic (directed by James Cameron)", "Star Wars: The Force Awakens (directed by J. J. Abrams)" ],
+        "evidence" : [ "| 1 | 1 | *Avatar* | $2,923,706,026 | 2009 |", "| Directed by | James Cameron |", "| 2 | 1 | *Avengers: Endgame* | $2,797,501,328 | 2019 |", "| Directed by | * Anthony Russo\n* Joe Russo |", "| 3 | 3 | *Avatar: The Way of Water* | $2,320,250,281 | 2022 |", "| Directed by | James Cameron |", "| 4 | 1 | *Titanic* | T$2,257,844,554 | 1997 |", "| Directed by | James Cameron |", "| 5 | 3 | *Star Wars: The Force Awakens* | $2,068,223,624 | 2015 |", "| Directed by | J. J. Abrams |" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 5,
+      "tokens-out" : 2011,
+      "gold" : [ "James Cameron", "Anthony Russo and Joe Russo", "James Cameron", "James Cameron", "J. J. Abrams" ],
+      "status" : "final",
+      "id" : "ffb482fefde57323",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-635070c6-2994-45c6-ae29-459f00addd79",
+      "wall-ms" : 40070,
+      "loose-accuracy" : 1.0,
+      "predicted" : [ "Avatar (directed by James Cameron)", "Avengers: Endgame (directed by Anthony Russo and Joe Russo)", "Avatar: The Way of Water (directed by James Cameron)", "Titanic (directed by James Cameron)", "Star Wars: The Force Awakens (directed by J. J. Abrams)" ],
+      "tokens-total" : 121150,
+      "n-found" : 5
+    }, {
+      "cost-usd" : 0.39223395,
+      "correct?" : 0,
+      "tokens-in" : 92721,
+      "missed" : [ "45", "44" ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Google's online video platform is YouTube.", "YouTube was founded on February 14, 2005, by Steve Chen, Chad Hurley, and Jawed Karim.", "According to the documents, the ages of the founders are: Chad Hurley is 49 years old (born January 24, 1977), Steve Chen is 47 years old (born August 25, 1978), and Jawed Karim is 46 years old (born October 28, 1979)." ],
+        "evidence" : [ "American video-sharing platform owned by Google", "it was launched on February 14, 2005, by Steve Chen, Chad Hurley, and Jawed Karim", "January 24, 1977 (age 49)", "August 25, 1978 (age 47)", "October 28, 1979 (age 46)" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 3,
+      "tokens-out" : 28060,
+      "gold" : [ "45", "46", "44" ],
+      "status" : "final",
+      "id" : "146e74771fcf6a30",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-1afe7140-4c44-4842-b817-39b9094acf5e",
+      "wall-ms" : 133241,
+      "loose-accuracy" : 0.3333333333333333,
+      "predicted" : [ "Google's online video platform is YouTube.", "YouTube was founded on February 14, 2005, by Steve Chen, Chad Hurley, and Jawed Karim.", "According to the documents, the ages of the founders are: Chad Hurley is 49 years old (born January 24, 1977), Steve Chen is 47 years old (born August 25, 1978), and Jawed Karim is 46 years old (born October 28, 1979)." ],
+      "tokens-total" : 126245,
+      "n-found" : 1
+    }, {
+      "cost-usd" : 0.52025245,
+      "correct?" : 0,
+      "tokens-in" : 311258,
+      "missed" : [ "United States of America", "United States of America", "United States of America", "United States of America" ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "United States", "United Kingdom" ],
+        "evidence" : [ "American actress Helen Hayes (1900–1993) received her fourth distinct award in 1977. Between 1932 and 1980, Hayes received a total of 6 competitive awards.", "English actor and theatre director Sir John Gielgud (1904–2000) received his fourth distinct award in 1991. Between 1948 and 1991, Gielgud received a total of 5 competitive awards.", "American actor James Earl Jones (born 1931) received his fourth distinct award in 2011. Between 1969 and 2011, Jones received a total of 7 awards.", "American singer, activist, and actor Harry Belafonte (1927–2023) received his fourth distinct award in 2014. Between 1954 and 2014, Belafonte received a total of 6 awards.", "American record producer, musician, songwriter, composer, arranger, and film and television producer Quincy Jones (born 1933) received his fourth distinct award in 2016." ],
+        "missing" : [ ]
+      },
+      "n-gold" : 4,
+      "tokens-out" : 8788,
+      "gold" : [ "United States of America", "United States of America", "United States of America", "United States of America" ],
+      "status" : "final",
+      "id" : "585ead607ef66fb1",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-26ff0ca7-af17-48c7-b906-132de22b389b",
+      "wall-ms" : 145938,
+      "loose-accuracy" : 0.0,
+      "predicted" : [ "United States", "United Kingdom" ],
+      "tokens-total" : 699276,
+      "n-found" : 0
+    }, {
+      "cost-usd" : 0.31825545,
+      "correct?" : 1,
+      "tokens-in" : 159906,
+      "missed" : [ ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Viggo Mortensen", "Sean Astin", "Ian McKellen" ],
+        "evidence" : [ "| 2008 | *Eastern Promises* | Best Actor | Nominated", "| 2017 | *Captain Fantastic* | Nominated", "| 2019 | *Green Book* | Nominated", "Astin was also nominated for the Academy Award for Best Live Action Short Film in 1994 for the short film *Kangaroo Court*.", "| 1994 | Academy Awards | Best Live Action Short Film | *Kangaroo Court* | Nominated", "He received his first nomination for Best Actor for his performance as James Whale in the period drama *Gods and Monsters* (1998). His second nomination was for Best Supporting Actor for his performance as Gandalf the Grey in Peter Jackson's *Lord of the Rings: The Fellowship of the Ring* (2001).", "| 1999 | Best Actor in a Leading Role | *Gods and Monsters* | Nominated", "| 2002 | Best Actor in a Supporting Role | *The Lord of the Rings: The Fellowship of the Ring* | Nominated" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 2,
+      "tokens-out" : 4868,
+      "gold" : [ "Viggo Mortensen", "Ian McKellen" ],
+      "status" : "final",
+      "id" : "7c6edfe35e844a5d",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-89b38db8-fe5a-44c2-9312-4cd0f5a97af2",
+      "wall-ms" : 90840,
+      "loose-accuracy" : 1.0,
+      "predicted" : [ "Viggo Mortensen", "Sean Astin", "Ian McKellen" ],
+      "tokens-total" : 395622,
+      "n-found" : 2
+    }, {
+      "cost-usd" : 0.53801995,
+      "correct?" : 1,
+      "tokens-in" : 895552,
+      "missed" : [ ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Netherlands (Winner in 1988): Johan Cruyff Arena (also plays at De Kuip, Philips Stadion, and De Grolsch Veste)", "Denmark (Winner in 1992): Parken Stadium", "Germany (Winner in 1996): Various (stadiums in rotation around the country)", "France (Winner in 2000): Stade de France", "Greece (Winner in 2004): Agia Sophia Stadium", "Spain (Winner in 2008, 2012, 2024): Various (no designated national stadium)", "Portugal (Winner in 2016): Various (played at various stadiums throughout Portugal)", "Italy (Winner in 2020): Various (played at various stadiums throughout Italy)" ],
+        "evidence" : [ "The Netherlands national team does not have a national stadium but plays mostly at the Johan Cruyff Arena in Amsterdam.", "Denmark's home stadium is Parken Stadium in the Østerbro district of Copenhagen", "Germany plays its home matches among various stadiums, in rotation, around the country.", "In 1998, the Stade de France was inaugurated as France's national stadium ahead of the 1998 World Cup.", "On 7 March 2023, it was announced that the new Agia Sophia Stadium in the Nea Filadelfeia section of Athens would become the new home of the Ethniki.", "Spain does not have a designated national stadium.", "Portugal's home matches are played at various stadiums throughout Portugal", "Italy's home matches are played at various stadiums throughout Italy" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 10,
+      "tokens-out" : 7520,
+      "gold" : [ "Various", "Various", "Various", "Various", "Agia Sophia Stadium", "Stade de France", "Various", "Parken Stadium", "Johan Cruyff Arena", "Stade de France" ],
+      "status" : "final",
+      "id" : "a6545687ea8228bc",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-2017eb1b-abba-4c1c-8517-4d81c6004cb7",
+      "wall-ms" : 196733,
+      "loose-accuracy" : 1.0,
+      "predicted" : [ "Netherlands (Winner in 1988): Johan Cruyff Arena (also plays at De Kuip, Philips Stadion, and De Grolsch Veste)", "Denmark (Winner in 1992): Parken Stadium", "Germany (Winner in 1996): Various (stadiums in rotation around the country)", "France (Winner in 2000): Stade de France", "Greece (Winner in 2004): Agia Sophia Stadium", "Spain (Winner in 2008, 2012, 2024): Various (no designated national stadium)", "Portugal (Winner in 2016): Various (played at various stadiums throughout Portugal)", "Italy (Winner in 2020): Various (played at various stadiums throughout Italy)" ],
+      "tokens-total" : 1281305,
+      "n-found" : 10
+    }, {
+      "cost-usd" : 0.1148385,
+      "correct?" : 1,
+      "tokens-in" : 52734,
+      "missed" : [ ],
+      "children-spawned" : 0,
+      "mode" : "engine",
+      "final" : {
+        "answer" : [ "Damean Barfield", "Suzanna Greenaway" ],
+        "evidence" : [ "| Principal\n | Damean Barfield |", "| Principal\n | Suzanna Greenaway |", "Brown attended Essex High School in Virginia until late 2004", "later attended Thistletown Collegiate Institute for his high school education" ],
+        "missing" : [ ]
+      },
+      "n-gold" : 2,
+      "tokens-out" : 2620,
+      "gold" : [ "Suzanna Greenaway", "Damean Barfield" ],
+      "status" : "final",
+      "id" : "ddb5f93339663076",
+      "run-dir" : "evals/results/fanoutqa-v17/runs/session-30add32c-1d99-497f-a421-374816e5a698",
+      "wall-ms" : 44181,
+      "loose-accuracy" : 1.0,
+      "predicted" : [ "Damean Barfield", "Suzanna Greenaway" ],
+      "tokens-total" : 137916,
+      "n-found" : 2
+    } ]
+  },
+  "budget" : {
+    "combined-spent-usd" : 4.5360494000000005,
+    "budget-usd" : 50.0
+  }
+}

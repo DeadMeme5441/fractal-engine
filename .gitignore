@@ -7,6 +7,10 @@ target/
 runs/
 .fractal/
 .env
+evals/results/**/runs/
+evals/results/**/*.log
+evals/results/*.log
+evals/results/canary*/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

@@ -19,4 +19,21 @@
   ;; (runtime eval), so we ship an uberjar:  clojure -T:build uber
   :build
   {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
-   :ns-default build}}}
+   :ns-default build}
+
+  ;; Evaluation harness — an EXTERNAL CONSUMER of the engine, never part of it.
+  ;; Lives entirely under evals/; the :build alias above only sees ["src"], so the
+  ;; harness can never leak into the shipped uberjar. It imports the engine's public
+  ;; seams (process/run-task!, provider/complete, artifacts) and adds nothing to the
+  ;; core surface. Run:  clojure -M:evals run --help
+  :evals
+  {:extra-paths ["evals/src" "evals/resources"]
+   :main-opts ["-m" "fractal-eval.core"]}
+
+  ;; Harness tests (offline, scripted provider — no keys, no spend):
+  ;;   clojure -M:evals-test
+  :evals-test
+  {:extra-paths ["evals/src" "evals/resources" "evals/test"]
+   :extra-deps {io.github.cognitect-labs/test-runner
+                {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+   :main-opts ["-m" "cognitect.test-runner" "-d" "evals/test"]}}}
