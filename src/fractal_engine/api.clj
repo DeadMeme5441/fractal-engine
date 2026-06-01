@@ -41,9 +41,20 @@
   ([cfg opts] (session/start-session! cfg opts)))
 
 (defn run-turn!
-  "Run one user message on a live session handle. Returns the turn result map."
+  "Run one user message on a live session handle. Returns the turn result map.
+  Blocks until the turn settles. Throws `:fractal/turn-in-flight` if another turn is
+  already running on this handle."
   [session user-message]
   (session/run-turn! session user-message))
+
+(defn run-turn-async!
+  "Run one user message on a background daemon thread. Returns a promise delivering
+  the turn result map (a turn that throws delivers an `{:status :error ...}` map, not
+  an escaping exception). Poll `progress` (or `load-node`) on the session dir to
+  watch the turn in flight, then deref the promise for the result. Throws
+  `:fractal/turn-in-flight` if another turn is already running on this handle."
+  [session user-message]
+  (session/run-turn-async! session user-message))
 
 (defn stop-session!
   "Mark a live session stopped and flush the session artifacts."
@@ -112,6 +123,13 @@
   [dir]
   (projection/journal-events dir))
 
+(defn progress
+  "A lightweight, ref-free live snapshot of a run directory, folded straight from the
+  journal — correct mid-turn and cheap enough to poll while a turn is in flight (no
+  blob reads, no child recursion). Pairs with `run-turn-async!`."
+  [dir]
+  (projection/progress dir))
+
 ;; Trust / provenance
 
 (defn extract-claims
@@ -147,3 +165,14 @@
   "Return auth availability data for `provider-id`."
   [provider-id]
   (provider/auth-status provider-id))
+
+(defn scripted-responder
+  "Build a content-addressed value for `:scripted/response-fn`. `clauses` is a
+  sequence of [match reply] pairs; the first whose `match` applies wins. `match` is
+  a substring of the last user message (string), a predicate on the request (fn), or
+  `:default`. `reply` is a string, a response map, or a fn of the request. Race-free
+  under concurrent `map-lm`/`map-rlm` fanout, so it is the recommended way to script
+  fanned-out offline runs (a shared response queue has undefined order once leaves
+  run in parallel)."
+  [clauses]
+  (provider/responder clauses))

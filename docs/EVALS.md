@@ -150,11 +150,14 @@ benchmarks:
 - recovered intermediate `leaf-batch-failed`: 2 unique OOLONG batches, both caused
   by parse failures in a single leaf output and recovered by subsequent model work
 
-That last point is still a real runtime weakness. `map-lm` is currently
-all-or-nothing at the batch boundary; one malformed leaf result can throw the whole
-batch, even though the model can often recover in the next step. The next hardening
-pass should preserve retryable provider/error metadata and make batch retry/failure
-semantics less brittle.
+> **Resolved (post-v17).** This all-or-nothing weakness is fixed. `map-lm` / `map-rlm`
+> are now partial-failure tolerant: a failed item no longer throws the whole batch — the
+> call returns an input-aligned vector with the successes intact and each failed slot as
+> a `{:fractal/failed true :index i :error ...}` sentinel the model folds into its
+> missingness. A failed leaf is also recorded on its call row (`:item-failed`), so it is
+> legible in `fractal inspect` rather than masquerading as a successful leaf. The two
+> OOLONG batches above would now return their successful items directly instead of
+> needing a recovery step.
 
 ## What This Establishes
 

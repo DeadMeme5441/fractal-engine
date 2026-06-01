@@ -35,6 +35,33 @@
   [dir ref]
   (when ref (artifacts/read-ref dir ref)))
 
+(defn progress
+  "A lightweight, ref-free live snapshot of a run dir, folded straight from the
+  journal — correct mid-turn and cheap enough to poll while a turn is in flight (no
+  blob reads, no child recursion). Pairs with an async turn: poll this to watch a
+  turn settle. For full step/leaf/final detail, use `load-node` instead."
+  [dir]
+  (let [v       (view dir)
+        calls   (:calls v)
+        leaf?   #(artifacts/leaf-call-types (:call/type %))
+        child?  #(artifacts/child-call-types (:call/type %))
+        running (filterv #(= :running (:call/status %)) calls)
+        status  (get-in v [:session :session/status])]
+    {:session-id     (get-in v [:session :session/id])
+     :status         status
+     :running?       (= :running status)
+     :final?         (some? (:final-ref v))
+     :turn-count     (count (:turns v))
+     :latest-turn-id (get-in v [:session :session/latest-turn-id])
+     :steps          (count (:evals v))
+     :leaves         (count (filter leaf? calls))
+     :children       (count (filter child? calls))
+     :calls          {:total   (count calls)
+                      :running (count running)
+                      :ok      (count (filter #(= :ok (:call/status %)) calls))}
+     :in-flight      (mapv #(select-keys % [:call/id :call/type :call/turn-id :batch/index])
+                           running)}))
+
 ;; ── steps (the chat transcript: what the model wrote, what the host observed) ──
 
 (defn- assistant? [m] (= :assistant (:message/role m)))

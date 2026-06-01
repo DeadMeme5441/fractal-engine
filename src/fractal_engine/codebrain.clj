@@ -19,7 +19,7 @@
   small cited answer instead of having to read the code itself."
   (:require [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
-            [fractal-engine.cli :as cli]
+            [fractal-engine.cliopts :as cli]
             [fractal-engine.render :as r]
             [fractal-engine.session :as session]
             [fractal-engine.time :as time])

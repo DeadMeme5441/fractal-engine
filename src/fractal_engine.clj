@@ -1,15 +1,11 @@
 (ns fractal-engine
   (:gen-class)
-  (:require [fractal-engine.agentcli :as agentcli]
-            [fractal-engine.cli :as cli]))
+  (:require [fractal-engine.agentcli :as agentcli]))
 
 (defn -main
   "One agent use surface, beads-style: `fractal <verb> …` drives the engine
-  (run/resume/fork) and reads it (show/tree/verify/cost/…) in one grammar, with
-  --json and meaningful exit codes. Interactive `chat` and the legacy `inspect`
-  stay in `cli`."
+  (run/resume/fork/chat), reads it (show/tree/verify/cost/inspect/…), and runs the
+  codebrain product surface — all in one grammar, with --json and meaningful exit
+  codes."
   [& args]
-  (let [[cmd & _] args]
-    (if (or (nil? cmd) (agentcli/handles? cmd))
-      (apply agentcli/-main args)
-      (apply cli/-main args))))
+  (apply agentcli/-main args))

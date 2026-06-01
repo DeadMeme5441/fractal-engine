@@ -40,7 +40,7 @@
   ;; CLOJARS_PASSWORD (a Clojars deploy token) from the environment. Build
   ;; first, then deploy:
   ;;   clojure -T:build jar
-  ;;   clojure -X:deploy :artifact '"target/fractal-engine-0.1.1.jar"'
+  ;;   clojure -X:deploy :artifact '"target/fractal-engine-0.2.0.jar"'
   ;; CI does both on a v* tag (see .github/workflows/release.yml), alongside
   ;; the uberjar GitHub release.
   :deploy
@@ -51,4 +51,4 @@
                ;; b/write-pom emits the pom under the class-dir, not the repo
                ;; root where deps-deploy looks by default.
                :pom-file "target/classes/META-INF/maven/net.clojars.deadmeme5441/fractal-engine/pom.xml"
-               :artifact "target/fractal-engine-0.1.1.jar"}}}}
+               :artifact "target/fractal-engine-0.2.0.jar"}}}}

@@ -174,11 +174,28 @@
       (= statuses #{:unknown}) :unknown
       :else :partial)))
 
+(defn- call-input-tokens [call]
+  (first-number (:call/usage call) [:usage/input-tokens :usage/prompt-tokens :input-tokens :prompt-tokens]))
+
+(defn- call-output-tokens [call]
+  (first-number (:call/usage call) [:usage/output-tokens :usage/completion-tokens :output-tokens :completion-tokens]))
+
+(defn- call-total-tokens
+  "A call's total tokens: the provider's reported total if present, otherwise
+  input+output when BOTH are present (a derivable number the provider left implicit).
+  Stays nil when only one side is known, so the rollup honestly reports it unknown
+  rather than undercounting."
+  [call]
+  (or (first-number (:call/usage call) [:usage/total-tokens :total-tokens])
+      (let [i (call-input-tokens call)
+            o (call-output-tokens call)]
+        (when (and i o) (+ i o)))))
+
 (defn- usage-rollup [calls]
   (let [summary {:call/count (count calls)
-                 :tokens/input (numeric-rollup calls #(first-number (:call/usage %) [:usage/input-tokens :usage/prompt-tokens :input-tokens :prompt-tokens]))
-                 :tokens/output (numeric-rollup calls #(first-number (:call/usage %) [:usage/output-tokens :usage/completion-tokens :output-tokens :completion-tokens]))
-                 :tokens/total (numeric-rollup calls #(first-number (:call/usage %) [:usage/total-tokens :total-tokens]))
+                 :tokens/input (numeric-rollup calls call-input-tokens)
+                 :tokens/output (numeric-rollup calls call-output-tokens)
+                 :tokens/total (numeric-rollup calls call-total-tokens)
                  :tokens/cached (numeric-rollup calls #(first-number (:call/usage %) [:usage/cached-tokens :usage/cached-input-tokens :cached-tokens :cached-input-tokens]))}]
     (assoc summary :usage/status (aggregate-status (get-in summary [:tokens/input :status])
                                                    (get-in summary [:tokens/output :status])

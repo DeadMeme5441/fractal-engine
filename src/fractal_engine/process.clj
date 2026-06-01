@@ -1,5 +1,6 @@
 (ns fractal-engine.process
   (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
             [fractal-engine.call :as call]
@@ -145,10 +146,21 @@
                        :call/cache {:cache/status :unknown}}
                :ex (ex-info "Provider call failed" err t)}))}))
 
+(defn strip-edn-fence
+  "Drop an enclosing ```edn|clojure|clj fence if the model wrapped its EDN output
+  despite the leaf prompt's instruction not to. Unfenced text is returned untouched,
+  so genuinely malformed output still fails to read (and surfaces to the model as a
+  batch failure) — this only forgives the common, harmless fence wrapper."
+  [text]
+  (-> (str text)
+      (str/replace #"(?s)\A\s*```(?:edn|clojure|clj)?[ \t]*\r?\n?" "")
+      (str/replace #"(?s)\r?\n?```\s*\z" "")
+      str/trim))
+
 (defn parse-leaf [text mode]
   (case mode
     :string text
-    :edn (edn/read-string text)
+    :edn (edn/read-string (strip-edn-fence text))
     text))
 
 (defn bounded-fanout-inputs [kind cfg inputs]
@@ -287,6 +299,20 @@
                      :error/retryable? false}))
     :else (:final-value result)))
 
+(defn assemble-batch-results
+  "Fold per-item fan-out results into one vector aligned to input order. A success
+  contributes its value; a failure contributes a `:fractal/failed` sentinel in its
+  slot. Partial failure never throws -- the successes return for sure, and the
+  failures stay legible so the model can record missingness instead of silently
+  undercounting. `:fractal/` namespaces the sentinel so it cannot collide with a
+  leaf's or child's own domain value."
+  [results]
+  (mapv (fn [{:keys [ok index value error]}]
+          (if ok
+            value
+            {:fractal/failed true :index index :error error}))
+        (sort-by :index results)))
+
 (defn make-ops [state cfg ns-sym]
   (letfn [(leaf-call [call-type input query mode extra]
             (let [call (merge {:call/type call-type
@@ -301,7 +327,23 @@
                               extra)
                   {:keys [call-id response]} (call-provider! state cfg :leaf call)
                   text (provider/response-text response)
-                  value (parse-leaf text mode)]
+                  value (try
+                          (parse-leaf text mode)
+                          (catch Throwable t
+                            ;; The provider call succeeded but its text did not parse
+                            ;; into the requested shape. Mark the row so `leaves`/inspect
+                            ;; surface the item failure instead of a fake-ok leaf with no
+                            ;; result; then rethrow a typed error so map-lm folds it into
+                            ;; a typed sentinel (singular lm surfaces it as an eval error
+                            ;; / catch). :error/type lifts the same way as a child failure.
+                            (let [err {:error/type :fractal/leaf-parse-failed
+                                       :error/message (.getMessage t)
+                                       :error/data (ex-data t)}]
+                              (artifacts/update-call! state call-id assoc
+                                                      :call/status :item-failed
+                                                      :call/error err)
+                              (throw (ex-info "Leaf response did not parse into the requested shape"
+                                              err t)))))]
               (artifacts/update-call! state call-id assoc
                                       :call/result-ref (artifacts/value-ref! (:dir @state) value))
               value))
@@ -323,16 +365,19 @@
                                  :value (leaf-call :leaf-batch-item input query mode
                                                    {:batch/id batch-id :batch/index idx})}
                                 (catch Throwable t
+                                  ;; Lift :error/type from the cause's ex-data so the
+                                  ;; sentinel is typed: leaf parse -> :fractal/leaf-parse-failed,
+                                  ;; child -> :fractal/child-failed / :fractal/child-no-final.
                                   {:ok false :index idx
-                                   :error {:error/message (.getMessage t)
-                                           :error/data (ex-data t)}})))
+                                   :error (merge {:error/message (.getMessage t)
+                                                  :error/data (ex-data t)}
+                                                 (select-keys (ex-data t) [:error/type]))})))
                             inputs')]
-               (if (every? :ok results)
-                 (mapv :value (sort-by :index results))
-                 (throw (ex-info "Leaf batch failed"
-                                 {:error/type :fractal/leaf-batch-failed
-                                  :batch/id batch-id
-                                  :results (vec (sort-by :index results))}))))))
+               ;; Partial failure returns successes for sure: an input-aligned vector
+               ;; with `:fractal/failed` sentinels in the failed slots. The model splits
+               ;; them out and records missingness. (The pre-flight fanout cap throws
+               ;; earlier in bounded-fanout-inputs and never reaches here.)
+               (assemble-batch-results results))))
           (child-call [call-type task extra]
             (let [child-num (artifacts/next-counter! state :child)
                   cid (artifacts/child-id child-num)
@@ -497,15 +542,17 @@
                                                       {:batch/id batch-id
                                                        :batch/index idx})})
                                 (catch Throwable t
+                                  ;; Lift :error/type from the cause's ex-data so the
+                                  ;; sentinel is typed: leaf parse -> :fractal/leaf-parse-failed,
+                                  ;; child -> :fractal/child-failed / :fractal/child-no-final.
                                   {:ok false :index idx
-                                   :error {:error/message (.getMessage t)
-                                           :error/data (ex-data t)}})))
+                                   :error (merge {:error/message (.getMessage t)
+                                                  :error/data (ex-data t)}
+                                                 (select-keys (ex-data t) [:error/type]))})))
                             tasks')]
-               (if (every? :ok results)
-                 (mapv :value (sort-by :index results))
-                 (throw (ex-info "Child batch failed"
-                                 {:error/type :fractal/child-batch-failed
-                                  :results (vec (sort-by :index results))}))))))
+               ;; Symmetric with map-lm: a failed child becomes a `:fractal/failed`
+               ;; sentinel in its slot; the successful children return for sure.
+               (assemble-batch-results results))))
           (attach-rlm
             ([path task] (attach-rlm path task {}))
             ([path task opts] (attach-call path task opts)))]

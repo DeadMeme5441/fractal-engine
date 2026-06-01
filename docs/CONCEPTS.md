@@ -61,6 +61,16 @@ the model wants state, it `def`s it.
 - `mode` is `:string` (default) or `:edn` (the model returns parseable EDN).
 - `map-lm` / `map-rlm` are **real parallel fanout**, capped at 50 inputs per call by
   default. For more, chunk in Clojure and compose the chunk results yourself.
+- A `map-lm` / `map-rlm` fan-out is **partial-failure tolerant**. If some items fail, the
+  call still returns a vector aligned to the inputs: successful items return their value,
+  and each failed slot holds a `{:fractal/failed true :index i :error ...}` sentinel.
+  The successes are never lost to one bad item. The model splits the sentinels out
+  (`(remove :fractal/failed results)` to aggregate, `(filter :fractal/failed results)` to
+  record what failed) and folds the failures into its `FINAL` missingness. A failed leaf
+  item is also marked on its call row (`:call/status :item-failed`,
+  `:error/type :fractal/leaf-parse-failed`), so `fractal inspect` shows it rather than a
+  fake-ok leaf. Singular `lm`/`rlm` have no batch and surface a failure directly; the
+  pre-flight fan-out cap (`:fractal/fanout-exceeded`) is a separate recoverable error.
 - `attach-rlm` restores a completed prior session's last snapshot as a child, then runs
   `task` against that restored state — reach for it only when a prior session already
   holds state you need.

@@ -2,7 +2,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
-            [fractal-engine.cli :as cli]
+            [fractal-engine.cliopts :as cli]
             [fractal-engine.agentcli :as agentcli]
             [fractal-engine.event :as event]
             [fractal-engine.inspect :as inspect]
@@ -30,12 +30,14 @@
   (process/config {:scripted/responses (atom (vec responses))}))
 
 (deftest prompt-contract
-  (is (= 17 prompt/prompt-version))
+  (is (= 18 prompt/prompt-version))
   ;; Most prose can change, but these phrases are part of the model-facing contract:
-  ;; the six-function surface, the bounded fan-out rule, and the recovery strategy.
+  ;; the six-function surface, the bounded fan-out rule, the recovery strategy, and
+  ;; the partial-failure return contract (successes return; failures are sentinels).
   (doseq [phrase ["map-lm and map-rlm are capped at 50 parallel inputs per call."
                   "For more than 50 items, sequence batches of 40-50 with partition-all, run each chunk as its own map-lm or map-rlm, reduce each chunk locally, then reduce those partials globally."
                   "The host will return a recoverable fanout error for a single oversized fan-out; retry by chunking, not by raising the cap."
+                  "If some items in a map-lm or map-rlm fan-out fail, the call still returns a vector aligned to your inputs: each failed slot holds a {:fractal/failed true :index i :error ...} sentinel instead of a value, and every successful item returns."
                   "Chunk-and-reduce -- map-lm/map-rlm are capped at 50 parallel inputs per call."]]
     (is (clojure.string/includes? prompt/system-prompt phrase)))
   (is (clojure.string/includes?
@@ -125,17 +127,6 @@
     (let [session-text (slurp (str (artifacts/path dir "session.edn")))]
       (is (clojure.string/includes? session-text "\n "))
       (is (> (count (clojure.string/split-lines session-text)) 3)))))
-
-(deftest chat-reader-accepts-multi-paragraph-message
-  (is (= "first paragraph\nstill first message\n\nsecond paragraph"
-         (with-in-str "first paragraph\nstill first message\n\nsecond paragraph\n/send\n"
-           (cli/read-chat-message))))
-  (is (= :quit
-         (with-in-str "/exit\n"
-           (cli/read-chat-message))))
-  (is (= "unterminated but real"
-         (with-in-str "unterminated but real\n"
-           (cli/read-chat-message)))))
 
 (deftest simple-final-loop
   (let [dir (tmp-dir "simple")
@@ -574,6 +565,40 @@
       (is (= 1 (get-in usage [:cache/total-tree :cache/unknown-count])))
       (is (= usage (:final/usage final))))))
 
+(deftest leaf-edn-parse-tolerates-code-fences
+  (testing "fenced EDN parses (models wrap output despite the leaf prompt)"
+    (is (= {:a 1} (process/parse-leaf "```edn\n{:a 1}\n```" :edn)))
+    (is (= {:a 1} (process/parse-leaf "```\n{:a 1}\n```" :edn)))
+    (is (= [1 2 3] (process/parse-leaf "```clojure\n[1 2 3]\n```" :edn))))
+  (testing "unfenced input is unchanged and string mode stays verbatim"
+    (is (= {:a 1} (process/parse-leaf "{:a 1}" :edn)))
+    (is (= "```edn\n{:a 1}\n```" (process/parse-leaf "```edn\n{:a 1}\n```" :string))))
+  (testing "genuinely malformed EDN still throws, so a bad leaf fails its batch"
+    (is (thrown? Exception (process/parse-leaf "{:bad" :edn)))))
+
+(deftest usage-derives-total-from-input-plus-output
+  (let [dir (tmp-dir "usage-total")]
+    (testing "total is derived when the provider omits an explicit total"
+      (let [usage (artifacts/derive-usage
+                   dir
+                   [{:call/type :root :call/status :ok
+                     :call/usage {:usage/input-tokens 12 :usage/output-tokens 8}}])]
+        (is (= :known (get-in usage [:usage/root :tokens/total :status])))
+        (is (= 20 (get-in usage [:usage/root :tokens/total :known])))))
+    (testing "an explicit total still wins over the derived one"
+      (let [usage (artifacts/derive-usage
+                   dir
+                   [{:call/type :root :call/status :ok
+                     :call/usage {:usage/input-tokens 12 :usage/output-tokens 8
+                                  :usage/total-tokens 19}}])]
+        (is (= 19 (get-in usage [:usage/root :tokens/total :known])))))
+    (testing "only one side known stays honestly unknown (no undercount)"
+      (let [usage (artifacts/derive-usage
+                   dir
+                   [{:call/type :root :call/status :ok
+                     :call/usage {:usage/input-tokens 5}}])]
+        (is (= :unknown (get-in usage [:usage/root :tokens/total :status])))))))
+
 (deftest provider-failure-finalizes-root-and-leaf-failures-remain-model-visible
   (testing "root provider failure returns structured error artifacts"
     (let [dir (tmp-dir "root-provider-failure")
@@ -741,32 +766,28 @@
     (is (= :final (:status result)))
     (is (= {:restored 99} (:final-value result)))))
 
-(deftest run-chat-resume-and-fork-use-session-turns
-  (testing "run is a stopped one-turn session wrapper"
-    (let [out (with-out-str
-                (cli/run-command {:fake-script "simple" :question "define x"}))
-          dir (second (re-find #"Session: (.+)" out))
+(deftest agentcli-run-and-chat-use-session-turns
+  (testing "run is a stopped one-turn session, named by --name"
+    (let [runs-dir (tmp-dir "run-runs")
+          _ (agentcli/dispatch "run" ["define x" "--fake-script" "simple"
+                                      "--runs-dir" runs-dir "--name" "named"])
+          dir (artifacts/path runs-dir "named")
           session-row (artifacts/read-edn-file (artifacts/path dir "session.edn") {})
           turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])]
+      (is (= "named" (:session/id session-row)))
       (is (= :stopped (:session/status session-row)))
       (is (= 1 (count turns)))))
-  (testing "run honors explicit session names"
-    (let [runs-dir (tmp-dir "named-runs")
-          out (with-out-str
-                (cli/run-command {:fake-script "simple"
-                                  :question "define x"
-                                  :runs-dir runs-dir
-                                  :session "named"}))
-          dir (artifacts/path runs-dir "named")
-          session-row (artifacts/read-edn-file (artifacts/path dir "session.edn") {})]
-      (is (clojure.string/includes? out (str dir)))
-      (is (= "named" (:session/id session-row)))
-      (is (= :stopped (:session/status session-row)))))
-  (testing "chat processes two submitted messages in one session"
-    (let [out (with-in-str "first\n/send\nsecond\n/send\n"
-                (with-out-str
-                  (cli/chat-command {:fake-script "multi-turn-chat"})))
-          dir (second (re-find #"Session: (.+)" out))
+  (testing "chat drives two turns in one session via the live async path"
+    ;; Each stdin line is one message; /quit leaves. This exercises
+    ;; cmd-chat -> run-turn-live! -> session/run-turn-async! end to end, and pins the
+    ;; same cross-turn invariants the old cli/chat-command did: one system message
+    ;; across turns, bounded cache scope/label.
+    (let [runs-dir (tmp-dir "chat-runs")
+          _ (with-out-str
+              (with-in-str "first\nsecond\n/quit\n"
+                (agentcli/dispatch "chat" ["--fake-script" "multi-turn-chat"
+                                           "--runs-dir" runs-dir "--name" "c"])))
+          dir (artifacts/path runs-dir "c")
           session-row (artifacts/read-edn-file (artifacts/path dir "session.edn") {})
           messages (artifacts/read-edn-file (artifacts/path dir "messages.edn") [])
           turns (artifacts/read-edn-file (artifacts/path dir "turns.edn") [])
@@ -811,22 +832,71 @@
       (is (not= (str (:dir s)) (str (:dir forked)))))))
 
 (deftest map-lm-partial-failure-keeps-successes
+  ;; New contract: a partly-failed map-lm returns an input-aligned vector directly --
+  ;; successes are their values, failures are :fractal/failed sentinels -- so the
+  ;; successes are never lost to one bad item and the failure stays legible.
   (let [dir (tmp-dir "leaf-failure")
         response-fn (fn [request]
                       (let [content (:message/content (last (:request/messages request)))]
                         (cond
                           (clojure.string/includes? content "partials")
-                          "```clojure\n(def partials (try (map-lm [1 2] \"return EDN\" :edn) (catch Exception e (ex-data e))))\n(FINAL partials)\n```"
+                          "```clojure\n(def partials (map-lm [1 2] \"return EDN\" :edn))\n(FINAL {:partials partials\n        :ok (vec (remove :fractal/failed partials))\n        :failed (filterv :fractal/failed partials)})\n```"
                           (clojure.string/includes? content "1")
                           "{:ok 1}"
                           :else
                           "{:bad")))
         result (process/run-process!
                 (process/config {:scripted/response-fn response-fn})
-                {:dir dir :id "root" :kind :root :task "partials"})]
-    (is (= :fractal/leaf-batch-failed (get-in result [:final-value :error/type])))
-    (is (= {:ok 1} (get-in result [:final-value :results 0 :value])))
-    (is (= false (get-in result [:final-value :results 1 :ok])))))
+                {:dir dir :id "root" :kind :root :task "partials"})
+        v (:final-value result)
+        partials (:partials v)]
+    (is (= :final (:status result)))
+    ;; The success returns directly (no try/catch, no ex-data digging).
+    (is (= {:ok 1} (first partials)))
+    (is (= [{:ok 1}] (:ok v)))
+    ;; The failure is an input-aligned sentinel the model can record as missingness.
+    (let [failed (first (:failed v))]
+      (is (true? (:fractal/failed failed)))
+      (is (= 1 (:index failed)))
+      (is (= :fractal/leaf-parse-failed (get-in failed [:error :error/type]))))
+    ;; Read side: the parse-failed leaf row is marked :item-failed (not fake-ok),
+    ;; so `leaves`/inspect surface the failure; the good leaf stays :ok.
+    (let [leaf-calls (->> (artifacts/read-edn-file (artifacts/path dir "calls.edn") [])
+                          (filter #(= :leaf-batch-item (:call/type %)))
+                          (sort-by :batch/index))]
+      (is (= [:ok :item-failed] (mapv :call/status leaf-calls)))
+      (is (= :fractal/leaf-parse-failed
+             (get-in (second leaf-calls) [:call/error :error/type]))))))
+
+(deftest map-rlm-partial-failure-keeps-successes
+  ;; Symmetric with map-lm: a child that errors becomes a :fractal/failed sentinel in
+  ;; its slot, the successful children return for sure, and the sentinel is typed
+  ;; (:fractal/child-failed) so the model can record the missing lane.
+  (let [dir (tmp-dir "child-failure")
+        response-fn (fn [request]
+                      (let [content (:message/content (last (:request/messages request)))]
+                        (cond
+                          (clojure.string/includes? content "rlm-partials")
+                          "```clojure\n(def r (map-rlm [\"good\" \"bad\"]))\n(FINAL {:r r\n        :ok (vec (remove :fractal/failed r))\n        :failed (filterv :fractal/failed r)})\n```"
+                          (clojure.string/includes? content "Assigned child task:\ngood")
+                          "```clojure\n(FINAL :good-result)\n```"
+                          (clojure.string/includes? content "Assigned child task:\nbad")
+                          (throw (ex-info "child boom" {:why :test}))
+                          :else
+                          "```clojure\n(FINAL :unexpected)\n```")))
+        result (process/run-process!
+                (process/config {:scripted/response-fn response-fn})
+                {:dir dir :id "root" :kind :root :task "rlm-partials"})
+        v (:final-value result)]
+    (is (= :final (:status result)))
+    ;; Successful child returns directly.
+    (is (= :good-result (first (:r v))))
+    (is (= [:good-result] (:ok v)))
+    ;; Failed child is an input-aligned, typed sentinel.
+    (let [failed (first (:failed v))]
+      (is (true? (:fractal/failed failed)))
+      (is (= 1 (:index failed)))
+      (is (= :fractal/child-failed (get-in failed [:error :error/type]))))))
 
 (deftest turn-final-snapshots-capture-vars-and_refs
   (let [dir (tmp-dir "snapshot")

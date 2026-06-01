@@ -150,11 +150,12 @@ observation the host fed back at each step — ending in the `FINAL` value.
 Run the test suite to confirm a healthy checkout (all offline, no keys):
 
 ```bash
-clojure -M:test                # Ran 49 tests containing 476 assertions. 0 failures, 0 errors.
+clojure -M:test                # Ran 53 tests containing 502 assertions. 0 failures, 0 errors.
 ```
 
 Other offline scenarios are available via `--fake-script`: `simple`, `lm`, `map-lm`,
-`rlm`, `map-rlm`, `multi-turn-chat`, and more (see `src/fractal_engine/scripts.clj`).
+`map-lm-partial` (demonstrates partial-failure sentinels), `rlm`, `map-rlm`,
+`multi-turn-chat`, and more (see `src/fractal_engine/scripts.clj`).
 
 ## Where runs live: `.fractal/`
 
@@ -382,6 +383,14 @@ loop). A leaf is the non-recursive base case. There is **no magic `context` vari
 working state lives in REPL vars the model defines with `def`. The root, every child,
 and every leaf run the *same* loop; there is no separate "planner" or "executor." See
 [`docs/CONCEPTS.md`](docs/CONCEPTS.md) for the model in depth.
+
+A `map-lm` / `map-rlm` fan-out is **partial-failure tolerant**: if some items fail, the
+call still returns a vector aligned to the inputs — successful items return their value,
+and each failed slot holds a `{:fractal/failed true :index i :error ...}` sentinel
+instead. One bad item never costs you the rest. Split the sentinels out before
+aggregating (`(remove :fractal/failed results)`) and fold the failures into your answer's
+missingness. (Singular `lm`/`rlm` have no batch, so they surface a failure directly; and
+the pre-flight fan-out cap is a separate, recoverable error you retry by chunking.)
 
 ## Artifacts & the journal
 

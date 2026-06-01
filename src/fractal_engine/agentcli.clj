@@ -14,6 +14,7 @@
                                              fractal leaves <run> [node]   leaf I/O
                                              fractal step   <run> [node] N one step
                                              fractal stream <run>          events as JSONL
+                                             fractal inspect <run>         full artifact dump
 
   Every verb takes `--json`; exit codes mean something (0 final · 1 error ·
   2 no-final · 3 timeout · 5 confabulation-suspected). A drive verb prints the run's
@@ -30,8 +31,9 @@
             [clojure.string :as str]
             [clojure.walk :as walk]
             [fractal-engine.artifacts :as artifacts]
-            [fractal-engine.cli :as cli]
+            [fractal-engine.cliopts :as cli]
             [fractal-engine.codebrain :as codebrain]
+            [fractal-engine.inspect :as inspect]
             [fractal-engine.journal :as journal]
             [fractal-engine.projection :as proj]
             [fractal-engine.provenance :as prov]
@@ -243,6 +245,22 @@
         {:out (str/join "\n" (map #(json/generate-string (json-safe %)) events))
          :exit 0}))))
 
+(defn cmd-inspect
+  "The offline inspector: a full dump of a run's artifacts. `show`/`tree`/`stream`
+  are the focused read verbs; `inspect` is the everything-at-once view. Accepts a
+  run as a positional (`fractal inspect <run>`) or the path form `--dir <path>`."
+  [pos flags]
+  (let [token (or (first pos) (:dir flags))
+        dir   (when token (resolve-run token flags))]
+    (cond
+      (nil? token) (err "missing <run>: fractal inspect <run> [--tree --snapshots --handles --json]")
+      (nil? dir)   (err (str "no run: " token))
+      (:json flags) {:out (pr-str (inspect/structured dir {:tree (:tree flags)
+                                                           :snapshots (:snapshots flags)
+                                                           :handles (:handles flags)}))
+                     :exit 0}
+      :else         {:out (inspect/summary-string dir flags) :exit 0})))
+
 (defn cmd-ls [_pos flags]
   (let [runs-dir (or (:runs-dir flags) (cli/default-runs-dir))
         root (File. ^String runs-dir)]
@@ -342,19 +360,20 @@
 
 (defn- run-turn-live!
   "Run one turn while painting a live `◐ thinking…` line that updates in place from
-  the journal, on a background thread. Returns the turn result. The status line is
-  cleared before the caller prints the settled summary."
+  the journal. The turn runs on the engine's own async primitive (a daemon thread);
+  we poll its journal for the live line and the returned promise for completion. The
+  status line is cleared before the caller prints the settled summary."
   [s task]
   (let [dir (str (:dir s))
-        fut (future (session/run-turn! s task))]
+        result (session/run-turn-async! s task)]
     (loop []
-      (when (not (realized? fut))
+      (when (not (realized? result))
         (let [line (r/progress-line (r/progress-counts dir))]
           (print (str "\r\033[K" line)) (flush))
         (Thread/sleep 300)
         (recur)))
     (print "\r\033[K") (flush)            ; wipe the progress line
-    @fut))
+    @result))
 
 (defn cmd-chat [pos flags]
   ;; resume a named/path run if given and it exists; else start a fresh brain
@@ -409,7 +428,8 @@
              "  fractal cost   <run>            spend breakdown\n"
              "  fractal leaves <run> [node]     leaf inputs/outputs\n"
              "  fractal step   <run> [node] N   one step, in full\n"
-             "  fractal stream <run>            journal events as JSONL\n\n"
+             "  fractal stream <run>            journal events as JSONL\n"
+             "  fractal inspect <run>           full artifact dump (everything at once)\n\n"
              (r/c :dim "every verb takes --json; node address drops the implied root/ prefix"))
    :exit 0})
 
@@ -423,13 +443,13 @@
    ;; read
    "show" cmd-show "tree" cmd-tree "prime" cmd-prime "ls" cmd-ls "list" cmd-ls
    "verify" cmd-verify "trace" cmd-trace "cost" cmd-cost "leaves" cmd-leaves
-   "step" cmd-step "stream" cmd-stream "tail" cmd-stream
+   "step" cmd-step "stream" cmd-stream "tail" cmd-stream "inspect" cmd-inspect
    ;; meta
    "help" cmd-help "--help" cmd-help "-h" cmd-help})
 
 (defn handles?
-  "True for verbs this surface owns. Interactive `chat` and the legacy `inspect`
-  stay in `cli`."
+  "True for verbs this surface owns. It now owns the whole CLI — drive, read, chat,
+  codebrain, and inspect — so this is effectively every command."
   [cmd]
   (contains? verbs cmd))
 

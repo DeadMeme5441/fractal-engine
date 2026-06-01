@@ -115,6 +115,48 @@
       (merge base value)
       (assoc base :response/parts [{:part/type :text :text value}]))))
 
+(defn last-user-text
+  "The text of the last user message in a request — the content that distinguishes
+  one scripted call from another (root step vs leaf input vs child task)."
+  [request]
+  (->> (:request/messages request)
+       (filter #(= :user (:message/role %)))
+       last
+       :message/content
+       str))
+
+(defn responder
+  "Build a content-addressed scripted responder suitable for `:scripted/response-fn`.
+
+  `clauses` is a sequence of [match reply] pairs; the first whose `match` applies
+  wins. `match` may be:
+    - a string  — matches when it is a substring of the last user message
+    - a fn      — called with the request; truthy means match
+    - :default  — always matches (use as the final clause)
+  `reply` may be a string, a full response map, or a fn of the request returning
+  either.
+
+  Because the returned fn is pure in the request, it is race-free under the
+  concurrent fanout of `map-lm`/`map-rlm` — unlike a shared `:scripted/responses`
+  queue, whose order is undefined once leaves run in parallel. Throws
+  `:scripted/no-match` if no clause matches, so an unscripted path fails loudly."
+  [clauses]
+  (let [clauses (vec clauses)]
+    (fn [request]
+      (let [text (last-user-text request)
+            hit  (some (fn [[match reply]]
+                         (when (or (= :default match)
+                                   (and (string? match) (str/includes? text match))
+                                   (and (fn? match) (match request)))
+                           [reply]))
+                       clauses)]
+        (if hit
+          (let [reply (first hit)]
+            (if (fn? reply) (reply request) reply))
+          (throw (ex-info "No scripted clause matched the request"
+                          {:error/type :scripted/no-match
+                           :request/last-user text})))))))
+
 (defn complete
   [config role request]
   (let [model-cfg (get-in config [:models role] (get default-models role))

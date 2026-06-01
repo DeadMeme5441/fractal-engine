@@ -8,7 +8,7 @@
   from the provider response) and refuses to start an example once the cap is hit."
   (:require [clojure.java.io :as io]
             [fractal-engine.artifacts :as artifacts]
-            [fractal-engine.cli :as cli]
+            [fractal-engine.cliopts :as cli]
             [fractal-engine.process :as process]
             [fractal-engine.provider :as provider]
             [fractal-eval.fanoutqa :as fanoutqa]

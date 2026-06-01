@@ -21,6 +21,9 @@
     "map-rlm" ["```clojure\n(def children (map-rlm [\"Return FINAL 1\" \"Return FINAL 2\"]))\n(FINAL {:children children})\n```"
                "```clojure\n(FINAL 1)\n```"
                "```clojure\n(FINAL 2)\n```"]
+    "map-lm-partial" ["```clojure\n(def labels (map-lm [{:id 1} {:id 2}] \"Return the id as EDN.\" :edn))\n(FINAL {:labels labels\n        :ok (vec (remove :fractal/failed labels))\n        :failed (filterv :fractal/failed labels)})\n```"
+                      "{:id 1}"
+                      "{:bad"]
     "resume-setup" ["```clojure\n(def saved 99)\n(FINAL {:saved saved})\n```"]
     "resume-use" ["```clojure\n(FINAL {:restored saved})\n```"]
     "fake-source" ["```clojure\n(def x 42)\n(FINAL {:x x})\n```"]
@@ -43,6 +46,19 @@
           "```clojure\n(def answer (map-lm [{:id 1} {:id 2}] \"Return the id as EDN.\" :edn))\n(FINAL {:leaves answer})\n```"
           (clojure.string/includes? content "{:id 1}") "{:id 1}"
           (clojure.string/includes? content "{:id 2}") "{:id 2}"
+          :else "{:unknown true}")))
+    ;; One leaf returns malformed EDN ("{:bad"), so its slot comes back as a
+    ;; :fractal/failed sentinel while the other returns for sure -- a runnable demo
+    ;; of partial-failure semantics. Content-sensitive so it is race-free under the
+    ;; parallel fan-out.
+    "map-lm-partial"
+    (fn [request]
+      (let [content (:message/content (last (:request/messages request)))]
+        (cond
+          (clojure.string/includes? content "partial fan-out")
+          "```clojure\n(def labels (map-lm [{:id 1} {:id 2}] \"Return the id as EDN.\" :edn))\n(FINAL {:labels labels\n        :ok (vec (remove :fractal/failed labels))\n        :failed (filterv :fractal/failed labels)})\n```"
+          (clojure.string/includes? content "{:id 1}") "{:id 1}"
+          (clojure.string/includes? content "{:id 2}") "{:bad"
           :else "{:unknown true}")))
     "map-rlm"
     (fn [request]

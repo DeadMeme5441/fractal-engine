@@ -1,9 +1,23 @@
 (ns fractal-engine.api-test
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [fractal-engine.api :as fe]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.prompt :as prompt]))
+
+(defn- req-last-user [request]
+  (->> (:request/messages request)
+       (filter #(= :user (:message/role %)))
+       last :message/content str))
+
+(defn- leaf-input
+  "Pull the input EDN the engine embedded in a leaf request."
+  [request]
+  (-> (req-last-user request)
+      (->> (re-find #"(?s)Input EDN:\n(.*?)\n\nQuery:"))
+      second
+      edn/read-string))
 
 (defn- tmp-dir [name]
   (str (java.nio.file.Files/createTempDirectory
@@ -101,6 +115,58 @@
     (is (= :supported (:overall summary)))
     (is (= :none (:auth (fe/provider-descriptor :scripted))))
     (is (true? (:satisfied? (fe/auth-status :scripted))))))
+
+(deftest scripted-responder-is-content-addressed-and-race-free
+  (let [runs-dir (tmp-dir "responder")
+        ;; The root spawns 8 leaves in parallel via map-lm; each leaf reply is
+        ;; computed from ITS OWN input, so a correct ordered result proves matches
+        ;; are by content, not by a shared queue position (which parallel fanout
+        ;; would scramble). One leaf wraps its EDN in a fence to also exercise the
+        ;; fence-tolerant parse.
+        response-fn (fe/scripted-responder
+                     [["leaf echo"
+                       (fn [req]
+                         (let [{:keys [id]} (leaf-input req)
+                               edn (pr-str {:id id :doubled (* 2 id)})]
+                           (if (even? id) (str "```edn\n" edn "\n```") edn)))]
+                      [:default
+                       (str "```clojure\n"
+                            "(FINAL (map-lm (mapv (fn [i] {:id i}) (range 8)) \"leaf echo\" :edn))\n"
+                            "```")]])
+        cfg (fe/config {:runs-dir runs-dir :scripted/response-fn response-fn})
+        s (fe/start-session! cfg {:id "responder" :dir (str runs-dir "/responder")})
+        result (fe/run-turn! s "fan out")
+        progress (fe/progress (:dir s))]
+    (is (= :final (:status result)))
+    (is (= (mapv (fn [i] {:id i :doubled (* 2 i)}) (range 8))
+           (:final-value result))
+        "each leaf matched its own input under parallel fanout")
+    (testing "live progress reflects the settled run, ref-free"
+      (is (= 8 (:leaves progress)))
+      (is (true? (:final? progress)))
+      (is (pos? (:steps progress)))
+      (is (= 0 (get-in progress [:calls :running]))))
+    (fe/stop-session! s)))
+
+(deftest async-turn-delivers-result-and-guards-overlap
+  (let [gate (promise)
+        runs-dir (tmp-dir "async")
+        cfg (fe/config {:runs-dir runs-dir
+                        :scripted/response-fn (fn [_]
+                                                @gate ; block the in-flight turn until released
+                                                "```clojure\n(FINAL :done)\n```")})
+        s (fe/start-session! cfg {:id "async" :dir (str runs-dir "/async")})
+        result-p (fe/run-turn-async! s "go")]
+    (testing "a turn in flight refuses an overlapping turn on the same handle"
+      ;; run-turn-async! acquires the turn lock synchronously before returning, and
+      ;; the gate keeps the turn parked in the provider, so this is deterministic.
+      (is (thrown-with-msg? Exception #"already running"
+                            (fe/run-turn! s "overlap"))))
+    (deliver gate :release)
+    (is (= :done (:final-value (deref result-p 10000 :timeout))))
+    (testing "the lock is released after the turn settles"
+      (is (= :done (:final-value (fe/run-turn! s "again")))))
+    (fe/stop-session! s)))
 
 (deftest public-api-does-not-expand-model-facing-surface
   (let [runs-dir (tmp-dir "surface")

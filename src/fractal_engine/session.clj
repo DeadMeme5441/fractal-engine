@@ -15,7 +15,11 @@
    :cfg cfg
    :ns-sym ns-sym
    :ops ops
-   :dir (:dir @state)})
+   :dir (:dir @state)
+   ;; Guards against overlapping turns on one handle: a session has a single REPL
+   ;; namespace and a single append-only message log, so two turns at once would
+   ;; corrupt both. Held by run-turn!/run-turn-async! for the duration of a turn.
+   :busy (atom false)})
 
 (defn- install! [state cfg ns-sym]
   (let [ops (process/make-ops state cfg ns-sym)]
@@ -49,7 +53,7 @@
                                              (str base "\n\n" overlay)))
      (session-handle state effective-cfg ns-sym ops))))
 
-(defn run-turn! [session user-message]
+(defn- run-turn-checked! [session user-message]
   (let [{:keys [state cfg ns-sym]} session
         status (get-in @state [:session :session/status])]
     (when-not (= :running status)
@@ -57,6 +61,46 @@
                       {:error/type :fractal/session-not-running
                        :session/status status})))
     (process/run-turn-on-state! state cfg ns-sym user-message)))
+
+(defn- acquire-turn! [session]
+  (when-not (compare-and-set! (:busy session) false true)
+    (throw (ex-info "A turn is already running on this session"
+                    {:error/type :fractal/turn-in-flight
+                     :session/id (get-in @(:state session) [:session :session/id])}))))
+
+(defn run-turn! [session user-message]
+  (acquire-turn! session)
+  (try
+    (run-turn-checked! session user-message)
+    (finally
+      (reset! (:busy session) false))))
+
+(defn run-turn-async!
+  "Run one turn on a background daemon thread. Returns a promise that delivers the
+  turn result map. A turn that throws delivers {:status :error :error ...} instead
+  of escaping, so a deref or poll never surprises the caller. The session journal
+  updates live throughout — poll `projection/progress` (or `load-node`) on the
+  session dir to watch the turn settle, then deref the promise for the result.
+  Refuses to start (throws :fractal/turn-in-flight) if a turn is already running on
+  this handle."
+  [session user-message]
+  (acquire-turn! session)
+  (let [p (promise)
+        run (fn []
+              (try
+                (deliver p (run-turn-checked! session user-message))
+                (catch Throwable t
+                  (deliver p {:status :error
+                              :error {:error/type (or (:error/type (ex-data t)) :fractal/turn-failed)
+                                      :error/message (.getMessage t)
+                                      :error/data (ex-data t)}}))
+                (finally
+                  (reset! (:busy session) false))))]
+    (doto (Thread. ^Runnable run
+                   (str "fractal-turn-" (get-in @(:state session) [:session :session/id])))
+      (.setDaemon true)
+      (.start))
+    p))
 
 (defn stop-session! [session]
   (let [state (:state session)]

@@ -3,7 +3,7 @@
             [fractal-engine.cache :as cache]))
 
 (def prompt-name :fractal-engine/repl)
-(def prompt-version 17)
+(def prompt-version 18)
 
 (def system-prompt
   (str/join
@@ -40,6 +40,7 @@
     "- Independent transformations run at once. Fan them out with map-lm or map-rlm; never serialize work whose parts do not depend on each other."
     "- map-lm and map-rlm are capped at 50 parallel inputs per call. For more than 50 items, sequence batches of 40-50 with partition-all, run each chunk as its own map-lm or map-rlm, reduce each chunk locally, then reduce those partials globally."
     "- The host will return a recoverable fanout error for a single oversized fan-out; retry by chunking, not by raising the cap."
+    "- If some items in a map-lm or map-rlm fan-out fail, the call still returns a vector aligned to your inputs: each failed slot holds a {:fractal/failed true :index i :error ...} sentinel instead of a value, and every successful item returns. Split the sentinels out before you aggregate -- (remove :fractal/failed results) to compute over the successes, (filter :fractal/failed results) to see what failed -- and fold the failures into your FINAL missingness. One bad item never costs you the rest; silently aggregating over the sentinels would undercount, so separate them first."
     "- Gather a full set of results before the next step only when that step truly needs all of them at once: a dedup, a merge, a global ranking, or an early exit when the set is empty. Otherwise compose each settled value as it returns; do not impose a synchronization point the work does not require."
     "- The root should coordinate and verify. It should not personally read a large uncertain surface end to end when children can investigate surfaces, leaves can judge bounded items, and Clojure can validate and compose."
     "- For any large uncertainty surface, do reconnaissance before solving: first learn structure, partitions, pitfalls, and useful handles. Often that reconnaissance itself belongs in a child."
@@ -69,7 +70,9 @@
     "- Map-and-aggregate -- per-item probabilistic labels, then a deterministic reduce. The model labels; Clojure counts."
     "    ```clojure"
     "    (def labels (map-lm items \"For {:id ... :text ...} return EDN {:id id :label ... :confidence 0.0-1.0 :evidence ...}.\" :edn))"
-    "    (def freqs (frequencies (map :label labels)))   ; aggregate in Clojure, never in a leaf"
+    "    (def ok (remove :fractal/failed labels))         ; drop failed-item sentinels before aggregating"
+    "    (def freqs (frequencies (map :label ok)))        ; aggregate in Clojure, never in a leaf"
+    "    (def failed (filterv :fractal/failed labels))    ; carry these into FINAL missingness"
     "    ```"
     "- Reconnoiter-then-decompose -- a cheap sizing pass first, then one child per independent partition."
     "    ```clojure"

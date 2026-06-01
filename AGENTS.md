@@ -56,7 +56,7 @@ codebases with cheap-child / strong-root model splits, including emergent recurs
 fanout (`map-rlm`) with evidence-cited results. The `fractal` CLI is the use surface
 (drive + read, `--json`, meaningful exit codes), and the trust layer catches
 confabulation by checking cited evidence against source (grep floor + `--deep` engine
-judge). Behavior prompt is at version 15; tests green.
+judge). Behavior prompt is at version 18; tests green.
 
 Known limitations, documented and not yet built:
 

@@ -308,23 +308,11 @@
 ;; ── chat: live progress + per-turn summary (the "second brain" you talk to) ───
 
 (defn progress-counts
-  "Light tally of a session's journal for the live `◐ thinking…` line: children
-  spawned, steps run, leaves judged. Reads events directly (cheaper than a full
-  ref-resolving load) and tolerates concurrent appends — the journal reader drops a
-  half-written trailing line."
+  "Light tally for the live `◐ thinking…` line: children spawned, steps run, leaves
+  judged. A thin projection of `projection/progress` (journal-folded, ref-free, safe
+  to poll on a live run)."
   [dir]
-  (reduce (fn [m e]
-            (case (:event/type e)
-              :eval/added  (update m :steps inc)
-              :call/started
-              (let [t (get-in e [:call :call/type])]
-                (cond
-                  (artifacts/child-call-types t) (update m :children inc)
-                  (artifacts/leaf-call-types t)  (update m :leaves inc)
-                  :else m))
-              m))
-          {:steps 0 :children 0 :leaves 0}
-          (proj/journal-events dir)))
+  (select-keys (proj/progress dir) [:steps :children :leaves]))
 
 (defn progress-line [{:keys [steps children leaves]}]
   (str (c :yellow "◐") " thinking… "
