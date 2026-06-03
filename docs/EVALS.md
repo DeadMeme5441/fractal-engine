@@ -39,8 +39,8 @@ Validation before spend:
 - live provider auth checked before the canary
 
 The aggregate result files are tracked under `evals/results/*-v17/results.*`.
-Raw `runs/` session journals and logs are intentionally not tracked: they are
-large, noisy, and reproducible from the recorded commands in each result file.
+Raw session store data and logs are intentionally not tracked: they are large,
+noisy, and reproducible from the recorded commands in each result file.
 
 ## Results
 
@@ -165,7 +165,7 @@ This run supports the engine thesis on long-context aggregation:
 
 - The model used ordinary Clojure for parsing, partitioning, counting, and reducing.
 - Leaf calls handled bounded probabilistic judgments.
-- The host preserved order, costs, event journals, and reproducibility manifests.
+- The host preserved order, costs, canonical events, and reproducibility manifests.
 - The engine completed both long-context suites under modest spend with no terminal
   runtime failures.
 

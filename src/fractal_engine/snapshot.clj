@@ -1,32 +1,20 @@
 (ns fractal-engine.snapshot
   (:require [clojure.edn :as edn]
-            [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
+            [fractal-engine.session-db :as session-db]
+            [fractal-engine.store.io :as store-io]
             [fractal-engine.time :as time])
   (:import [java.io InputStream OutputStream Reader Writer]
            [java.net Socket]
-           [java.nio.file Files Path]
            [java.util.concurrent Future]))
-
-(def inline-byte-threshold artifacts/inline-byte-threshold)
 
 (def special-symbols '#{FINAL lm map-lm rlm map-rlm attach-rlm})
 
-(defn turn-token [turn-id]
-  (format "turn-%04d" (long turn-id)))
+(declare source-session-id)
 
 (defn- edn-string [value]
-  (artifacts/formatted-edn value))
-
-(defn- blob-ref! [dir rel-path value]
-  (artifacts/blob-ref! dir rel-path value))
-
-(defn- inline-ref [value]
-  {:value/kind :inline :value value})
-
-(defn- safe-var-file [sym]
-  (str (str/replace (name sym) #"[^A-Za-z0-9_.-]" "_") ".edn"))
+  (store-io/formatted-edn value))
 
 (defn- edn-safe? [value]
   (try
@@ -59,13 +47,11 @@
   (cond-> (artifacts/value-summary value)
     (some? value) (assoc :class (.getName (class value)))))
 
-(defn- value-ref-for-var! [dir turn-id sym value]
-  (let [bytes (artifacts/value-bytes value)]
-    (if (> bytes inline-byte-threshold)
-      (blob-ref! dir
-                 (str "blobs/vars/" (turn-token turn-id) "/" (safe-var-file sym))
-                 value)
-      (inline-ref value))))
+(defn- value-ref-for-var! [dir sym value]
+  (artifacts/value-ref! dir
+                        {:var/name (name sym)
+                         :var/value value}
+                        {:payload/kind :var}))
 
 (defn snapshot-session-vars! [dir ns-sym turn-id]
   (->> (ns-publics ns-sym)
@@ -85,7 +71,7 @@
                 (conj rows {:var/name (name sym)
                             :var/symbol symbol-string
                             :var/status :restorable
-                            :var/value-ref (value-ref-for-var! dir turn-id sym value)
+                            :var/value-ref (value-ref-for-var! dir sym value)
                             :var/summary (var-summary value)})))))
         [])
        (sort-by :var/name)
@@ -95,10 +81,10 @@
   {:var/count (count var-rows)
    :var/restorable (count (filter #(= :restorable (:var/status %)) var-rows))
    :var/unrestorable (count (filter #(= :unrestorable (:var/status %)) var-rows))
-   :blob/count (count (filter #(= :blob (get-in % [:var/value-ref :value/kind])) var-rows))})
+   :blob/count (count (filter #(some? (get-in % [:var/value-ref :blob/id])) var-rows))})
 
 (defn write-turn-snapshot! [state ns-sym turn-row eval-row]
-  (let [dir (:dir @state)
+  (let [dir (:locator @state)
         turn-id (:turn/id turn-row)
         snapshot-id (artifacts/next-counter! state :snapshot)
         created-at (time/now-str)
@@ -113,9 +99,7 @@
                           :snapshot/created-at created-at
                           :snapshot/vars var-rows}
                    (:eval/id eval-row) (assoc :snapshot/eval-row (select-keys eval-row [:eval/id :eval/status])))
-        snapshot-ref (blob-ref! dir
-                                (str "blobs/snapshots/" (turn-token turn-id) ".edn")
-                                snapshot)
+        snapshot-ref (artifacts/value-ref! dir snapshot {:payload/kind :snapshot})
         row {:snapshot/id snapshot-id
              :snapshot/kind :turn-final
              :snapshot/turn-id turn-id
@@ -132,7 +116,23 @@
   (= :turn-final (:snapshot/kind row)))
 
 (defn snapshots [dir]
-  (artifacts/read-edn-file (artifacts/path dir "snapshots.edn") []))
+  (:snapshots (session-db/history-view (artifacts/store-root-for-locator dir)
+                                       (source-session-id dir))))
+
+(defn heads [dir]
+  (let [sid (source-session-id dir)]
+    (filterv #(= sid (:head/session %))
+             (session-db/list-head-records (artifacts/store-root-for-locator dir)))))
+
+(defn refs [dir]
+  (session-db/read-ref (artifacts/store-root-for-locator dir) (source-session-id dir)))
+
+(defn current-head-id [dir]
+  (or (:ref/current-head (refs dir))
+      (:head/id (last (heads dir)))))
+
+(defn head-for-id [dir head-id]
+  (first (filter #(= head-id (:head/id %)) (heads dir))))
 
 (defn latest-turn-snapshot [dir]
   (last (filter completed-turn-snapshot? (snapshots dir))))
@@ -142,10 +142,16 @@
                        (= (long turn-id) (long (:snapshot/turn-id %))))
                  (snapshots dir))))
 
+(defn snapshot-for-head [dir head-id]
+  (when-let [head (head-for-id dir head-id)]
+    (when-let [snapshot-id (:head/snapshot-id head)]
+      (first (filter #(= snapshot-id (:snapshot/id %)) (snapshots dir))))))
+
 (defn select-snapshot [dir opts]
-  (if-let [turn (:turn opts)]
-    (snapshot-for-turn dir turn)
-    (latest-turn-snapshot dir)))
+  (cond
+    (:head opts) (snapshot-for-head dir (:head opts))
+    (:turn opts) (snapshot-for-turn dir (:turn opts))
+    :else (latest-turn-snapshot dir)))
 
 (defn read-snapshot-blob [dir snapshot-row]
   (when-let [ref (:snapshot/ref snapshot-row)]
@@ -156,7 +162,8 @@
 (defn snapshot-not-found-error [dir opts]
   {:error/type :snapshot/not-found
    :reason :no-completed-turn-snapshot
-   :source/path (str dir)
+   :source/session-id (source-session-id dir)
+   :head (:head opts)
    :turn (:turn opts)})
 
 (defn require-snapshot [dir opts]
@@ -168,18 +175,27 @@
   (or (read-snapshot-blob dir snapshot-row)
       (throw (ex-info "Snapshot blob is missing"
                       {:error/type :snapshot/blob-not-found
-                       :source/path (str dir)
+                       :source/session-id (source-session-id dir)
                        :snapshot/id (:snapshot/id snapshot-row)}))))
+
+(defn clear-session-vars! [target-ns-sym]
+  (doseq [[sym _] (ns-publics target-ns-sym)
+          :when (not (contains? special-symbols sym))]
+    (ns-unmap target-ns-sym sym)))
 
 (defn restore-vars! [source-dir target-ns-sym snapshot]
   (let [restored (atom [])
         skipped (atom [])]
+    (clear-session-vars! target-ns-sym)
     (doseq [row (:snapshot/vars snapshot)]
       (case (:var/status row)
         :restorable
         (let [sym (symbol (:var/name row))
-              value (artifacts/read-ref source-dir (:var/value-ref row))]
-          (if (= ::artifacts/missing value)
+              payload (artifacts/read-ref source-dir (:var/value-ref row))
+              value (if (and (map? payload) (contains? payload :var/value))
+                      (:var/value payload)
+                      payload)]
+          (if (= ::artifacts/missing payload)
             (swap! skipped conj {:var/name (:var/name row) :reason :missing-value})
             (do
               (intern (the-ns target-ns-sym) sym value)
@@ -195,52 +211,28 @@
      :skipped-count (count @skipped)}))
 
 (defn messages-through [dir message-through-id]
-  (->> (artifacts/read-edn-file (artifacts/path dir "messages.edn") [])
+  (->> (:messages (session-db/history-view (artifacts/store-root-for-locator dir)
+                                           (source-session-id dir)))
        (filter #(<= (long (:message/id %)) (long message-through-id)))
        vec))
 
 (defn source-session-id [dir]
-  (:session/id (artifacts/read-edn-file (artifacts/path dir "session.edn") {})))
-
-;; The journal is the source of truth; the table files are projections of it, so
-;; the fingerprint hashes the journal plus the out-of-band lineage metadata. Child
-;; sessions fold in recursively via `session-fingerprint`.
-(def canonical-state-files
-  ["events.ednl"
-   "lineage.edn"])
-
-(defn- regular-file? [^Path p]
-  (Files/isRegularFile p (make-array java.nio.file.LinkOption 0)))
-
-(defn- hash-file [root rel]
-  (let [p (artifacts/path root rel)]
-    (when (regular-file? p)
-      [rel (cache/sha256-string (slurp (.toFile p)))])))
-
-(defn- child-session-dirs [^Path root]
-  (let [children-dir (artifacts/path root "children")]
-    (if (Files/isDirectory children-dir (make-array java.nio.file.LinkOption 0))
-      (with-open [paths (Files/list children-dir)]
-        (->> (iterator-seq (.iterator paths))
-             (filter #(Files/isDirectory ^Path % (make-array java.nio.file.LinkOption 0)))
-             (filter #(regular-file? (artifacts/path % "session.edn")))
-             (sort-by #(.toString (.relativize root ^Path %)))
-             vec))
-      [])))
+  (artifacts/session-id-for-locator dir))
 
 (defn session-fingerprint [dir]
-  (let [root (artifacts/path dir)
-        files (vec (keep #(hash-file root %) canonical-state-files))
-        children (mapv (fn [^Path child-dir]
-                         [(.toString (.relativize root child-dir))
-                          (session-fingerprint child-dir)])
-                       (child-session-dirs root))]
-    (cache/sha256-string (pr-str {:fingerprint/version 3
-                                  :files files
-                                  :children children}))))
+  (let [root (artifacts/store-root-for-locator dir)
+        sid (source-session-id dir)
+        ref (session-db/read-ref root sid)
+        head (when-let [hid (:ref/current-head ref)]
+               (session-db/read-head root sid hid))]
+    (cache/sha256-string
+     (pr-str {:fingerprint/version 4
+              :session/id sid
+              :session/current-head (:ref/current-head ref)
+              :head/fingerprint (:head/fingerprint head)}))))
 
 (defn write-restore-report! [dir report]
-  (artifacts/write-edn! (artifacts/path dir "restore.edn") report))
+  report)
 
 (defn write-lineage! [dir lineage]
-  (artifacts/write-edn! (artifacts/path dir "lineage.edn") lineage))
+  lineage)

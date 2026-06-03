@@ -11,17 +11,20 @@
   every turn and every resume via the message history; it is never re-stated per
   turn.
 
-  Used like `bd`: durable state lives on disk under `<runs-dir>/codebrain/` and
-  survives across CLI invocations. `codebrain init` is born once and builds its
-  map; each `codebrain ask` resumes that same brain (its map and vars stay warm)
-  to answer a query and advance the brain's HEAD. The point is to move codebase
-  discovery off the coding agent's context and onto the brain's: the agent gets a
-  small cited answer instead of having to read the code itself."
+  Used like `bd`: brain metadata and its repo map live as product files under
+  `<runs-dir>/codebrain/`, while the live brain session itself is canonical
+  Datahike + BlobStore state in the configured store root. `codebrain init` is born
+  once and builds its map; each `codebrain ask` resumes that same brain (its map
+  and vars stay warm) to answer a query and advance the brain's head. The point is
+  to move codebase discovery off the coding agent's context and onto the brain's:
+  the agent gets a small cited answer instead of having to read the code itself."
   (:require [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cliopts :as cli]
             [fractal-engine.render :as r]
+            [fractal-engine.session-db :as session-db]
             [fractal-engine.session :as session]
+            [fractal-engine.store.io :as store-io]
             [fractal-engine.time :as time])
   (:import [java.io File]))
 
@@ -80,8 +83,9 @@
    "   public names]}] :entrypoints [..] :depends-on [subsystems-or-libs] :gotchas\n"
    "   [..] :evidence [verbatim quotes or handles] :missing [..]}. A child must read\n"
    "   real files and ground every claim; summarizing from path names alone is failure.\n"
-   "3. Aggregate the children's summaries in Clojure (do not regenerate them from\n"
-   "   memory; lift them from the returned vars). Build a WHERE-TO-LOOK index mapping\n"
+   "3. map-rlm returns RLM envelopes. Aggregate `(mapv :rlm/value children)` in\n"
+   "   Clojure (do not regenerate summaries from memory; lift them from the returned\n"
+   "   vars). Keep the envelopes only if you need continuation/head handles. Build a WHERE-TO-LOOK index mapping\n"
    "   the concerns a coding agent asks about (entrypoints, config, data model, the\n"
    "   core loop / control flow, error handling, persistence, tests, build) to the\n"
    "   subsystems and paths to start from.\n"
@@ -102,7 +106,8 @@
    "Coding-agent query:\n\n" question "\n\n"
    "Answer it using your repo map (`repo-map`) to go straight to the relevant files.\n"
    "Delegate deep reads to children (rlm/map-rlm) and bounded semantic reads to\n"
-   "leaves; read the CURRENT source to ground every claim. FINAL one compact EDN\n"
+   "leaves; use :rlm/value from child envelopes when composing their answers; read\n"
+   "the CURRENT source to ground every claim. FINAL one compact EDN\n"
    "value the agent can act on without opening the code itself:\n"
    " {:answer <direct, specific answer>\n"
    "  :evidence [{:file <path> :lines \"a-b\" :quote <verbatim>}]\n"
@@ -114,20 +119,18 @@
 ;; ── on-disk brain state (durable, survives invocations like bd's db) ───────────
 
 (defn brain-dir
-  "The directory holding this repo's brain. Lives under the runs dir so it travels
-  with `.fractal/` discovery, but its turn dirs are nested one level deeper so they
-  never show up in `fractal ls` (which only scans immediate run dirs)."
+  "The directory holding this repo's brain metadata and persisted repo map."
   [runs-dir]
-  (str (artifacts/path runs-dir "codebrain")))
+  (str (store-io/path runs-dir "codebrain")))
 
-(defn- meta-path [bdir] (artifacts/path bdir "meta.edn"))
-(defn- map-edn-path [bdir] (artifacts/path bdir "repo-map.edn"))
-(defn- map-md-path [bdir] (artifacts/path bdir "repo-map.md"))
+(defn- meta-path [bdir] (store-io/path bdir "meta.edn"))
+(defn- map-edn-path [bdir] (store-io/path bdir "repo-map.edn"))
+(defn- map-md-path [bdir] (store-io/path bdir "repo-map.md"))
 
-(defn load-meta [bdir] (artifacts/read-edn-file (meta-path bdir) nil))
-(defn load-map  [bdir] (artifacts/read-edn-file (map-edn-path bdir) nil))
+(defn load-meta [bdir] (store-io/read-edn-file (meta-path bdir) nil))
+(defn load-map  [bdir] (store-io/read-edn-file (map-edn-path bdir) nil))
 
-(defn- turn-dir [bdir n] (str (artifacts/path bdir (format "t%04d" (long n)))))
+(def ^:private brain-session-id "codebrain")
 
 (defn- render-map-md [m]
   (str "# Repo map — " (:root m) "\n\n"
@@ -149,17 +152,20 @@
                         (str "- **" (:topic w) "** → " (str/join ", " (map #(str "`" % "`") (:start w))))))
        "\n"))
 
-(defn persist-map! [bdir m run-dir]
-  (artifacts/ensure-dir! bdir)
-  (artifacts/write-edn! (map-edn-path bdir) m)
+(defn persist-map! [bdir m]
+  (store-io/ensure-dir! bdir)
+  (store-io/write-edn! (map-edn-path bdir) m)
   (spit (str (map-md-path bdir)) (render-map-md m))
   m)
 
-(defn- save-meta! [bdir meta] (artifacts/ensure-dir! bdir) (artifacts/write-edn! (meta-path bdir) meta) meta)
+(defn- save-meta! [bdir meta]
+  (store-io/ensure-dir! bdir)
+  (store-io/write-edn! (meta-path bdir) meta)
+  meta)
 
 ;; ── rendering the answer the agent consumes ────────────────────────────────────
 
-(defn- answer-str [run-dir final usage]
+(defn- answer-str [run-token final usage]
   (let [ev (:evidence final)
         ptrs (:pointers final)]
     (str (r/c :bold "answer") "\n"
@@ -180,7 +186,14 @@
            (str (r/c :yellow "missing") " " (str/join "; " (map str (:missing final))) "\n"))
          (when (:map-stale? final) (str (r/c :yellow "map-stale?") " " (pr-str (:map-stale? final)) "\n"))
          (when usage (str usage "\n"))
-         (r/c :dim (str "  brain: " run-dir "   ·   verify: fractal verify " run-dir)))))
+         (r/c :dim (str "  brain: " run-token "   ·   verify: fractal verify " run-token)))))
+
+(defn- usage-report-str [locator turn-id]
+  (when locator
+    (let [v (session-db/view (artifacts/store-root-for-locator locator)
+                             (artifacts/session-id-for-locator locator))
+          report (artifacts/derive-usage-report locator (:calls v) {:turn-id turn-id})]
+      (r/usage-report-str report))))
 
 ;; ── verbs ──────────────────────────────────────────────────────────────────────
 
@@ -198,32 +211,35 @@
     :else                                   2))
 
 (defn cmd-init
-  "Birth the brain and build its first repo map. Re-running starts a fresh brain
-  (the prior turn dirs are left in place for provenance)."
+  "Birth the brain and build its first repo map. Re-running starts a fresh brain."
   [pos flags]
   (let [cfg   (cli/cfg-from-opts flags)
         bdir  (brain-dir (:runs-dir cfg))
         root  (repo-root flags)
-        dir0  (turn-dir bdir 0)
-        s     (session/start-session! cfg {:id "codebrain" :dir dir0 :overlay (session-overlay root)})
+        s     (session/start-session! cfg {:id brain-session-id
+                                           :alias brain-session-id
+                                           :store-root (:runs-dir cfg)
+                                           :overlay (session-overlay root)})
         res   (session/run-turn! s (build-message root))
         _     (session/stop-session! s)
+        locator (:locator s)
         m     (:final-value res)
         ts    (time/now-str)]
-    (when (map? m) (persist-map! bdir m dir0))
+    (when (map? m) (persist-map! bdir m))
     (save-meta! bdir {:root root :born-at ts :map-built-at (when (map? m) ts)
-                      :origin dir0 :head dir0 :turns 0
+                      :origin locator :head locator :session-id brain-session-id
+                      :alias brain-session-id :turns 0
                       :provider (:provider flags) :model (:model flags)})
     (if (not= 0 (result-exit res))
       (assoc (err (str "map build did not finalize (status " (:status res) ")"
-                       (when (:error res) (str ": " (pr-str (:error res)))) "\n  inspect: fractal show " dir0))
+                       (when (:error res) (str ": " (pr-str (:error res)))) "\n  inspect: fractal show " brain-session-id))
              :exit (result-exit res))
       {:out (str (r/c :bold "codebrain born") " · " root "\n"
                  (if (map? m)
                    (str "  mapped " (count (:subsystems m)) " subsystems → " (str (map-md-path bdir)) "\n"
                         (r/c :dim (str "  ask it: fractal codebrain ask \"where is X handled?\"   ·   see the map: fractal codebrain map")))
                    (r/c :yellow "  (FINAL was not a map; inspect the run)"))
-                 "\n" (when-let [u (cli/usage-line dir0)] (str u "\n")))
+                 "\n" (when-let [u (usage-report-str locator (:turn-id res))] (str u "\n")))
        :exit 0})))
 
 (defn cmd-ask
@@ -239,17 +255,20 @@
       :else
       (let [head    (:head meta)
             n       (inc (:turns meta 0))
-            next-d  (turn-dir bdir n)
-            s       (session/resume-session! cfg head {:id "codebrain" :dir next-d})
+            run-token (or (:alias meta) brain-session-id)
+            s       (session/resume-session! cfg head {:id brain-session-id})
             res     (session/run-turn! s (ask-message question))
             _       (session/stop-session! s)
+            locator (:locator s)
             final   (:final-value res)]
-        (save-meta! bdir (assoc meta :head next-d :turns n :last-ask-at (time/now-str)))
+        (save-meta! bdir (assoc meta :head locator :session-id brain-session-id
+                                :alias brain-session-id :turns n
+                                :last-ask-at (time/now-str)))
         (if (and (= 0 (result-exit res)) (map? final))
-          {:out (answer-str next-d final (cli/usage-line next-d)) :exit 0}
+          {:out (answer-str run-token final (usage-report-str locator (:turn-id res))) :exit 0}
           (assoc (err (str "ask did not finalize cleanly (status " (:status res) ")"
                            (when (:error res) (str ": " (pr-str (:error res))))
-                           "\n  inspect: fractal show " next-d))
+                           "\n  inspect: fractal show " run-token))
                  :exit (result-exit res)))))))
 
 (defn cmd-map

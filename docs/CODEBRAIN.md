@@ -28,9 +28,11 @@ The repo map is **not** a deterministic symbol dump. The brain builds it the way
 the engine is meant to work: it lists the tree with ordinary Clojure, groups files
 into subsystems, then **fans out one child (`map-rlm`) per subsystem** to read that
 slice and return a compact, grounded module summary; it uses **leaves (`lm` /
-`map-lm`)** for bounded semantic reads. The root only ever holds the children's
-compact summaries — which is what keeps the brain itself from becoming a context
-sink, and what lets a later `ask` reuse it cheaply.
+`map-lm`)** for bounded semantic reads. `map-rlm` returns child envelopes, so the root
+builds the map from `:rlm/value` and keeps `:rlm/session`/`:rlm/head` only when it needs
+to continue or branch a child. The root only ever holds the children's compact summaries
+— which is what keeps the brain itself from becoming a context sink, and what lets a
+later `ask` reuse it cheaply.
 
 ## Quickstart
 
@@ -126,11 +128,13 @@ The engine has no budget governor — **leash every live run**:
 wall-clock per call, including retry backoff).
 
 The economics: **the build is the expensive, one-time, amortized cost; asks are
-cheap** because they resume the warm map instead of re-exploring. As a reference
-point, mapping a ~20-file Clojure source tree with a strong root cost on the order
-of a dollar once, while subsequent cited answers ran a few cents each. Build a
-focused subtree first (`--path ./src`) and a cheaper root model if cost matters;
-re-`init` to rebuild after big structural changes.
+usually cheaper** because they resume the warm map instead of re-exploring. A
+child-heavy ask can still spend real money because it may spawn fresh RLM
+sessions. `codebrain init` and `codebrain ask` therefore print both `this turn`
+and `cumulative` usage, split into root calls, child RLMs, leaves, tokens, cache
+visibility, and estimated cost. Build a focused subtree first (`--path ./src`)
+and a cheaper root model if cost matters; re-`init` to rebuild after big
+structural changes.
 
 ## Using it from a coding agent
 

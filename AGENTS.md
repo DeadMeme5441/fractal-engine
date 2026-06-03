@@ -30,15 +30,18 @@ recursive (a *child*).
 - the only model-facing functions are `FINAL`, `lm`, `map-lm`, `rlm`, `map-rlm`,
   `attach-rlm`
 - there is **no magic `context` var** — working state lives in REPL vars the model defines
+- Datahike is the canonical store for facts / identity / refs / time / graph
+- BlobStore is the canonical store for payload bytes
+- local filesystem paths are physical backends only, not session identity
 
 The engine is layered by concern (full map in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)):
 
 - **compute engine** — the agent + persistent REPL loop, fanout, child/attach
-- **journal & projections** — an append-only event log (`events.ednl`, the source of
-  truth) plus pure folds into views
+- **canonical storage** — Datahike facts plus content-addressed BlobStore payloads
+- **event projection** — canonical event facts plus pure folds into views
 - **persistence** — snapshot / restore / resume / fork / lineage
 - **provider** — the LLM adapter boundary
-- **read surface** — a journal-folding projection and the trust layer (provenance,
+- **read surface** — Datahike/blob projections and the trust layer (provenance,
   claim-vs-evidence), rendered by the `fractal` CLI
 - **product** — the CLI, and `codebrain` (a code-discovery brain; see
   [`docs/CODEBRAIN.md`](docs/CODEBRAIN.md)) — and, later, a TUI / MCP adapter
@@ -63,8 +66,8 @@ Known limitations, documented and not yet built:
 - no engine-level budget/timeout governor (leash live runs yourself)
 - no true in-process sandbox (the engine runs trusted local Clojure; a best-effort OS
   sandbox is provided — see the README)
-- no storage/retrieval data layer
-- `attach-rlm` has no prior-session discoverability index
+- no vector retrieval / long-term memory layer
+- no S3/AWS backend; current validation uses local file-backed Datahike + blobs
 - the live `--deep` verify judge is itself a model's judgment (grounded in quotes you
   can inspect, but a weak verifier can misjudge — use a strong model, or a panel)
 
@@ -79,7 +82,9 @@ Known limitations, documented and not yet built:
   `src/fractal_engine/prompt.clj` or the leaf system prompt in `process.clj`, update the
   test in lockstep and bump `prompt-version`.
 - Only the compute engine belongs in core runtime namespaces.
-- The journal stores **results, not recipes** — folding it must never re-run a model.
+- Recorded events store **results, not recipes** — folding them must never re-run a model.
+- Blob payloads are written and verified before Datahike facts reference them.
+- Session homes are optional projections/exports only, never source truth.
 
 ## Develop & validate
 

@@ -1,62 +1,59 @@
-# CLI reference — `fractal`
+# CLI reference: `fractal`
 
-`fractal` is the engine's use surface: one grammar to **drive** the engine and **read**
-what it did. It's designed to feel like `bd` — short verbs, a positional address
-instead of flag ceremony, run-name resolution, and output that prints the next command.
-For Clojure library use, prefer the stable facade in [`docs/API.md`](API.md).
+`fractal` is the command-line surface for driving sessions and reading what happened.
+It uses canonical SQLite rows plus BlobStore payloads; Datahike is a rebuildable query
+index, and the CLI does not read per-session filesystem homes.
 
-```
+```text
 fractal <verb> <subject> [args] [--flags]
 ```
 
-Invoke it as `fractal …` (the `bin/fractal` wrapper, jar-backed, runs in any directory)
-or directly as `clojure -M -m fractal-engine …`.
+Invoke it as `fractal ...` through `bin/fractal`, or directly with:
+
+```bash
+clojure -M -m fractal-engine.agentcli ...
+```
 
 ## Conventions
 
-- **`<run>`** — a run directory path (`.fractal/foo`) or a bare name resolved under the
-  runs dir (`foo` → `<runs-dir>/foo`). The runs dir defaults to `.fractal/` in the
-  directory you invoke from, discovered up the tree like git/`bd` (override with
-  `--runs-dir`).
-- **`[node]`** — a node address within a run: `root` (default), `child-0001`, or a path
-  like `child-0001/child-0004`. The leading `root/` is implied. A node view prints the
-  exact `fractal show <run> <child>` commands to drill into its children.
-- **`--json`** — every verb accepts it and emits parseable output (objects for reads,
-  JSONL for `stream`).
-- **`--no-color`** — disable ANSI color (color is auto-off when piped or `--json`).
+- `<run>` is a session id or alias resolved in the canonical store. The store root
+  defaults to `.fractal/` in the invocation directory, override with `--runs-dir`.
+- `[node]` is an address within a recursive tree: `root`, `child-0001`, or
+  `root/child-0001/child-0004`.
+- `--json` emits parseable JSON. `stream` emits JSONL.
+- `--no-color` disables ANSI color.
 
-### Exit codes
+The local store root physically contains `store.sqlite`, content-addressed blobs, and
+optionally a derived Datahike index. Those files are backend state, not session identity.
+
+## Exit codes
 
 | code | meaning |
 |---|---|
-| `0` | a `FINAL` value exists / claims supported |
-| `1` | error (engine error, or a usage error like an unknown run/verb) |
-| `2` | no `FINAL` (the turn ran but produced none) |
+| `0` | success / final value exists / claims supported |
+| `1` | engine or usage error |
+| `2` | no `FINAL` |
 | `3` | timeout |
-| `5` | confabulation suspected (`verify` found a refuted/unsupported claim) |
-
-So you can gate on them: `fractal verify <run> --root . --deep && ./publish.sh`.
-
----
+| `5` | confabulation suspected by `verify` |
 
 ## Drive verbs
 
 ### `chat [run]`
-Talk to a persistent, resumable session — the headline mode. Holds one live session and
-runs each line you type as a turn; REPL vars persist in memory and the journal grows. A
-live `◐ thinking…` line shows children/steps/leaves as the engine works; each turn
-settles to a compact result plus drill hints into the nodes that turn produced. `/quit`
-to leave. With `[run]`, resumes that session; without, starts a fresh one (name it with
-`--name`).
+
+Talk to a persistent, resumable session. Without `[run]`, starts a new session. With
+`[run]`, resolves the existing session id/alias and resumes the same session. REPL vars
+persist across turns through completed-head snapshots. A live progress line polls the
+canonical store while the turn runs.
 
 ```bash
-fractal chat                      # new brain
-fractal chat my-session           # resume an existing one
-fractal chat --provider vertex-gemini --model gemini-3.1-pro-preview
+fractal chat
+fractal chat my-session
+fractal chat --provider vertex-gemini --model gemini-3.5-flash
 ```
 
 ### `run "<task>"`
-One-shot: start a session, run a single turn, print a chainable run handle.
+
+Start a session, run one turn, and print a chainable session handle.
 
 ```bash
 fractal run "Summarize this repo." --fake-script simple --name demo
@@ -64,108 +61,152 @@ fractal run "..." --provider openai --model gpt-4o-mini --json
 ```
 
 ### `resume <run> "<task>"`
-Continue a saved session from its last snapshot (restores history + EDN-safe vars).
-`--turn N` resumes from a specific turn; `--new-dir DIR` writes to a new directory.
+
+Restore the selected completed head into the same logical session and run another turn.
+Resume advances the same session current-head and preserves the same cache id. Use
+`--turn N` to restore a specific completed turn head.
 
 ### `fork <run> "<task>"`
-Branch a session into a new directory at a turn (`--turn N`), preserving lineage.
 
----
+Restore a source head into a new user/API session with a new cache id by default. Fork
+leaves the source session current-head and fingerprint unchanged. Use `--name NAME` to
+assign a stable id/alias to the fork.
 
 ## Read verbs
 
 ### `show <run> [node]`
-The hub. Node detail: identity/model/status/counts, each step's `▷ wrote` / `◁ observed`,
-leaves, the final value (summary), and **drill commands** for children. Flags: `--final`
-(print the full final value), `--leaves` (just the leaf I/O).
+
+Display node identity, model/status/counts, step observations, leaves, child addresses,
+and final summary. `--final` resolves and prints the full final value. `--leaves` focuses
+on leaf calls.
 
 ```bash
-fractal show my-run                     # root
-fractal show my-run child-0002          # drill into a child
-fractal show my-run child-0002 --final  # that child's full FINAL value
+fractal show my-run
+fractal show my-run child-0002
+fractal show my-run child-0002 --final
 ```
 
 ### `tree <run>`
-The whole run as an addressable tree: one line per node with a status glyph, address
-segment, and `[steps leaves children]` counts.
+
+Print the recursive session tree: one line per node with status and step/leaf/child
+counts.
 
 ### `prime <run>`
-Compact orientation — model, status, step/child counts, the final summary, and the next
-commands to run. The read-side analogue of `bd prime`.
+
+Compact orientation for a run: model, status, counts, final summary, and next commands.
 
 ### `ls`
-List runs under the runs dir with status, counts, and whether each reached a final.
+
+List canonical sessions in the store root with status, counts, and final presence.
+
+### `store check|rebuild-index`
+
+Validate the canonical SQLite + BlobStore root, or rebuild the derived Datahike index:
+
+```bash
+fractal store check --json
+fractal store rebuild-index
+```
+
+### `inspect <run> [node]`
+
+Structured session/node details. Use `--json` for API-friendly output.
 
 ### `verify <run> [node]`
-The trust layer — claim-vs-evidence over a node's `FINAL` value.
 
-- default: the **grep floor** (free) — checks cited code symbols exist in the cited file.
-- `--root <repo>`: resolve relative citations against this repo root (usually required —
-  models cite repo-relative paths).
-- `--deep`: escalate to the **engine judge** — hands the claims back to the engine
-  (needs provider flags) to adversarially re-read the source. Exit `5` if any claim is
-  refuted.
+Run the trust layer over a node's `FINAL` value.
+
+- default: deterministic grep floor over cited file evidence;
+- `--root <repo>`: resolve relative citations against a repo root;
+- `--deep`: use the engine as an adversarial judge.
 
 ```bash
 fractal verify my-run child-0001 --root /path/to/repo
 fractal verify my-run child-0001 --root /path/to/repo --deep \
-  --provider vertex-gemini --model gemini-3.1-pro-preview
+  --provider vertex-gemini --model gemini-3.5-flash
 ```
 
 ### `trace <run> [node]`
-Claim provenance for a node: the final value, its evidenced claims, and the child/leaf
-calls that fed it.
+
+Claim provenance for a node: final value, evidenced claims, and child/leaf refs.
 
 ### `cost <run>`
-Spend breakdown: tree totals (calls, tokens, cost) and per-child cost, read from the
-materialized usage projection. Visibility, not a cap.
+
+Spend breakdown from canonical call facts: calls, tokens, cost, and per-child rollups.
+It reports visibility, not a cap.
+
+Drive commands that settle a turn print a compact `turn` plus `total` spend
+summary. `codebrain init` and `codebrain ask` print the full usage block:
+`this turn` versus `cumulative`, with root, child RLM, leaf, token, cache, and
+estimated-cost splits. `LLM calls` are provider calls; `rows` include structural
+invocation records such as child RLM edges.
 
 ### `leaves <run> [node]`
-A node's leaf calls with inputs and outputs resolved.
+
+Resolve a node's leaf call inputs and outputs from BlobStore.
 
 ### `step <run> [node] N`
-One step in full (the complete `▷ wrote` code and `◁ observed` text). `N` is 1-based.
 
-### `stream <run>`  (alias `tail`)
-The session's journal events as JSONL — one JSON object per line, replayable and
-pipe-friendly.
+Print one model/eval step in full.
 
----
+### `stream <run>` (alias `tail`)
 
-## Engine options (drive verbs)
+Print canonical event facts as JSONL in append order. This is not `tail events.ednl`; no
+session event file is required.
 
-These mirror the engine's configuration and apply to `run` / `resume` / `fork` / `chat`:
+## Engine options
+
+These apply to `run`, `resume`, `fork`, and `chat`:
 
 | flag | meaning |
 |---|---|
-| `--provider` / `--model` | the **root** provider and model |
-| `--leaf-provider` / `--leaf-model` | provider/model for leaves (`lm`/`map-lm`) |
-| `--child-provider` / `--child-model` | provider/model for children (`rlm`/`map-rlm`) |
-| `--fake-script NAME` | offline scripted provider (`simple`, `lm`, `map-lm`, `rlm`, `map-rlm`, …) |
-| `--runs-dir DIR` | where run directories live (default `.fractal/` in the invocation dir) |
-| `--name ID` | name the session (otherwise a UUID) |
-| `--max-turns N` | leash: max turns |
-| `--max-fanout N` | leash: max parallel fanout |
-| `--call-timeout-ms MS` | leash: per-call wall-clock timeout |
+| `--provider` / `--model` | root provider and model |
+| `--leaf-provider` / `--leaf-model` | provider/model for `lm` and `map-lm` |
+| `--child-provider` / `--child-model` | provider/model for `rlm`, `map-rlm`, `attach-rlm` |
+| `--fake-script NAME` | offline scripted provider |
+| `--runs-dir DIR` | canonical store root; default `.fractal/` |
+| `--name ID` | assign session id/alias |
+| `--max-turns N` | turn leash |
+| `--max-fanout N` | fanout leash |
+| `--call-timeout-ms MS` | per-call wall-clock timeout |
 
-> Live runs cost money and can hang; always set `--call-timeout-ms` and `--max-turns`
-> and run in the background with monitoring. See the README's provider warnings.
+Live runs cost money and can hang. Normal use should set practical leashes until an
+engine-level governor exists.
+
+## Operation semantics
+
+- `FINAL` returns control and records a completed head; it does not terminate the
+  session.
+- `resume` advances the same session.
+- `fork` creates a new user/API session and leaves the source unchanged.
+- `rlm` and `map-rlm` create child sessions, invocation facts, and model-visible RLM
+  envelopes (`:rlm/value`, `:rlm/session`, `:rlm/head`, `:rlm/meta`).
+- `attach-rlm` continues a session ref or branches from a head ref. Session-ref attach
+  advances the callee session; head-ref attach creates a new attached child and leaves
+  the source head unchanged.
+- `lm` and `map-lm` create calls only.
 
 ## Recipes
 
 ```bash
-# offline: run, then read, in one grammar
+# offline: run, then read
 fractal run "Define x and return it." --fake-script simple --name demo
-fractal show demo            # see steps + final
-fractal tree demo            # see the shape
+fractal show demo
+fractal tree demo
+fractal inspect demo --json
 
-# live: map a repo, then trust-check a child's claims against the source
-fractal chat --provider vertex-gemini --model gemini-3.1-pro-preview
-#   › map this repo's subsystems with file-cited risks    (then /quit)
-fractal verify <run> child-0004 --root . --deep \
-  --provider vertex-gemini --model gemini-3.1-pro-preview
+# live: start a session with explicit models
+fractal chat --provider vertex-gemini --model gemini-3.5-flash \
+  --child-provider vertex-gemini --child-model gemini-3.5-flash \
+  --leaf-provider vertex-gemini --leaf-model gemini-3.1-flash-lite-preview \
+  --call-timeout-ms 600000
 
-# machine-readable: stream events, or get JSON
-fractal stream <run> | jq 'select(.["event/type"] == "call/started")'
-fractal show <run> --json | jq '.final'
+# machine-readable events
+fractal stream demo | jq 'select(.["event/type"] == "call/started")'
+fractal show demo --json | jq '.final'
 ```
+
+## Backend status
+
+This pass implements local filesystem-backed Datahike plus local filesystem-backed
+BlobStore. No S3/AWS backend is implemented.

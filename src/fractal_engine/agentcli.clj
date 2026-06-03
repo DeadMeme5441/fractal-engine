@@ -20,10 +20,10 @@
   2 no-final · 3 timeout · 5 confabulation-suspected). A drive verb prints the run's
   name so it chains straight into a read verb — `fractal run \"…\"` → `fractal verify
   <run>`. A node address is `root`, `child-0001`, or `child-0001/child-0004` (the
-  leading `root/` is implied). `<run>` is a path (`.fractal/foo`) or a bare name
-  resolved under the runs dir (`foo` → `.fractal/foo`). Runs live in `.fractal/` in
-  the directory you invoke from (discovered up the tree like git/bd); override with
-  `--runs-dir DIR`. Provider/model flags match the engine:
+  leading `root/` is implied). `<run>` is a stable session id or alias resolved in
+  the session store. The local store root defaults to `.fractal/` in the directory
+  you invoke from (discovered up the tree like git/bd); override with `--runs-dir DIR`.
+  Provider/model flags match the engine:
   `--provider`, `--model`, `--leaf-model`, `--child-model`, `--fake-script`,
   `--max-turns`, `--max-fanout`, `--max-leaf-concurrency`,
   `--call-timeout-ms`."
@@ -34,13 +34,15 @@
             [fractal-engine.cliopts :as cli]
             [fractal-engine.codebrain :as codebrain]
             [fractal-engine.inspect :as inspect]
-            [fractal-engine.journal :as journal]
             [fractal-engine.projection :as proj]
             [fractal-engine.provenance :as prov]
             [fractal-engine.render :as r]
             [fractal-engine.resume :as resume]
-            [fractal-engine.session :as session])
-  (:import [java.io File]))
+            [fractal-engine.session :as session]
+            [fractal-engine.session-db :as session-db]
+            [fractal-engine.store.consistency :as store-consistency]
+            [fractal-engine.store.index :as store-index]
+            [fractal-engine.store.schema :as store-schema]))
 
 ;; ── argument parsing (positionals + flags, no ceremony) ───────────────────────
 
@@ -61,17 +63,12 @@
 
 ;; ── run + node resolution ─────────────────────────────────────────────────────
 
-(defn- dir? [s] (and s (.isDirectory (File. ^String s))))
-
 (defn resolve-run
-  "Resolve a run token to a dir: an existing path wins; otherwise `<runs-dir>/<token>`.
-  Returns the dir string or nil."
+  "Resolve a run token to a canonical session locator. Session id wins, then alias."
   [token {:keys [runs-dir]}]
   (let [runs-dir (or runs-dir (cli/default-runs-dir))]
-    (cond
-      (dir? token) token
-      (dir? (str runs-dir "/" token)) (str runs-dir "/" token)
-      :else nil)))
+    (when token
+      (session-db/resolve-handle runs-dir token {}))))
 
 (defn node-address
   "Normalize a node token to a projection address. nil/\"root\" → \"root\";
@@ -98,12 +95,13 @@
 (defn- json-safe [x]
   (walk/postwalk
    (fn [v]
-     (cond
-       (symbol? v)                          (str v)
-       (ratio? v)                           (double v)
-       (instance? java.math.BigDecimal v)   (double v)
-       (instance? java.io.File v)           (str v)
-       :else v))
+       (cond
+         (symbol? v)                          (str v)
+         (ratio? v)                           (double v)
+         (instance? java.math.BigDecimal v)   (double v)
+         (instance? java.io.File v)           (str v)
+         (instance? java.nio.file.Path v)      (str v)
+         :else v))
    x))
 
 (defn json-str [x] (json/generate-string (json-safe x) {:pretty true}))
@@ -113,13 +111,13 @@
 (defn- err [msg] {:out msg :exit 1 :err? true})
 
 (defn- with-run
-  "Resolve the run for verbs that need one; call (f dir) or return a usage error."
+  "Resolve the run for verbs that need one; call (f locator token) or return a usage error."
   [pos flags f]
   (if-let [token (first pos)]
-    (if-let [dir (resolve-run token flags)]
-      (f dir token)
-      (err (format "no such run: %s (looked for a dir or %s/%s)"
-                   token (or (:runs-dir flags) (cli/default-runs-dir)) token)))
+    (if-let [locator (resolve-run token flags)]
+      (f locator token)
+      (err (format "no such run: %s (expected session id or alias under %s)"
+                   token (or (:runs-dir flags) (cli/default-runs-dir)))))
     (err "missing <run> argument")))
 
 (defn cmd-show [pos flags]
@@ -168,7 +166,7 @@
               (let [cfg     (cli/cfg-from-opts flags)
                     ;; derive the verify-run name from the run's basename, not the
                     ;; token (which may be a path like runs/foo → would nest wrongly)
-                    sid     (str (last (str/split (str dir) #"/")) "-verify")
+                    sid     (str token "-verify")
                     s       (session/start-session! cfg (cli/session-start-opts cfg (assoc flags :session sid)))
                     task    (prov/verify-task checks base)
                     result  (session/run-turn! s task)
@@ -202,12 +200,13 @@
 
 (defn cmd-cost [pos flags]
   (with-run pos flags
-    (fn [dir token]
+    (fn [locator token]
       (if (:json flags)
-        (let [u (artifacts/read-edn-file (artifacts/path dir "usage.edn") nil)]
+        (let [v (proj/view locator)
+              u (artifacts/derive-usage locator (:calls v))]
           {:out (json-str (select-keys u [:usage/total-tree :cost/total-tree :usage/children]))
            :exit 0})
-        {:out (r/cost-str dir {:exe "fractal" :run token}) :exit 0}))))
+        {:out (r/cost-str locator {:exe "fractal" :run token}) :exit 0}))))
 
 (defn cmd-leaves [pos flags]
   (with-run pos flags
@@ -240,7 +239,7 @@
 (defn cmd-stream [pos flags]
   (with-run pos flags
     (fn [dir token]
-      (let [events (journal/read-events dir)]
+      (let [events (proj/event-stream dir)]
         ;; one JSON object per line (JSONL) — replayable and pipe-friendly
         {:out (str/join "\n" (map #(json/generate-string (json-safe %)) events))
          :exit 0}))))
@@ -248,50 +247,78 @@
 (defn cmd-inspect
   "The offline inspector: a full dump of a run's artifacts. `show`/`tree`/`stream`
   are the focused read verbs; `inspect` is the everything-at-once view. Accepts a
-  run as a positional (`fractal inspect <run>`) or the path form `--dir <path>`."
+  stable session id or alias as a positional (`fractal inspect <run>`)."
   [pos flags]
-  (let [token (or (first pos) (:dir flags))
+  (let [token (first pos)
         dir   (when token (resolve-run token flags))]
     (cond
       (nil? token) (err "missing <run>: fractal inspect <run> [--tree --snapshots --handles --json]")
       (nil? dir)   (err (str "no run: " token))
-      (:json flags) {:out (pr-str (inspect/structured dir {:tree (:tree flags)
-                                                           :snapshots (:snapshots flags)
-                                                           :handles (:handles flags)}))
+      (:json flags) {:out (json-str (inspect/structured dir {:tree (:tree flags)
+                                                             :snapshots (:snapshots flags)
+                                                             :handles (:handles flags)}))
                      :exit 0}
       :else         {:out (inspect/summary-string dir flags) :exit 0})))
 
 (defn cmd-ls [_pos flags]
   (let [runs-dir (or (:runs-dir flags) (cli/default-runs-dir))
-        root (File. ^String runs-dir)]
-    (if-not (.isDirectory root)
-      (err (str "no runs dir: " runs-dir))
-      (let [runs (->> (.listFiles root)
-                      (filter #(.isDirectory ^File %))
-                      (filter #(journal/exists? (str %)))
-                      (sort-by #(.getName ^File %)))
-            rows (mapv (fn [^File d]
-                         (let [node (proj/load-at (str d) "root")]
-                           {:run (.getName d)
-                            :status (:status node)
-                            :steps (get-in node [:counts :steps] 0)
-                            :children (get-in node [:counts :children] 0)
-                            :final? (some? (:final node))}))
-                       runs)]
+        aliases (into {} (map (juxt :alias/session :alias/name))
+                      (session-db/list-alias-records runs-dir))
+        rows (mapv (fn [session]
+                     (let [locator (session-db/locator runs-dir (:session/id session))
+                           node (proj/load-at locator "root")]
+                       {:run (or (get aliases (:session/id session))
+                                 (:session/id session))
+                        :session/id (:session/id session)
+                        :locator locator
+                        :status (:status node)
+                        :steps (get-in node [:counts :steps] 0)
+                        :children (get-in node [:counts :children] 0)
+                        :final? (some? (:final node))}))
+                   (session-db/list-session-records runs-dir))]
+    (if (:json flags)
+      {:out (json-str rows) :exit 0}
+      {:out (if (empty? rows)
+              (str "no runs under " runs-dir)
+              (str/join "\n"
+                (for [row rows]
+                  (format "%s %-40s %s"
+                          (case (keyword (:status row))
+                            :final (r/c :green "●") :error (r/c :red "✗")
+                            :running (r/c :yellow "◐") (r/c :gray "○"))
+                          (:run row)
+                          (r/c :dim (format "s%d c%d %s" (:steps row) (:children row)
+                                            (if (:final? row) "final" "no-final")))))))
+       :exit 0})))
+
+(defn cmd-store [pos flags]
+  (let [runs-dir (or (:runs-dir flags) (cli/default-runs-dir))
+        subcmd (first pos)]
+    (case subcmd
+      "check"
+      (let [report (store-consistency/check-consistency runs-dir)]
         (if (:json flags)
-          {:out (json-str rows) :exit 0}
-          {:out (if (empty? rows)
-                  (str "no runs under " runs-dir)
-                  (str/join "\n"
-                    (for [row rows]
-                      (format "%s %-40s %s"
-                              (case (keyword (:status row))
-                                :final (r/c :green "●") :error (r/c :red "✗")
-                                :running (r/c :yellow "◐") (r/c :gray "○"))
-                              (:run row)
-                              (r/c :dim (format "s%d c%d %s" (:steps row) (:children row)
-                                                (if (:final? row) "final" "no-final")))))))
-           :exit 0})))))
+          {:out (json-str report) :exit (if (= :ok (:status report)) 0 1)}
+          {:out (if (= :ok (:status report))
+                  "store ok"
+                  (with-out-str
+                    (println "store issues:" (:issue-count report))
+                    (doseq [issue (:issues report)]
+                      (println " " (:issue/type issue) (dissoc issue :issue/type)))))
+           :exit (if (= :ok (:status report)) 0 1)}))
+
+      "rebuild-index"
+      (do
+        (store-index/rebuild! runs-dir store-schema/schema)
+        (let [report (store-consistency/check-consistency runs-dir {:mode :quick})]
+          (if (:json flags)
+            {:out (json-str report) :exit (if (= :ok (:status report)) 0 1)}
+            {:out (if (= :ok (:status report))
+                    "index rebuilt"
+                    (str "index rebuilt with issues: " (:issue-count report)))
+             :exit (if (= :ok (:status report)) 0 1)})))
+
+      (err "usage: fractal store check|rebuild-index [--runs-dir DIR] [--json]"))))
 
 ;; ── drive verbs (do work — the other half of the agent loop) ──────────────────
 
@@ -302,17 +329,17 @@
     (contains? result :final-value)           0
     :else                                     2))
 
-(defn- run-name [result] (last (str/split (str (:dir result)) #"/")))
+(defn- run-name [result] (:session-id result))
 
 (defn- drive-out [result token flags]
   (let [run (run-name result)]
     (if (:json flags)
-      {:out (json-str {:run run :dir (str (:dir result)) :status (:status result)
+      {:out (json-str {:run run :locator (:locator result) :status (:status result)
                        :turn (:turn-id result) :final (:final-value result)
                        :error (:error result)})
        :exit (result-exit result)}
       {:out (str (r/c :bold (str "run " run)) "\n"
-                 (r/turn-summary-str (proj/load-node (:dir result)) result {:exe "fractal" :run run})
+                 (r/turn-summary-str (proj/load-node (:locator result)) result {:exe "fractal" :run run})
                  "\n" (r/c :dim (format "  next: fractal show %s   ·   fractal verify %s" run run)))
        :exit (result-exit result)})))
 
@@ -338,20 +365,18 @@
       (let [task (or (second pos) (:task flags) "Continue and call FINAL.")
             result (resume/resume! (cli/cfg-from-opts (flags->opts flags)) dir task
                                    (cond-> {}
-                                     (:turn flags)    (assoc :turn (cli/parse-long-opt (:turn flags)))
-                                     (:name flags)    (assoc :id (:name flags))
-                                     (:new-dir flags) (assoc :dir (:new-dir flags))))]
+                                     (:turn flags) (assoc :turn (cli/parse-long-opt (:turn flags)))
+                                     (:name flags) (assoc :id (:name flags))))]
         (drive-out result token flags)))))
 
 (defn cmd-fork [pos flags]
   (with-run pos flags
     (fn [dir token]
       (let [task    (or (second pos) (:task flags) "Continue.")
-            new-dir (or (:new-dir flags)
-                        (str (or (:runs-dir flags) (cli/default-runs-dir)) "/"
-                             (or (:name flags) (artifacts/session-id))))
-            result  (resume/fork! (cli/cfg-from-opts (flags->opts flags)) dir new-dir task
-                                  (cond-> {} (:turn flags) (assoc :turn (cli/parse-long-opt (:turn flags)))))]
+            sid     (or (:name flags) (artifacts/session-id))
+            result  (resume/fork! (cli/cfg-from-opts (flags->opts flags)) dir nil task
+                                  (cond-> {:id sid :alias sid}
+                                    (:turn flags) (assoc :turn (cli/parse-long-opt (:turn flags)))))]
         (drive-out result (run-name result) flags)))))
 
 ;; ── chat: the second brain you talk to (interactive, persistent, resumable) ───
@@ -360,15 +385,15 @@
 
 (defn- run-turn-live!
   "Run one turn while painting a live `◐ thinking…` line that updates in place from
-  the journal. The turn runs on the engine's own async primitive (a daemon thread);
-  we poll its journal for the live line and the returned promise for completion. The
+  canonical event facts. The turn runs on the engine's own async primitive (a daemon thread);
+  we poll its progress view for the live line and the returned promise for completion. The
   status line is cleared before the caller prints the settled summary."
   [s task]
-  (let [dir (str (:dir s))
+  (let [locator (:locator s)
         result (session/run-turn-async! s task)]
     (loop []
       (when (not (realized? result))
-        (let [line (r/progress-line (r/progress-counts dir))]
+        (let [line (r/progress-line (r/progress-counts locator))]
           (print (str "\r\033[K" line)) (flush))
         (Thread/sleep 300)
         (recur)))
@@ -376,20 +401,20 @@
     @result))
 
 (defn cmd-chat [pos flags]
-  ;; resume a named/path run if given and it exists; else start a fresh brain
+  ;; resume a named run if given and it exists; else start a fresh brain
   (let [cfg      (cli/cfg-from-opts (flags->opts flags))
         token    (first pos)
-        dir      (when token (resolve-run token flags))
+        locator  (when token (resolve-run token flags))
         fresh-id (or (:name flags) token)         ; --name, else the positional, else auto
         s        (cond
-                   dir      (session/resume-session! cfg dir)
+                   locator  (session/resume-session! cfg locator)
                    fresh-id (session/start-session! cfg (cli/session-start-opts cfg (assoc flags :session fresh-id)))
                    :else    (session/start-session! cfg (cli/session-start-opts cfg flags)))
-        run   (last (str/split (str (:dir s)) #"/"))
-        turns (count (:turns (proj/view (:dir s))))]
+        run   (get-in @(:state s) [:session :session/id])
+        turns (count (:turns (proj/view (:locator s))))]
     (println (str (r/c :bold (str "brain ● " run)) " · "
                   (or (:model flags) (:provider flags) "scripted") " · "
-                  turns " turns" (when dir " (resumed)"))
+                  turns " turns" (when locator " (resumed)"))
              (str "   " (r/c :dim "talk to it · /quit to leave")))
     (loop []
       (print (r/c :green "› ")) (flush)
@@ -401,7 +426,7 @@
           :else
           (do
             (let [result (run-turn-live! s line)
-                  root   (proj/load-node (:dir s))]
+                  root   (proj/load-node (:locator s))]
               (println (r/turn-summary-str root result {:exe "fractal" :run run})))
             (recur)))))
     (session/stop-session! s)
@@ -428,8 +453,10 @@
              "  fractal cost   <run>            spend breakdown\n"
              "  fractal leaves <run> [node]     leaf inputs/outputs\n"
              "  fractal step   <run> [node] N   one step, in full\n"
-             "  fractal stream <run>            journal events as JSONL\n"
+             "  fractal stream <run>            canonical events as JSONL\n"
              "  fractal inspect <run>           full artifact dump (everything at once)\n\n"
+             "store:\n"
+             "  fractal store check              validate Datahike facts and blob refs\n\n"
              (r/c :dim "every verb takes --json; node address drops the implied root/ prefix"))
    :exit 0})
 
@@ -444,6 +471,7 @@
    "show" cmd-show "tree" cmd-tree "prime" cmd-prime "ls" cmd-ls "list" cmd-ls
    "verify" cmd-verify "trace" cmd-trace "cost" cmd-cost "leaves" cmd-leaves
    "step" cmd-step "stream" cmd-stream "tail" cmd-stream "inspect" cmd-inspect
+   "store" cmd-store "check" cmd-store
    ;; meta
    "help" cmd-help "--help" cmd-help "-h" cmd-help})
 

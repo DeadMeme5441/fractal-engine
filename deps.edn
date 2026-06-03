@@ -3,6 +3,8 @@
         ;; cheshire backs the CLI's --json/--jsonl. It already arrives transitively
         ;; via the SDK; pinned explicitly so the uberjar bundles it deterministically.
         cheshire/cheshire {:mvn/version "5.13.0"}
+        io.replikativ/datahike {:mvn/version "0.7.1624"}
+        org.xerial/sqlite-jdbc {:mvn/version "3.46.1.3"}
         net.clojars.deadmeme5441/clojure-llm-sdk {:mvn/version "0.1.0"}}
  :aliases
  {:test

@@ -1,32 +1,14 @@
 # Clojure API
 
-`fractal-engine.api` is the supported public facade for Clojure consumers. Use it to
-start sessions, run turns, read artifacts, and inspect claim provenance without
-depending on runtime namespace details.
-
-The `fractal` CLI is built on the same engine, but it is only one consumer. Library
-code should prefer:
+`fractal-engine.api` is the supported public facade for Clojure consumers. It drives
+sessions, reads canonical SQLite + BlobStore state, and exposes trust/provenance
+helpers without depending on runtime namespace details.
 
 ```clojure
 (require '[fractal-engine.api :as fe])
 ```
 
-## Dependency shape
-
-Use the public repository as a Git dependency until a packaged release is available:
-
-```clojure
-{:deps {io.github.deadmeme5441/fractal-engine
-        {:git/url "https://github.com/DeadMeme5441/fractal-engine"
-         :git/sha "<commit-sha>"}}}
-```
-
-Your application can add its own namespaces to the classpath. The engine does not need
-a special integration layer for them: the session overlay or task prompt can ask the
-model to require those namespaces and call their public functions from the session
-REPL.
-
-## Session And Drive
+## Session drive
 
 ```clojure
 (def cfg
@@ -37,11 +19,13 @@ REPL.
 
 (def s
   (fe/start-session! cfg {:id "demo"
-                          :dir ".fractal/demo"
-                          :overlay "Additional application role instructions can go here."}))
+                          :alias "demo"
+                          :overlay "Additional role instructions can go here."}))
 
 (def result
   (fe/run-turn! s "Define x and FINAL {:answer 42}."))
+
+(def locator (:locator result))
 
 (fe/stop-session! s)
 ```
@@ -50,53 +34,115 @@ Public drive functions:
 
 | function | purpose |
 |---|---|
-| `config` | normalize generic engine configuration |
-| `start-session!` | start a live session; accepts `:id`, `:dir`, and `:overlay` |
+| `config` | normalize engine configuration |
+| `start-session!` | start a live canonical session; accepts `:id`, `:alias`, `:title`, `:overlay` |
 | `run-turn!` | run one user message on a live session |
-| `stop-session!` | mark the session stopped and flush artifacts |
-| `resume-session!` | restore from a completed turn snapshot into a live session |
-| `fork-session!` | branch a session into a new run directory |
+| `run-turn-async!` | run one turn asynchronously and poll `progress` mid-run |
+| `stop-session!` | mark the live session stopped |
+| `resume-session!` | restore a completed head into the same session and advance it |
+| `fork-session!` | restore a source head into a new user/API session |
 | `run-task!` | one-shot helper: start, run one task, stop |
 
-The overlay is appended once to the base system message. It is a standing session
-specialization carried by the transcript; it is not a per-turn task and does not add
-new model-facing functions.
+`FINAL` does not terminate a session. A stopped live handle can be resumed later from the
+canonical store.
 
-## Model-Facing Surface
+Session aliases are canonical SQLite rows pointing at session ids. The local filesystem
+is only the physical backend for SQLite, Datahike projection, and BlobStore files;
+aliases do not live in a separate canonical alias directory.
 
-The public Clojure API is for host applications. It does not change what the model can
-call inside the session REPL. The model-facing surface remains exactly:
+## Locators
+
+Read functions accept locators:
+
+```clojure
+{:store/root ".fractal"
+ :session/id "demo"
+ :head/id "head-..."} ; optional
+```
+
+Use:
+
+| function | purpose |
+|---|---|
+| `session-locator` | construct a locator from store root/session id |
+| `resolve-session` | resolve a session id, alias, or stable handle |
+| `list-sessions` | list canonical sessions in a store root |
+| `session-ref` | read the current-head ref for a session |
+
+Locators are canonical identities, not filesystem session homes.
+
+## Model-facing surface
+
+The public Clojure API does not change what the model can call inside the session REPL.
+The model-facing surface remains exactly:
 
 ```text
 FINAL lm map-lm rlm map-rlm attach-rlm
 ```
 
-Application-specific patterns should live in your application namespaces or in vars the
-model defines during the session, not in the engine runtime API.
+## Read surface
 
-## Read Surface
-
-Artifacts are read from the append-only journal and folded into data. These functions
-perform no provider calls:
+Reads use SQLite rows and BlobStore payloads. Datalog queries use a derived Datahike
+index that can be rebuilt from SQLite. Reads perform no provider calls and do not require
+generated projection files.
 
 | function | purpose |
 |---|---|
-| `view` | fold a run directory's journal into the materialized view |
+| `view` | dereference the current or selected head state into the materialized session view |
+| `event-stream` | read compact canonical event records in append order |
+| `progress` | lightweight mid-run status for polling |
 | `load-node` | load one node, including steps, leaves, children, and final value |
 | `load-at` | resolve an address within a root run and load that node |
 | `tree` | load the recursively expanded summary tree |
-| `node-dir` | resolve a node address to an on-disk directory |
-| `journal-events` | read the raw append-only event stream |
+| `node-locator` | resolve a node address to its canonical locator |
+| `inspect` | structured detail for a session/node |
+| `check-consistency` | validate SQLite rows, BlobStore refs, and the Datahike projection |
+| `rebuild-index!` | rebuild the derived Datahike index from canonical SQLite rows |
 
 Example:
 
 ```clojure
-(def root (fe/load-node (:dir result)))
-(def full-tree (fe/tree (:dir result)))
-(def events (fe/journal-events (:dir result)))
+(def root (fe/load-node locator))
+(def full-tree (fe/tree locator))
+(def events (fe/event-stream locator))
+(def report (fe/check-consistency ".fractal"))          ; deep by default
+(def quick (fe/check-consistency ".fractal" {:mode :quick}))
+(fe/rebuild-index! ".fractal")
 ```
 
-## Trust And Provenance
+The default node/read surface is the current/head view: it follows
+`session/current-head` (or a locator's `:head/id`) to a complete immutable state root and
+materializes that root into the active session view. Historical sibling heads and
+abandoned branch events remain available through `event-stream`, inspection details, and
+direct relationship queries. `event-stream` returns compact audit records: event id,
+type, session, timestamp, row identity, status, source ids, and payload refs. It does not
+duplicate full message/eval/call/snapshot/head payloads.
+
+`progress` remains useful while a turn is in flight because calls, messages,
+invocations, and progress rows are committed as events arrive.
+
+`check-consistency` defaults to `{:mode :deep}`, which verifies blob existence/hash and
+compact head-state components. `{:mode :quick}` checks structural rows and relationships
+without reading every blob.
+
+## Recursive relationships
+
+Datahike-backed queries make relationships inspectable:
+
+| function | purpose |
+|---|---|
+| `outgoing-invocations` | invocations made by a caller session |
+| `incoming-invocations` | invocations targeting a callee session |
+| `attached-derived-sessions` | attached child sessions derived from a source session/head |
+| `session-derivations` | derivation/provenance edges where a session is source or target |
+
+`lm` and `map-lm` create calls only, so they do not appear as invocations. `rlm`,
+`map-rlm`, and `attach-rlm` create invocation facts. `rlm`/`map-rlm` return RLM
+envelopes: read the child final under `:rlm/value`, continue through `:rlm/session`,
+and branch/prove from `:rlm/head`. Fork and attach source-head reuse is represented as
+derivation, not as head basis.
+
+## Trust and provenance
 
 The trust helpers expose the same claim-vs-evidence data used by `fractal verify`:
 
@@ -107,15 +153,13 @@ The trust helpers expose the same claim-vs-evidence data used by `fractal verify
 | `summarize-claims` | roll check verdicts into totals and an overall status |
 | `node-provenance` | return a node's final value, claims, child refs, and leaf refs |
 
-Example:
-
 ```clojure
-(def node (fe/load-at (:dir result) "root"))
+(def node (fe/load-at locator "root"))
 (def checks (fe/check-claims (:final node) "."))
 (fe/summarize-claims checks)
 ```
 
-## Provider Helpers
+## Provider helpers
 
 Provider auth is data:
 
@@ -129,14 +173,23 @@ Provider auth is data:
 (fe/auth-status :scripted)
 ```
 
-## Intentionally Not Exposed
+## Storage boundary
+
+SQLite stores operational facts, refs, and index transaction batches. BlobStore stores
+payloads, including compact head state roots and root request descriptors. Datahike is a
+derived query index. Filesystem paths are physical backend choices for the local
+implementations. This API does not expose a session-home contract and does not require
+filesystem projections for reads.
+
+There is no S3/AWS implementation in this pass.
+
+## Intentionally not exposed
 
 Rendering functions remain outside the stable API. `fractal-engine.render` returns
-human-oriented strings that include CLI command hints and formatting choices; those are
-allowed to evolve with the CLI. Library consumers should use the data-returning API
-functions and render their own views.
+human-oriented strings that include CLI hints and formatting choices; those can evolve
+with the CLI. Library consumers should use data-returning API functions and render their
+own views.
 
-The compute internals also remain outside the public facade: `process/run-process!`,
-runtime eval helpers, artifact writers, event projectors, cache internals, and prompt
-construction are implementation details. Public consumers should treat the journal and
-projection data returned by `fractal-engine.api` as the supported read contract.
+Compute internals also remain outside the public facade: `process/run-process!`,
+runtime eval helpers, artifact writers, storage transactions, cache internals, and prompt
+construction are implementation details.

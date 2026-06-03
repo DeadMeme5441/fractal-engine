@@ -2,7 +2,7 @@
   "The pure core. An event is a value recording something that happened;
   `apply-event` folds one event into the materialized session view. It is a pure
   projector — no IO, no provider/leaf/child calls. Events carry *results*, never
-  recipes (SPEC invariant), so folding a journal reconstructs state without ever
+  recipes (SPEC invariant), so folding the event stream reconstructs state without ever
   re-running expensive work.
 
   The view mirrors the shape the rest of the engine already reads:
@@ -18,10 +18,15 @@
    :evals []
    :calls []
    :snapshots []
+   :heads []
+   :invocations []
+   :invocation-events []
+   :refs {}
    :events []
    :final-ref nil
    :error nil
-   :counters {:message 0 :turn 0 :eval 0 :call 0 :event 0 :snapshot 0 :child 0}})
+   :counters {:message 0 :turn 0 :eval 0 :call 0 :event 0 :snapshot 0
+              :head 0 :invocation 0 :child 0}})
 
 (defn- bump [counters k id]
   (if (number? id) (update counters k max id) counters))
@@ -29,9 +34,22 @@
 (defn- put-by [coll id-key row]
   (mapv #(if (= (id-key %) (id-key row)) row %) coll))
 
+(defn- merge-by [coll id-key id patch]
+  (let [matched? (atom false)
+        coll' (mapv (fn [row]
+                      (if (= id (id-key row))
+                        (do
+                          (reset! matched? true)
+                          (merge row patch))
+                        row))
+                    coll)]
+    (if @matched?
+      coll'
+      (conj coll' patch))))
+
 (defn apply-event
   "view' = (apply-event view event). Pure. Every event is recorded in `:events`
-  (the in-memory mirror of the journal); state-changing events additionally fold
+  (the in-memory mirror of canonical event facts); state-changing events additionally fold
   into the relevant view key. Unknown/annotation events change nothing but the log."
   [view event]
   (let [view (-> view
@@ -50,13 +68,21 @@
       (assoc view :final-ref (:final/value-ref event))
 
       ;; Resume/fork/attach inherit prior state from a snapshot. Carrying it as one
-      ;; event keeps the new session's journal self-contained: a fold reproduces the
+      ;; event keeps the new session's event stream self-contained: a fold reproduces the
       ;; inherited messages and counters without reading the source session.
       :session/restored
-      (-> view
-          (assoc :messages (:messages event))
-          (update :counters merge (:counters event))
-          (update :session merge (:session-patch event)))
+      (let [restored-state (:state event)
+            restored-view (select-keys restored-state
+                                       [:messages :turns :evals :calls :snapshots
+                                        :heads :invocations :refs :final-ref :error])
+            restored-counters (or (:counters restored-state)
+                                  (:counters event))]
+        (-> view
+            (merge restored-view)
+            (update :counters #(merge-with max (or % {}) (or restored-counters {})))
+            (update :session merge
+                    (:session restored-state)
+                    (:session-patch event))))
 
       :session/error
       (-> view
@@ -104,6 +130,44 @@
         (-> view
             (update :snapshots conj s)
             (update :counters bump :snapshot (:snapshot/id s))))
+
+      :head/created
+      (let [h (:head event)]
+        (-> view
+            (update :heads conj h)
+            (update :counters bump :head (:head/n h))))
+
+      :session/ref-updated
+      (assoc view :refs {:ref/session (:ref/session event)
+                         :ref/current-head (:ref/current-head event)
+                         :ref/updated-at (:event/at event)})
+
+      :invocation/started
+      (let [i (:invocation event)]
+        (-> view
+            (update :invocation-events conj event)
+            (update :invocations conj i)
+            (update :counters bump :invocation (:invocation/n i))))
+
+      :invocation/completed
+      (let [i (:invocation event)]
+        (-> view
+            (update :invocation-events conj event)
+            (update :invocations merge-by :invocation/id (:invocation/id i)
+                    (assoc i :invocation/status :final))))
+
+      :invocation/failed
+      (let [i (:invocation event)]
+        (-> view
+            (update :invocation-events conj event)
+            (update :invocations merge-by :invocation/id (:invocation/id i)
+                    (assoc i :invocation/status :error))))
+
+      :invocation/caller-head-recorded
+      (let [i (:invocation event)]
+        (-> view
+            (update :invocation-events conj event)
+            (update :invocations merge-by :invocation/id (:invocation/id i) i)))
 
       ;; annotation / lifecycle-note events (restore, attach lifecycle, etc.):
       ;; recorded in the log above, no row change.

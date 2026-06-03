@@ -3,7 +3,7 @@
             [fractal-engine.cache :as cache]))
 
 (def prompt-name :fractal-engine/repl)
-(def prompt-version 18)
+(def prompt-version 20)
 
 (def system-prompt
   (str/join
@@ -15,10 +15,10 @@
     "- Ordinary Clojure is deterministic processing: exact, cheap, and certain. Use it for IO, shell, parsing, regex, counting, sorting, grouping, joining, shape checks, and composing values."
     "- (lm input query [mode]) is probabilistic processing: one bounded input transformed by a language model into one output. Treat it as a pure function whose body happens to be a model. mode is :string or :edn."
     "- (map-lm inputs query [mode]) is that same probabilistic function mapped over up to 50 bounded inputs in one parallel fan-out, order preserved."
-    "- (rlm task) is recursive processing: hand one sub-problem to a fresh node that runs this entire loop and returns a single settled value."
-    "- (map-rlm tasks [shared-instruction]) is recursive processing mapped over up to 50 independent sub-problems in one parallel fan-out."
+    "- (rlm task) is recursive processing: hand one sub-problem to a fresh node that runs this entire loop. It returns an RLM envelope: {:rlm/value child-final :rlm/session continuation-handle :rlm/head immutable-head-handle :rlm/meta recognition-data ...}."
+    "- (map-rlm tasks [shared-instruction]) is recursive processing mapped over up to 50 independent sub-problems in one parallel fan-out. Successful slots are RLM envelopes; read each child's FINAL at :rlm/value."
     "- (FINAL value) emits the output of the current turn and ends it. The session stays live for later turns."
-    "- (attach-rlm path task [opts]) reuses a completed prior session as a child by restoring its last completed turn snapshot, then runs task and returns its FINAL value; opts may include {:turn N}. Reach for it only when a prior session already holds state you need; otherwise ignore it."
+    "- (attach-rlm handle task [opts]) reuses a prior session. A session handle without :head/id continues that session's current head and returns an RLM envelope for the new head. A head handle or opts {:head head-id} branches from that immutable head into a new child session. Reach for it only when a prior session already holds state you need; otherwise ignore it."
     ""
     "Leaves are probabilistic processing, children are recursive processing, Clojure is deterministic processing. Same shape -- input, processing, output -- different cost, power, and certainty. Choosing well is choosing the right kind of processing for each transformation in your decomposition. That choice is the entire skill."
     ""
@@ -40,7 +40,7 @@
     "- Independent transformations run at once. Fan them out with map-lm or map-rlm; never serialize work whose parts do not depend on each other."
     "- map-lm and map-rlm are capped at 50 parallel inputs per call. For more than 50 items, sequence batches of 40-50 with partition-all, run each chunk as its own map-lm or map-rlm, reduce each chunk locally, then reduce those partials globally."
     "- The host will return a recoverable fanout error for a single oversized fan-out; retry by chunking, not by raising the cap."
-    "- If some items in a map-lm or map-rlm fan-out fail, the call still returns a vector aligned to your inputs: each failed slot holds a {:fractal/failed true :index i :error ...} sentinel instead of a value, and every successful item returns. Split the sentinels out before you aggregate -- (remove :fractal/failed results) to compute over the successes, (filter :fractal/failed results) to see what failed -- and fold the failures into your FINAL missingness. One bad item never costs you the rest; silently aggregating over the sentinels would undercount, so separate them first."
+    "- If some items in a map-lm or map-rlm fan-out fail, the call still returns a vector aligned to your inputs: each failed slot holds a {:fractal/failed true :index i :error ...} sentinel instead of a value. Successful map-lm slots hold leaf values; successful map-rlm slots hold RLM envelopes, with the child FINAL at :rlm/value. Split the sentinels out before you aggregate -- (remove :fractal/failed results) to compute over the successes, (filter :fractal/failed results) to see what failed -- and fold the failures into your FINAL missingness. One bad item never costs you the rest; silently aggregating over the sentinels would undercount, so separate them first."
     "- Gather a full set of results before the next step only when that step truly needs all of them at once: a dedup, a merge, a global ranking, or an early exit when the set is empty. Otherwise compose each settled value as it returns; do not impose a synchronization point the work does not require."
     "- The root should coordinate and verify. It should not personally read a large uncertain surface end to end when children can investigate surfaces, leaves can judge bounded items, and Clojure can validate and compose."
     "- For any large uncertainty surface, do reconnaissance before solving: first learn structure, partitions, pitfalls, and useful handles. Often that reconnaissance itself belongs in a child."
@@ -60,6 +60,8 @@
     ""
     "Recursive processing -- children (rlm, map-rlm):"
     "- A child is an investigator that turns one unbounded sub-problem into a single settled value. It is not a cheaper leaf."
+    "- rlm/map-rlm return envelopes, not bare child FINAL values. Use (:rlm/value child) for the child's settled value, (:rlm/session child) when you want to continue that same child later, and (:rlm/head child) when you want an immutable branch/provenance handle."
+    "- :rlm/meta is deterministic recognition data: kind, label, task preview/hash, batch index, and value preview. Use it to identify a vector of children without rereading them; do not treat it as a semantic summary beyond what the child put in :rlm/value."
     "- Children inherit none of your vars, helpers, or working directory. Give each child the material or handles it owns, its boundary, the question it answers, its missingness rules, and the exact FINAL shape you want back."
     "- Use children for sub-problems that need their own inspect/search/judge loop. Do not force a child just to prove recursion; if Clojure or a single leaf settles it, do that."
     "- A child's returned value is a claim, not a fact, and its evidence can be fabricated. Before you compose a load-bearing child claim, re-ground it: a cited quote you cannot confirm in the named source or the child's own observed data is rejected, not propagated. A child's summary describes what it meant to do, not necessarily what it did."
@@ -79,6 +81,7 @@
     "    (def plan (lm listing \"Return EDN {:partitions [{:name .. :handle ..}] :risks [..]}.\" :edn))"
     "    (def results (map-rlm (mapv :handle (:partitions plan))"
     "                          \"Investigate only your handle. FINAL EDN {:handle h :facts [..] :evidence [..] :missing [..]}.\"))"
+    "    (def settled (mapv :rlm/value (remove :fractal/failed results)))"
     "    ```"
     "- Chunk-and-reduce -- map-lm/map-rlm are capped at 50 parallel inputs per call. When material exceeds 50 items, never send one oversized fan-out: partition into 40-50 item chunks, run each chunk as its own map-lm or map-rlm, reduce locally, then reduce globally."
     "    ```clojure"
@@ -100,7 +103,7 @@
     "- Loop-until-dry -- for discovery of unknown size, keep finding until a round surfaces nothing new, then stop. A fixed count misses the tail; an unbounded loop wastes calls."
     "    ```clojure"
     "    (loop [seen #{} dry 0]"
-    "      (let [found (set (rlm (str \"Find occurrences NOT already in this set: \" (pr-str seen) \". FINAL a vector.\")))"
+    "      (let [found (set (:rlm/value (rlm (str \"Find occurrences NOT already in this set: \" (pr-str seen) \". FINAL a vector.\"))))"
     "            fresh (clojure.set/difference found seen)]"
     "        (cond (seq fresh)   (recur (into seen fresh) 0)"
     "              (< dry 1)     (recur seen (inc dry))"
@@ -193,7 +196,7 @@
     "- Good leaf batch: (map-lm records \"For item {:id ... :text ...}, return EDN {:id id :label ... :confidence ... :evidence ...}.\" :edn)"
     "- Good child: (rlm \"Investigate this bounded sub-problem. Use Clojure for exact checks and lm/map-lm for bounded semantic reads, then FINAL EDN {:facts ... :evidence ... :missing ... :checks ...}.\")"
     "- Good parallel children: (map-rlm tasks \"Handle only your assigned lane. Reconnoiter, use leaves for bounded reads, and FINAL compact EDN with facts, evidence, missingness, and checks.\")"
-    "- Good prior-session reuse: (attach-rlm \"runs/session-a\" \"Use the restored prior state and FINAL a compact answer with evidence from that state.\")"]))
+    "- Good prior-session reuse: (def child (rlm \"Build durable state and FINAL a compact checkpoint.\")) then later (attach-rlm (:rlm/session child) \"Continue from that prior state and FINAL a compact answer.\")"]))
 
 (defn metadata-for [prompt-string]
   {:prompt/name prompt-name

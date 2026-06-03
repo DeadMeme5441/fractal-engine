@@ -6,19 +6,20 @@
   can sit underneath both without a cycle."
   (:require [fractal-engine.artifacts :as artifacts]
             [fractal-engine.process :as process]
-            [fractal-engine.scripts :as scripts]))
+            [fractal-engine.scripts :as scripts]
+            [fractal-engine.session-db :as session-db]))
 
 (defn parse-long-opt [v]
   (when (and v (not= true v))
     (Long/parseLong (str v))))
 
 (defn default-runs-dir
-  "Where runs live when neither `--runs-dir` nor an explicit dir is given. Mirrors
-  how git and `bd` find their data dir: if a `.fractal/` already exists in the
-  current directory or any ancestor, reuse it; otherwise default to `.fractal` in
-  the current directory (created on first write). So `fractal` works wherever you
-  invoke it, and from a subdirectory it still finds the project's runs. Override the
-  location per-invocation with `--runs-dir DIR`."
+  "Where runs live when `--runs-dir` is not given. Mirrors how git and `bd` find
+  their data dir: if a `.fractal/` already exists in the current directory or any
+  ancestor, reuse it; otherwise default to `.fractal` in the current directory
+  (created on first write). So `fractal` works wherever you invoke it, and from a
+  subdirectory it still finds the project's runs. Override the store root
+  per-invocation with `--runs-dir DIR`."
   []
   (let [cwd (java.io.File. (System/getProperty "user.dir"))]
     (loop [d (.getCanonicalFile cwd)]
@@ -53,21 +54,28 @@
 (defn session-start-opts [cfg opts]
   (if-let [sid (:session opts)]
     {:id sid
-     :dir (artifacts/path (:runs-dir cfg) sid)}
+     :alias sid
+     :store-root (:runs-dir cfg)}
     {}))
 
 (defn usage-line
-  "A compact, always-visible spend summary read from the materialized usage.edn —
+  "A compact, always-visible spend summary read from canonical call facts —
   the answer to runaway worry is seeing the numbers, not capping them."
-  [dir]
-  (when dir
-    (let [u (artifacts/read-edn-file (artifacts/path dir "usage.edn") nil)
+  [locator]
+  (when locator
+    (let [v (session-db/view (artifacts/store-root-for-locator locator)
+                             (artifacts/session-id-for-locator locator))
+          u (artifacts/derive-usage locator (:calls v))
           tree (:usage/total-tree u)
           cost (get-in u [:cost/total-tree :cost/usd])
           kn (fn [m] (if (= :known (:status m)) (:known m) "?"))]
       (when tree
-        (format "Usage: %s calls  tokens in=%s out=%s total=%s  cost=%s"
-                (str (:call/total-tree-count tree (:call/count tree)))
+        (format "Cumulative usage: %s LLM calls%s  tokens in=%s out=%s total=%s  cost=%s"
+                (str (:call/count tree))
+                (let [rows (:call/total-tree-count tree (:call/count tree))]
+                  (if (= rows (:call/count tree))
+                    ""
+                    (str " · " rows " rows")))
                 (str (kn (:tokens/input tree)))
                 (str (kn (:tokens/output tree)))
                 (str (kn (:tokens/total tree)))

@@ -30,10 +30,16 @@
                 (work call-id)
                 (catch Throwable t
                   (let [{:keys [patch ex]} (fail call-id t)]
-                    (artifacts/update-call! state call-id merge
-                                            (merge {:call/status :error
-                                                    :call/ended-at (time/now-str)}
-                                                   patch))
+                    (let [patch (cond-> patch
+                                  (and (:call/error patch)
+                                       (nil? (:call/error-ref patch)))
+                                  (assoc :call/error-ref
+                                         (artifacts/value-ref! (:locator @state)
+                                                               {:error (:call/error patch)})))]
+                      (artifacts/update-call! state call-id merge
+                                              (merge {:call/status :error
+                                                      :call/ended-at (time/now-str)}
+                                                     patch)))
                     (throw (or ex t)))))
           {:keys [value patch]} (succeed call-id raw)]
       (artifacts/update-call! state call-id merge
