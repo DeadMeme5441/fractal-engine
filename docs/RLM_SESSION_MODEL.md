@@ -16,6 +16,42 @@ No storage, workflow, product, or compatibility helper functions are interned in
 model namespace. Application patterns belong in vars the model defines or in host
 namespaces it chooses to require.
 
+The implementation mirrors that surface:
+
+- `session-loop` runs one session input until a completed head boundary;
+- `leaf` implements `lm` / `map-lm` as call records only;
+- `session-invocation` implements `rlm` / `map-rlm` / `attach-rlm` as session edges;
+- `rlm` holds pure envelopes, handles, and invocation facts;
+- `process` wires configuration and installs these functions into the runtime namespace.
+
+## Prompt and edge semantics
+
+Every RLM session gets the same base behavior prompt. A session does not become a
+different kind of machine because one caller invoked it as a child, because it later
+gets resumed directly, or because another session attaches to it. The stable thing is
+the session identity plus its immutable heads; "root", "child", and "attached" are
+views of invocation edges.
+
+Edge-specific instructions are therefore represented as ordinary input to the callee:
+
+- `rlm` and `map-rlm` create or invoke child sessions with a child invocation frame plus
+  the assigned task;
+- `attach-rlm` with a session handle continues the callee session's current head with an
+  attach invocation frame;
+- `attach-rlm` with a head handle branches from the immutable source head into a new
+  attached child session with an attach invocation frame;
+- direct user/API turns are simply inputs to the selected session.
+
+This keeps the Merkle model honest: behavior prompt identity is not a mutable role flag,
+while each head records the actual input that produced it. A child can later be resumed
+as an entry session, and an entry session can later be attached as a child, without
+rewriting its prior transcript or changing what its older heads mean.
+
+Model selection is still edge-aware. An invocation from one RLM to another may use the
+configured child model for that edge, while a direct resumed session may use the root
+model. That selection is call execution policy, not session identity and not a different
+prompt system.
+
 ## Canonical stores
 
 SQLite is the canonical durable hot fact/ref store:
@@ -143,9 +179,10 @@ Example root shape:
 readers and restore code expect. The compact representation is a storage detail, not a
 second semantic model.
 
-The mutable state transition is the Datahike fact `:session/current-head`. Advancing a
-session means transacting a new immutable head and the session's new current-head
-together. History remains enabled, so the prior current-head is still auditable.
+The mutable state transition is the canonical `:session/current-head` ref. Advancing a
+session means writing a new immutable head and the session's new current-head together.
+The derived Datahike index carries the same fact for queries, but SQLite is the runtime
+authority. History remains enabled, so the prior current-head is still auditable.
 
 `FINAL` does not end a session. It only returns a value to the caller/user and creates a
 restorable completed head. The same session remains resumable for another turn.

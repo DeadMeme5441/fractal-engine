@@ -22,15 +22,29 @@ what happened without adding model-facing concepts.
                │
 ┌──────────────▼──────────────┐        ┌──────────────────────┐
 │ compute engine               │        │ provider             │
-│ process · runtime · rlm      │◄──────►│ clojure-llm-sdk      │
+│ process · session-loop       │◄──────►│ clojure-llm-sdk      │
+│ leaf · session-invocation    │        │                      │
+│ runtime · rlm                │        │                      │
 │ artifacts · snapshot · event │        └──────────────────────┘
 └─────────────────────────────┘
 ```
 
 ## Compute engine
 
-- **`process`** owns the evaluate/observe loop, leaf calls, child calls, attach calls,
-  and turn orchestration.
+- **`process`** owns configuration and session execution assembly. It starts sessions,
+  installs the six REPL functions, selects the configured model for the current
+  invocation edge, and delegates the actual loop/call/invocation work to smaller
+  namespaces.
+- **`session-loop`** owns one session input: provider message, Clojure eval,
+  observation, repeat, then commit a completed head when `(FINAL value)` appears. The
+  persisted row is still named `turn` for the read surface, but the semantic boundary is
+  "session input to immutable head."
+- **`leaf`** owns `lm` / `map-lm`: bounded provider calls recorded as call rows and
+  payload refs only. Leaves never create sessions, heads, or invocation edges.
+- **`session-invocation`** owns `rlm` / `map-rlm` / `attach-rlm`: normal session
+  creation/continuation plus invocation edges between caller and callee heads. It frames
+  child/attach instructions as the callee's user input for that edge; it does not install
+  a different behavior prompt into the callee session.
 - **`provider-call`** owns provider request construction, cache descriptors, traced
   provider completions, leaf parsing, and fanout bounds.
 - **`rlm`** owns RLM invocation values: child result validation, stable handles,
@@ -100,6 +114,10 @@ content is not.
 
 - **Start session** creates a SQLite session row, optional alias, cache id, system
   transcript, and initial head state.
+- **Prompt identity** is session-level and uniform: every RLM session starts with the same
+  base behavior prompt, optionally plus a host overlay at birth. Root/child/attach are
+  relation labels on invocation edges, so the edge-specific boundary is carried as the
+  user input that caused that head transition.
 - **Turn reaching `FINAL`** writes final/snapshot blobs, commits call/eval/message rows,
   writes a compact immutable head-state root, creates an immutable head, and advances the
   same session's current-head. `FINAL` does not terminate the session.

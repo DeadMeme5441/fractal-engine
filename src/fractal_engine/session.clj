@@ -30,7 +30,7 @@
     ops))
 
 (defn start-session!
-  "Start a fresh session in the canonical Datahike + BlobStore root.
+  "Start a fresh session in the canonical SQLite + BlobStore root.
   Opts may carry an `:overlay` — an extra, session-level system instruction
   appended to the base behavior in the single system message. It is a standing
   specialization for the whole session (e.g. codebrain's brain role), stated once
@@ -57,7 +57,7 @@
          session-id (get-in @state [:session :session/id])
          ns-sym (runtime/session-ns-symbol session-id)
          ops (install! state effective-cfg ns-sym)
-         base (if (= :child kind) prompt/child-prompt prompt/system-prompt)]
+         base prompt/system-prompt]
      (artifacts/add-message! state :system (if (str/blank? (str overlay))
                                              base
                                              (str base "\n\n" overlay)))

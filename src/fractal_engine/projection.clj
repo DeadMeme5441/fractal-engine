@@ -1,6 +1,6 @@
 (ns fractal-engine.projection
   "Pure read-side substrate shared by every rendering of a run. It loads canonical
-  Datahike facts plus BlobStore payloads into an addressable node tree.
+  SQLite facts plus BlobStore payloads into an addressable node tree.
 
   Addresses are the whole point of the recursive read: every node has a path like
   `root`, `root/child-0001`, `root/child-0001/child-0004`. A renderer shows a node

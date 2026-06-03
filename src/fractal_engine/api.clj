@@ -35,8 +35,8 @@
 
   `opts` may include:
   - `:id` stable session id
-  - `:alias` optional canonical Datahike alias fact
-  - `:store-root` canonical store root for Datahike facts and blobs
+  - `:alias` optional canonical alias
+  - `:store-root` canonical store root for SQLite facts and blobs
   - `:overlay` extra session-level system instructions appended to the base
     behavior prompt in the single system message
 

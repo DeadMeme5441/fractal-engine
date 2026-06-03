@@ -456,7 +456,7 @@
              "  fractal stream <run>            canonical events as JSONL\n"
              "  fractal inspect <run>           full artifact dump (everything at once)\n\n"
              "store:\n"
-             "  fractal store check              validate Datahike facts and blob refs\n\n"
+             "  fractal store check              validate SQLite facts, derived index, and blob refs\n\n"
              (r/c :dim "every verb takes --json; node address drops the implied root/ prefix"))
    :exit 0})
 

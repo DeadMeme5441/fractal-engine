@@ -173,6 +173,11 @@ Representative canonical rows/facts:
 Small scalar metadata stays queryable. Generated or arbitrary content does not move into
 SQLite/Datahike just because it is small.
 
+`:session/kind` is an origin/read-surface tag. It helps render whether a session was
+born as an entry session, spawned child, or attached child, but it is not the behavior
+prompt and it is not the session's permanent semantic role. Runtime role is read from the
+invocation edge and the input frame that produced a head transition.
+
 ## Blob refs
 
 Blob refs are content-addressed:

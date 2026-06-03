@@ -174,9 +174,10 @@ fractal run "..." --runs-dir /tmp/scratch-store
 fractal ls       --runs-dir /tmp/scratch-store
 ```
 
-`.fractal/` is git-ignored by default. It contains the local Datahike backend, the local
-content-addressed BlobStore, and store identity. Session identity is a Datahike fact, not
-a session directory. A `<run>` argument is a session id or alias resolved under the store.
+`.fractal/` is git-ignored by default. It contains the local SQLite fact/ref store, the
+local content-addressed BlobStore, the derived Datahike query index, and store identity.
+Session identity is a canonical store fact, not a session directory. A `<run>` argument
+is a session id or alias resolved under the store.
 
 ## Use as a Clojure dependency
 
@@ -241,9 +242,9 @@ fractal fork   <run> "<task>" # branch a session at a turn
 ```
 
 `fractal chat` is the headline. It holds one live session and runs each message as a
-turn — REPL vars persist through canonical snapshots, Datahike facts advance, and a live `◐ thinking…` line
-shows children/steps/leaves as the engine works. Leave with `/quit`; come back with
-`fractal chat <run>`.
+session input — REPL vars persist through canonical snapshots, the current-head ref
+advances, and a live `◐ thinking…` line shows children/steps/leaves as the engine works.
+Leave with `/quit`; come back with `fractal chat <run>`.
 
 ### Read (look inside its head)
 
@@ -397,12 +398,13 @@ the pre-flight fan-out cap is a separate, recoverable error you retry by chunkin
 The durable model is:
 
 ```text
-Datahike  = canonical facts, identity, refs, time, graph
+SQLite    = canonical facts, identity, refs, time, graph
 BlobStore = canonical bytes and payloads
-Filesystem = local physical backend for both
+Datahike  = derived Datalog query index, rebuilt from SQLite batches
+Filesystem = local physical backend for blobs and the derived index
 ```
 
-Datahike stores facts the engine queries or uses for state transitions: session ids,
+SQLite stores facts the engine queries or uses for state transitions: session ids,
 aliases, statuses, timestamps, cache ids, current-head refs, immutable head lineage,
 call/eval/message identities, invocation caller/callee/source edges, model/provider ids,
 token/cost metadata, and blob hash/size/key facts.
@@ -496,8 +498,8 @@ namespaces. Full map in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 | layer | responsibility | namespaces |
 |---|---|---|
-| compute engine | the agent + persistent REPL loop, fanout, child/attach | `process` `runtime` `prompt` `concurrent` `call` |
-| canonical storage | Datahike facts + BlobStore payloads | `session-db` `blob-store` `session-model` |
+| compute engine | session input loop, persistent REPL, leaves, child/attach edges | `process` `session-loop` `leaf` `session-invocation` `runtime` `rlm` `call` |
+| canonical storage | SQLite facts/refs + BlobStore payloads, with Datahike as derived index | `session-db` `session-sqlite` `blob-store` `session-model` `store.*` |
 | event projection | canonical events + pure folds into views | `event` `artifacts` |
 | persistence | snapshot / restore / resume / fork / lineage | `snapshot` `resume` `session` |
 | provider | the LLM adapter boundary | `provider` |

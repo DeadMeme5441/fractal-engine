@@ -121,12 +121,19 @@
   (blob-value root (:head/state-ref head)))
 
 (deftest prompt-contract
-  (is (= 20 prompt/prompt-version))
-  (doseq [phrase ["map-lm and map-rlm are capped at 50 parallel inputs per call."
+  (is (= 22 prompt/prompt-version))
+  (doseq [phrase ["You are the active RLM in fractal-engine"
+                  "complete the task fully -- do not gold-plate, but do not leave it half-done"
+                  "The caller may be a human, a CLI/API host, or another RLM session."
+                  "Be an operator, not a commentator."
+                  "Your strengths:"
+                  "map-lm and map-rlm are capped at 50 parallel inputs per call."
                   "For more than 50 items, sequence batches of 40-50 with partition-all, run each chunk as its own map-lm or map-rlm, reduce each chunk locally, then reduce those partials globally."
                   "The host will return a recoverable fanout error for a single oversized fan-out; retry by chunking, not by raising the cap."
                   "Successful map-lm slots hold leaf values; successful map-rlm slots hold RLM envelopes, with the child FINAL at :rlm/value."
                   "rlm/map-rlm return envelopes, not bare child FINAL values."
+                  "FINAL is your return value. It is not a progress note, not a message to a human, and not a place to display raw material."
+                  "Default cadence for non-trivial work:"
                   "attach-rlm handle task"]]
     (is (str/includes? prompt/system-prompt phrase)))
   (doseq [p [prompt/system-prompt prompt/child-prompt prompt/leaf-prompt]]
@@ -136,7 +143,42 @@
   (doseq [sym (map name model-surface)]
     (is (str/includes? prompt/system-prompt sym)))
   (is (= (:prompt/hash prompt/prompt-metadata)
-         (cache/sha256-string prompt/system-prompt))))
+         (cache/sha256-string prompt/system-prompt)))
+  (is (= prompt/system-prompt prompt/child-prompt)
+      "root/child is an invocation-edge role, not a different behavior prompt")
+  (is (= prompt/prompt-metadata prompt/child-prompt-metadata))
+  (is (str/includes? (prompt/child-invocation-frame "task")
+                     "This assignment describes this invocation edge only"))
+  (is (str/includes? (prompt/attach-invocation-frame "task" :branch)
+                     "branches from an immutable source head")))
+
+(deftest child-role-is-an-invocation-frame-not-a-session-prompt
+  (let [root (tmp-dir "child-frame")
+        responder (fn [request]
+                    (let [text (request-text request)]
+                      (cond
+                        (str/includes? text "spawn framed child")
+                        "```clojure\n(FINAL (rlm \"EDGE_TASK\"))\n```"
+
+                        (str/includes? text "Assigned task:\nEDGE_TASK")
+                        "```clojure\n(FINAL {:saw-frame true})\n```"
+
+                        :else
+                        "```clojure\n(FINAL :unknown)\n```")))
+        result (run-root-fn! root "root" responder "spawn framed child")
+        inv (first (session-db/list-invocation-records root))
+        child-view (projection/view (session-db/locator root (:callee/session inv)))
+        child-messages (:messages child-view)
+        system-message (first (filter #(= :system (:message/role %)) child-messages))
+        user-message (first (filter #(= :user (:message/role %)) child-messages))]
+    (is (rlm-envelope? (:final-value result)))
+    (is (= {:saw-frame true} (rlm-value (:final-value result))))
+    (is (= prompt/system-prompt (:message/content system-message)))
+    (is (str/includes? (:message/content user-message)
+                       "This assignment describes this invocation edge only"))
+    (is (str/includes? (:message/content user-message) "EDGE_TASK"))
+    (is (= #{"scripted-child"} (set (map :call/model (:calls child-view))))
+        "the invocation edge still uses the configured child model")))
 
 (deftest model-facing-surface-is-exact
   (let [root (tmp-dir "surface")
@@ -622,7 +664,12 @@
         first-inv (first invocations)
         second-inv (second invocations)
         attached-session-ids (mapv :callee/session invocations)
-        derivations (session-db/list-derivation-records root)]
+        derivations (session-db/list-derivation-records root)
+        source-view (projection/view (session-db/locator root "source"))
+        source-user-messages (->> (:messages source-view)
+                                  (filter #(= :user (:message/role %)))
+                                  (mapv :message/content))
+        source-call-models (mapv :call/model (:calls source-view))]
     (is (= {:source 41} (:final-value source-result)))
     (is (rlm-envelope? (:final-value by-id)))
     (is (rlm-envelope? (:final-value by-alias)))
@@ -644,6 +691,16 @@
     (is (every? #(get-in % [:attach/source-snapshot-ref :blob/id]) invocations))
     (is (= ["source" "source"] attached-session-ids))
     (is (every? #(= :continued (:edge/type %)) invocations))
+    (is (= 2 (count (filter #{"scripted-child"} source-call-models)))
+        "continued attach invocations use the child model for the edge")
+    (is (some #(str/includes? % "You have been attached to restored RLM state")
+              source-user-messages))
+    (is (some #(str/includes? % "continues the callee session's current head")
+              source-user-messages))
+    (is (= prompt/system-prompt
+           (:message/content (first (filter #(= :system (:message/role %))
+                                            (:messages source-view)))))
+        "the callee keeps the same base behavior prompt across entry and attached turns")
     (is (empty? (filter #(= :attached-child (:derivation/type %)) derivations))
         "continuing a session ref is an invocation edge, not a new derivation")
     (is (quick-ok? root))))

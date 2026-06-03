@@ -354,8 +354,8 @@
   (get-in (swap! state update-in [:counters k] (fnil inc 0)) [:counters k]))
 
 (defn emit!
-  "Record one event: assign its id and timestamp, transact canonical Datahike
-  facts plus BlobStore payload refs, then fold it into the in-memory view.
+  "Record one event: assign its id and timestamp, write canonical SQLite facts
+  plus BlobStore payload refs, then fold it into the in-memory view.
   Serialized per session so DB event order and the live view stay consistent
   under the parallel fanout of map-lm/map-rlm. The reentrant monitor lets
   `update-turn!`/`update-call!` read-then-emit atomically."
@@ -714,7 +714,6 @@
         kind' (or kind :root)
         store-root-path (store-io/path store-root-dir)
         locator (session-locator store-root-path logical-id')
-        prompt-metadata (if (= :child kind') prompt/child-prompt-metadata prompt/prompt-metadata)
         session {:session/id logical-id'
                  :session/version session-db/store-version
                  :session/logical-id logical-id'
@@ -732,7 +731,7 @@
                  :session/artifact-version artifact-version
                  :session/surface-version surface-version
                  :session/surface surface
-                 :session/prompt prompt-metadata
+                 :session/prompt prompt/prompt-metadata
                  :session/provider provider
                  :session/cache-id cache-id'
                  :session/cache (cache/session-cache cache-id')
