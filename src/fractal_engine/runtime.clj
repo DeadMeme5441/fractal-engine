@@ -41,17 +41,26 @@
 (defn final! [value]
   (throw (ex-info "FINAL" {:fractal/final value})))
 
-(defn ensure-ns! [ns-sym ops]
-  (create-ns ns-sym)
-  (binding [*ns* (the-ns ns-sym)]
-    (clojure.core/refer 'clojure.core)
-    (intern *ns* 'FINAL (fn [value] (final! value)))
-    (intern *ns* 'lm (:lm ops))
-    (intern *ns* 'map-lm (:map-lm ops))
-    (intern *ns* 'rlm (:rlm ops))
-    (intern *ns* 'map-rlm (:map-rlm ops))
-    (intern *ns* 'attach-rlm (:attach-rlm ops)))
-  (the-ns ns-sym))
+(defn clear-ns! [ns-sym]
+  (let [ns (create-ns ns-sym)]
+    (doseq [[sym _] (ns-publics ns)]
+      (ns-unmap ns sym))))
+
+(defn ensure-ns!
+  ([ns-sym ops] (ensure-ns! ns-sym ops {}))
+  ([ns-sym ops {:keys [clear?]}]
+   (when clear?
+     (clear-ns! ns-sym))
+   (create-ns ns-sym)
+   (binding [*ns* (the-ns ns-sym)]
+     (clojure.core/refer 'clojure.core)
+     (intern *ns* 'FINAL (fn [value] (final! value)))
+     (intern *ns* 'lm (:lm ops))
+     (intern *ns* 'map-lm (:map-lm ops))
+     (intern *ns* 'rlm (:rlm ops))
+     (intern *ns* 'map-rlm (:map-rlm ops))
+     (intern *ns* 'attach-rlm (:attach-rlm ops)))
+   (the-ns ns-sym)))
 
 (defn throwable-data [^Throwable t]
   (merge {:error/type :eval/exception

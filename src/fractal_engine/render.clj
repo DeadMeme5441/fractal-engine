@@ -126,7 +126,7 @@
   [node {:keys [step leaves? final? exe run] :as opts}]
   (let [{:keys [address kind model status counts children final session-id]} node
         exe  (or exe "fractal")
-        run  (or run (:dir node))
+        run  (or run (:session-id node))
         show (format "%s show %s" exe run)]
     (cond
       ;; a single step, in full
@@ -270,46 +270,149 @@
     :partial (str (format fmt (double (:known m 0))) (c :yellow (format "+%d?" (:unknown-calls m 0))))
     (c :gray "?")))
 
+(defn- provider-call-count [usage]
+  (get-in usage [:usage/total-tree :call/count] 0))
+
+(defn- row-count [usage]
+  (get-in usage [:usage/total-tree :call/total-tree-count]
+          (get-in usage [:usage/total-tree :call/count] 0)))
+
+(defn- call-count-brief [usage]
+  (let [provider (provider-call-count usage)
+        rows (row-count usage)]
+    (str provider " LLM calls"
+         (when (not= provider rows)
+           (str " · " rows " rows")))))
+
+(defn- child-subtree-provider-calls [usage]
+  (reduce + 0
+          (map #(get-in % [:child/usage :usage/total-tree :call/count] 0)
+               (get-in usage [:usage/children :children]))))
+
+(defn- child-subtree-rows [usage]
+  (reduce + 0
+          (map #(get-in % [:child/usage :usage/total-tree :call/total-tree-count]
+                        (get-in % [:child/usage :usage/total-tree :call/count] 0))
+               (get-in usage [:usage/children :children]))))
+
+(defn- sum-rollups [rollups]
+  (let [rollups (vec (remove nil? rollups))
+        known (keep #(case (:status %)
+                       :known (:known %)
+                       :partial (:known % 0)
+                       nil)
+                    rollups)
+        unknown (+ (count (filter #(= :unknown (:status %)) rollups))
+                   (reduce + 0 (map #(:unknown-calls % 0) rollups)))]
+    (cond
+      (empty? rollups) {:status :unknown :call/count 0}
+      (and (zero? unknown) (= (count known) (count rollups)))
+      {:status :known :known (reduce + 0 known) :call/count (count rollups)}
+      (seq known)
+      {:status :partial :known (reduce + 0 known) :unknown-calls unknown :call/count (count rollups)}
+      :else
+      {:status :unknown :call/count (count rollups)})))
+
+(defn- child-cost-rollup [usage]
+  (sum-rollups (map #(get-in % [:child/usage :cost/total-tree :cost/usd])
+                    (get-in usage [:usage/children :children]))))
+
+(defn- tokens-brief [usage]
+  (let [tot (:usage/total-tree usage)]
+    (str "in=" (amount (:tokens/input tot) "%.0f")
+         " out=" (amount (:tokens/output tot) "%.0f")
+         " total=" (amount (:tokens/total tot) "%.0f"))))
+
+(defn- cost-brief [usage]
+  (str "$" (amount (get-in usage [:cost/total-tree :cost/usd]) "%.4f")))
+
+(defn- cache-brief [usage]
+  (let [cache (get-in usage [:cache/root])
+        n (:call/count cache 0)]
+    (when (pos? n)
+      (str "cache "
+           (:cache/hit-count cache 0) " hit / "
+           (:cache/miss-count cache 0) " miss / "
+           (:cache/unknown-count cache 0) " unknown"
+           " · cached=" (amount (:tokens/cached cache) "%.0f")))))
+
+(defn- usage-line* [label usage]
+  (str (format "  %-13s" label)
+       (call-count-brief usage) " · tokens " (tokens-brief usage)
+       " · cost " (cost-brief usage)))
+
+(defn- usage-split-lines [usage]
+  (let [root-calls (get-in usage [:usage/root :call/count] 0)
+        leaf-calls (get-in usage [:usage/leaf :call/count] 0)
+        child-count (get-in usage [:usage/children :child/count] 0)
+        child-calls (child-subtree-provider-calls usage)
+        child-rows (child-subtree-rows usage)
+        child-cost (child-cost-rollup usage)]
+    (remove nil?
+            [(str "    root       " root-calls " LLM calls · cost "
+                  "$" (amount (get-in usage [:cost/root :cost/usd]) "%.4f")
+                  (when-let [cache (cache-brief usage)] (str " · " cache)))
+             (when (pos? child-count)
+               (str "    children   " child-count " sessions · " child-calls
+                    " LLM calls"
+                    (when (not= child-calls child-rows)
+                      (str " · " child-rows " rows"))
+                    " · cost $" (amount child-cost "%.4f")))
+             (when (pos? leaf-calls)
+               (str "    leaves     " leaf-calls " LLM calls · cost "
+                    "$" (amount (get-in usage [:cost/leaf :cost/usd]) "%.4f")))])))
+
+(defn usage-report-str
+  "Human usage block with both the just-completed turn and cumulative session
+  tree. `report` is produced by `artifacts/derive-usage-report`."
+  [report]
+  (let [turn (:usage/turn report)
+        cumulative (:usage/cumulative report)]
+    (str
+     (c :bold "usage") "\n"
+     (when turn
+       (str (usage-line* "this turn" turn) "\n"
+            (str/join "\n" (usage-split-lines turn)) "\n"))
+     (usage-line* "cumulative" cumulative))))
+
 (defn cost-str
   "Spend breakdown for a run: tree total plus per-child cost, read from the
-  boundary-materialized usage projection (cost is inherently a turn-boundary
-  aggregate). Visibility, not a cap."
-  [root-dir {:keys [run exe]}]
+  canonical call facts. Visibility, not a cap."
+  [root-locator {:keys [run exe]}]
   (let [exe (or exe "fractal")
-        run (or run root-dir)
-        u   (artifacts/read-edn-file (artifacts/path root-dir "usage.edn") nil)]
-    (if-not u
-      (str "no usage recorded yet for " run)
-      (let [tot   (:usage/total-tree u)
-            cost  (get-in u [:cost/total-tree :cost/usd])
-            kids  (get-in u [:usage/children :children])]
-        (str
-         (c :bold (str "cost — " run)) "\n"
-         (kv "calls" (:call/total-tree-count tot (:call/count tot))) "\n"
-         (kv "tokens" (str "in " (amount (:tokens/input tot) "%.0f")
-                           "  out " (amount (:tokens/output tot) "%.0f")
-                           "  total " (amount (:tokens/total tot) "%.0f"))) "\n"
-         (kv "cached" (amount (:tokens/cached tot) "%.0f")) "\n"
-         (kv "cost" (c :green (str "$" (amount cost "%.4f")))) "\n"
-         (when (seq kids)
-           (str "\n" (c :blue "by child:") "\n"
-                (str/join "\n"
-                  (map (fn [ch]
-                         (let [cu (get-in ch [:child/usage :cost/total-tree :cost/usd])]
-                           (format "  %s %-14s $%-10s %s"
-                                   (status-glyph (:child/status ch))
-                                   (:child/session-id ch)
-                                   (amount cu "%.4f")
-                                   (c :dim (format "%s calls   ↳ %s show %s %s"
-                                                   (get-in ch [:child/usage :usage/total-tree :call/count] "?")
-                                                   exe run (:child/session-id ch))))))
-                       kids)))))))))
+        run (or run (:session/id root-locator))
+        v   (proj/view root-locator)
+        u   (artifacts/derive-usage root-locator (:calls v))
+        tot   (:usage/total-tree u)
+        cost  (get-in u [:cost/total-tree :cost/usd])
+        kids  (get-in u [:usage/children :children])]
+    (str
+     (c :bold (str "cost — " run)) "\n"
+     (kv "calls" (:call/total-tree-count tot (:call/count tot))) "\n"
+     (kv "tokens" (str "in " (amount (:tokens/input tot) "%.0f")
+                       "  out " (amount (:tokens/output tot) "%.0f")
+                       "  total " (amount (:tokens/total tot) "%.0f"))) "\n"
+     (kv "cached" (amount (:tokens/cached tot) "%.0f")) "\n"
+     (kv "cost" (c :green (str "$" (amount cost "%.4f")))) "\n"
+     (when (seq kids)
+       (str "\n" (c :blue "by child:") "\n"
+            (str/join "\n"
+              (map (fn [ch]
+                     (let [cu (get-in ch [:child/usage :cost/total-tree :cost/usd])]
+                       (format "  %s %-14s $%-10s %s"
+                               (status-glyph (:child/status ch))
+                               (:child/session-id ch)
+                               (amount cu "%.4f")
+                               (c :dim (format "%s calls   ↳ %s show %s %s"
+                                               (get-in ch [:child/usage :usage/total-tree :call/count] "?")
+                                               exe run (:child/session-id ch))))))
+                   kids)))))))
 
 ;; ── chat: live progress + per-turn summary (the "second brain" you talk to) ───
 
 (defn progress-counts
   "Light tally for the live `◐ thinking…` line: children spawned, steps run, leaves
-  judged. A thin projection of `projection/progress` (journal-folded, ref-free, safe
+  judged. A thin projection of `projection/progress` (event-folded, ref-free, safe
   to poll on a live run)."
   [dir]
   (select-keys (proj/progress dir) [:steps :children :leaves]))
@@ -320,14 +423,19 @@
        steps " steps"
        (when (pos? leaves) (str " · " leaves " leaves"))))
 
-(defn- spend-brief [dir]
-  (let [u (artifacts/read-edn-file (artifacts/path dir "usage.edn") nil)]
-    (when u
-      (let [calls (get-in u [:usage/total-tree :call/total-tree-count]
-                          (get-in u [:usage/total-tree :call/count]))
-            cost  (get-in u [:cost/total-tree :cost/usd])]
-        (str (when cost (str "$" (amount cost "%.4f")))
-             (when calls (str " · " calls " calls")))))))
+(defn- spend-brief [locator turn-id]
+  (let [v (proj/view locator)
+        report (artifacts/derive-usage-report locator (:calls v) {:turn-id turn-id})
+        turn (:usage/turn report)
+        cumulative (:usage/cumulative report)
+        turn-calls (when turn (call-count-brief turn))
+        total-calls (call-count-brief cumulative)]
+    (str
+     (when turn
+       (str "turn " (cost-brief turn) " · " turn-calls))
+     (when (and turn cumulative) "  ")
+     (when cumulative
+       (str "total " (cost-brief cumulative) " · " total-calls)))))
 
 (defn turn-summary-str
   "What chat (and `run`) print after a turn settles: the ● result line, the compact
@@ -335,7 +443,7 @@
   produced — so the conversation stays readable and depth is one command away."
   [root-node result {:keys [exe run]}]
   (let [exe   (or exe "fractal")
-        run   (or run (last (str/split (str (:dir result)) #"/")))
+        run   (or run (:session-id result))
         st    (keyword (:status result))
         final (:final-value result)
         kids  (take-last 2 (:children root-node))
@@ -346,7 +454,7 @@
        (= :error st)                   (str (c :red "error ") (clip (one-line (pr-str (:error result))) 100))
        (contains? result :final-value) (clip (one-line (pr-str final)) 100)
        :else                           (c :yellow "no final this turn"))
-     (when-let [sp (spend-brief (:dir result))] (str "   " (c :dim sp)))
+     (when-let [sp (spend-brief (:locator result) (:turn-id result))] (str "   " (c :dim sp)))
      (when (or (seq kids) evid?)
        (str "\n"
             (str/join "\n"
@@ -369,7 +477,7 @@
   (let [exe  (or exe "fractal")
         run  (or run root-dir)
         t    (proj/tree root-dir)
-        node (proj/load-node (proj/node-dir root-dir "root") "root")
+        node (proj/load-node (proj/node-locator root-dir "root") "root")
         kid-count (fn cnt [n] (reduce + (count (:children n)) (map cnt (:children n))))]
     (str
      (c :bold (str "run " (or (:session-id t) root-dir))) " " (status-glyph (:status t)) "\n"

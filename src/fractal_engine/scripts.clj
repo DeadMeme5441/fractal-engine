@@ -2,7 +2,11 @@
   "Offline scripted-provider fixtures for `--fake-script NAME`. These are canned
   model responses used for keyless development and tests; they are NOT the engine.
   Kept out of the CLI (the entry surface) and the provider (the boundary) so each
-  stays about one thing. Both the CLI and the test suite resolve scripts here.")
+  stays about one thing. Both the CLI and the test suite resolve scripts here."
+  (:require [clojure.string :as str]))
+
+(defn- attach-source-path [content]
+  (second (re-find #"ATTACH_SOURCE=([^ \t\r\n]+)" (str content))))
 
 (defn script-for
   "An ordered vector of canned assistant responses for a named scenario, replayed
@@ -16,9 +20,9 @@
     "map-lm" ["```clojure\n(def answer (map-lm [{:id 1} {:id 2}] \"Return the id as EDN.\" :edn))\n(FINAL {:leaves answer})\n```"
               "{:id 1}"
               "{:id 2}"]
-    "rlm" ["```clojure\n(def child (rlm \"Return FINAL {:child true}\"))\n(FINAL {:child child})\n```"
+    "rlm" ["```clojure\n(def child (rlm \"Return FINAL {:child true}\"))\n(FINAL {:child (:rlm/value child)\n        :child-session (:rlm/session child)\n        :child-head (:rlm/head child)\n        :child-meta (:rlm/meta child)})\n```"
            "```clojure\n(FINAL {:child true})\n```"]
-    "map-rlm" ["```clojure\n(def children (map-rlm [\"Return FINAL 1\" \"Return FINAL 2\"]))\n(FINAL {:children children})\n```"
+    "map-rlm" ["```clojure\n(def children (map-rlm [\"Return FINAL 1\" \"Return FINAL 2\"]))\n(FINAL {:children (mapv :rlm/value children)\n        :child-sessions (mapv :rlm/session children)\n        :child-meta (mapv :rlm/meta children)})\n```"
                "```clojure\n(FINAL 1)\n```"
                "```clojure\n(FINAL 2)\n```"]
     "map-lm-partial" ["```clojure\n(def labels (map-lm [{:id 1} {:id 2}] \"Return the id as EDN.\" :edn))\n(FINAL {:labels labels\n        :ok (vec (remove :fractal/failed labels))\n        :failed (filterv :fractal/failed labels)})\n```"
@@ -65,10 +69,30 @@
       (let [content (:message/content (last (:request/messages request)))]
         (cond
           (clojure.string/includes? content "child fan-out")
-          "```clojure\n(def children (map-rlm [\"Return FINAL 1\" \"Return FINAL 2\"]))\n(FINAL {:children children})\n```"
+          "```clojure\n(def children (map-rlm [\"Return FINAL 1\" \"Return FINAL 2\"]))\n(FINAL {:children (mapv :rlm/value children)\n        :child-sessions (mapv :rlm/session children)\n        :child-meta (mapv :rlm/meta children)})\n```"
           (clojure.string/includes? content "Return FINAL 1") "```clojure\n(FINAL 1)\n```"
           (clojure.string/includes? content "Return FINAL 2") "```clojure\n(FINAL 2)\n```"
           :else "```clojure\n(FINAL :unknown)\n```")))
+    "attach-reuse"
+    (fn [request]
+      (let [content (:message/content (last (:request/messages request)))]
+        (cond
+          (str/includes? content "ATTACH_SOURCE=")
+          (if-let [source (attach-source-path content)]
+            (str "```clojure\n"
+                 "(def child (attach-rlm " (pr-str source) " \"return attached x\"))\n"
+                 "(FINAL {:child (:rlm/value child)\n"
+                 "        :child-session (:rlm/session child)\n"
+                 "        :child-head (:rlm/head child)\n"
+                 "        :child-meta (:rlm/meta child)})\n"
+                 "```")
+            "```clojure\n(FINAL {:error :missing-attach-source})\n```")
+
+          (str/includes? content "return attached x")
+          "```clojure\n(FINAL {:attached x})\n```"
+
+          :else
+          "```clojure\n(FINAL :unknown)\n```")))
     ;; codebrain offline plumbing: content-sensitive so it survives separate CLI
     ;; processes (the brain is born in one process, resumed in another). The build
     ;; turn defs+FINALs a tiny map; the ask turn FINALs a cited answer that reads
@@ -79,10 +103,10 @@
       (let [content (:message/content (last (:request/messages request)))]
         (cond
           (clojure.string/includes? content "Build (or rebuild) your repo map")
-          "```clojure\n(def repo-map {:root \"r\" :overview \"toy repo\" :languages [\"clojure\"] :subsystems [{:subsystem \"core\" :purpose \"the loop\" :key-files [{:path \"a.clj\" :role \"entry\" :symbols [\"f\"]}]}] :where-to-look [{:topic \"loop\" :start [\"a.clj\"]}] :entrypoints [{:path \"a.clj\" :what \"main\"}]})\n(FINAL repo-map)\n```"
+          "```clojure\n(def repo-map-checks {:used-map-rlm? false :reason \"toy map is bounded\"})\n(def repo-evidence [{:file \"a.clj\" :quote \"f\" :why \"entry symbol\"}])\n(def repo-map {:root \"r\" :overview \"toy repo\" :languages [\"clojure\"] :coverage {:included 1 :excluded 0 :subsystems 1 :unmapped 0} :subsystems [{:subsystem \"core\" :purpose \"the loop\" :key-files [{:path \"a.clj\" :role \"entry\" :symbols [\"f\"]}] :evidence repo-evidence}] :where-to-look [{:topic \"loop\" :start [\"a.clj\"]}] :entrypoints [{:path \"a.clj\" :what \"main\"}] :decomposition {:strategy \"bounded toy repo; no child needed\" :child-count 0 :leaf-count 0} :checks repo-map-checks :missing []})\n(FINAL repo-map)\n```"
 
           (clojure.string/includes? content "Coding-agent query")
-          "```clojure\n(FINAL {:answer (str \"the map knows \" (count (:subsystems repo-map)) \" subsystem(s); root=\" (:root repo-map)) :evidence [{:file \"a.clj\" :lines \"1-2\" :quote \"f\"}] :files-read [\"a.clj\"] :pointers [{:what \"start here\" :file \"a.clj\" :lines \"1\"}] :missing [] :map-stale? false})\n```"
+          "```clojure\n(FINAL {:answer (str \"the map knows \" (count (:subsystems repo-map)) \" subsystem(s); root=\" (:root repo-map)) :evidence [{:file \"a.clj\" :lines \"1-2\" :quote \"f\"}] :files-read [\"a.clj\"] :pointers [{:what \"start here\" :file \"a.clj\" :lines \"1\"}] :checks {:used-map? true :current-source-read? true :child-count 0 :leaf-count 0} :missing [] :map-stale? false})\n```"
 
           :else "```clojure\n(FINAL :ok)\n```")))
     nil))

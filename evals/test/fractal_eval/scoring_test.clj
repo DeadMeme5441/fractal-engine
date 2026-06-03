@@ -67,11 +67,11 @@
                                 {:answer ["Cairo" "Paris" "Tokyo"]})]
       (is (= 1.0 (:loose-accuracy r)))
       (is (= 1 (:correct? r)))))
-  (testing "partial -> loose is the recall fraction, strict fails, missed listed"
+  (testing "partial -> loose is the recall fraction, strict fails, unmatched gold listed"
     (let [r (fanoutqa/score-one {:gold ["Apple" "Microsoft"]} {:answer ["Apple"]})]
       (is (= 0.5 (:loose-accuracy r)))
       (is (= 0 (:correct? r)))
-      (is (= ["Microsoft"] (:missed r)))))
+      (is (= ["Microsoft"] (:strict-unmatched-gold r)))))
   (testing "answer as ONE free-text blob with several values (old set-EM failed this)"
     (let [r (fanoutqa/score-one {:gold ["Paris" "Tokyo"]}
                                 {:answer "The capitals are Paris and Tokyo."})]

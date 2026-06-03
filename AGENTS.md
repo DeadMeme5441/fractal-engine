@@ -30,15 +30,19 @@ recursive (a *child*).
 - the only model-facing functions are `FINAL`, `lm`, `map-lm`, `rlm`, `map-rlm`,
   `attach-rlm`
 - there is **no magic `context` var** — working state lives in REPL vars the model defines
+- SQLite is the canonical hot store for facts / identity / refs / time / graph
+- BlobStore is the canonical store for payload bytes
+- Datahike is a derived Datalog index rebuilt from SQLite transaction batches
+- local filesystem paths are physical backends only, not session identity
 
 The engine is layered by concern (full map in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)):
 
 - **compute engine** — the agent + persistent REPL loop, fanout, child/attach
-- **journal & projections** — an append-only event log (`events.ednl`, the source of
-  truth) plus pure folds into views
+- **canonical storage** — SQLite facts plus content-addressed BlobStore payloads
+- **event projection** — canonical event facts plus pure folds into views
 - **persistence** — snapshot / restore / resume / fork / lineage
 - **provider** — the LLM adapter boundary
-- **read surface** — a journal-folding projection and the trust layer (provenance,
+- **read surface** — Datahike/blob projections and the trust layer (provenance,
   claim-vs-evidence), rendered by the `fractal` CLI
 - **product** — the CLI, and `codebrain` (a code-discovery brain; see
   [`docs/CODEBRAIN.md`](docs/CODEBRAIN.md)) — and, later, a TUI / MCP adapter
@@ -51,20 +55,21 @@ nothing in the kernel or the behavior prompt.
 
 ## Current status
 
-Early but real, validated live end-to-end. The engine decomposes real problems on real
-codebases with cheap-child / strong-root model splits, including emergent recursive
-fanout (`map-rlm`) with evidence-cited results. The `fractal` CLI is the use surface
-(drive + read, `--json`, meaningful exit codes), and the trust layer catches
-confabulation by checking cited evidence against source (grep floor + `--deep` engine
-judge). Behavior prompt is at version 18; tests green.
+Early but real, validated live end-to-end. The engine decomposes real problems with
+root/child/leaf model splits, recursive fanout (`map-rlm`), parallel leaves (`map-lm`),
+resumable sessions, attach-from-prior-state, and evidence-cited results. The `fractal`
+CLI is the use surface (drive + read, `--json`, meaningful exit codes), and the trust
+layer catches confabulation by checking cited evidence against source (grep floor +
+`--deep` engine judge). Behavior prompt is at version 22; tests green.
 
 Known limitations, documented and not yet built:
 
 - no engine-level budget/timeout governor (leash live runs yourself)
 - no true in-process sandbox (the engine runs trusted local Clojure; a best-effort OS
   sandbox is provided — see the README)
-- no storage/retrieval data layer
-- `attach-rlm` has no prior-session discoverability index
+- no vector retrieval / long-term memory layer
+- no S3/AWS backend; current validation uses local SQLite + filesystem BlobStore +
+  derived Datahike
 - the live `--deep` verify judge is itself a model's judgment (grounded in quotes you
   can inspect, but a weak verifier can misjudge — use a strong model, or a panel)
 
@@ -79,7 +84,14 @@ Known limitations, documented and not yet built:
   `src/fractal_engine/prompt.clj` or the leaf system prompt in `process.clj`, update the
   test in lockstep and bump `prompt-version`.
 - Only the compute engine belongs in core runtime namespaces.
-- The journal stores **results, not recipes** — folding it must never re-run a model.
+- Recorded events store **results, not recipes** — folding them must never re-run a model.
+- Blob payloads are written and verified before SQLite facts reference them.
+- Session homes are optional projections/exports only, never source truth.
+- A session is not one turn and not one chat message. A session is stable identity plus
+  a mutable current-head ref over immutable completed heads.
+- Root and child are relation labels on invocation edges, not different runtime kinds.
+  A child session has the same prompt discipline, REPL, snapshot, head, and storage
+  model as an entry session.
 
 ## Develop & validate
 
@@ -87,13 +99,14 @@ Run the tests before claiming anything is done, and report results plainly:
 
 ```bash
 clojure -M:test
+clojure -M:evals-test
 git diff --check
 git status --short --branch
 ```
 
 Offline development uses the fake/scripted provider (no keys): `--fake-script <name>`.
-Inspect any run with `fractal show <run>` / `fractal tree <run>`. Build the binary with
-`clojure -T:build uber`.
+Inspect any run with `fractal show <run>` / `fractal tree <run>` and validate the local
+store with `fractal store check`. Build the binary with `clojure -T:build uber`.
 
 Two non-obvious live-provider facts: the Codex OAuth provider keyword is `codex-backend`
 (plain `codex` is the API-key path), and Vertex Gemini (`vertex-gemini`) needs
@@ -101,7 +114,9 @@ Two non-obvious live-provider facts: the Codex OAuth provider keyword is `codex-
 (the `.env` loader does not push them to `System/getenv`). Root-model strength is
 decisive — weak roots confabulate past their own observations. **Live runs cost money
 and can hang; always leash them** (`--call-timeout-ms`, `--max-turns`, `--max-fanout`,
-background + monitor) until a governor exists.
+background + monitor) until a governor exists. For evals, use the harness
+`--budget-usd` and `--parallelism` flags; for ad-hoc engine runs, there is still no
+engine-level dollar governor.
 
 Keep commits narrow and intentional. If a file is already dirty, understand whether the
 change is yours before editing. Don't perform git operations unless asked.

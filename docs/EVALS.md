@@ -1,23 +1,20 @@
 # Evaluations
 
-This page records the first public long-context eval run for fractal-engine v17.
-The harness lives under [`evals/`](../evals/README.md) as an external consumer of
-the engine. It does not add model-facing functions or ship in the uberjar.
+This page records the public long-context eval evidence for fractal-engine. The harness
+lives under [`evals/`](../evals/README.md) as an external consumer of the engine. It does
+not add model-facing functions and does not ship in the uberjar.
 
-## Setup
+Two result sets matter:
 
-Engine:
+- **Tracked v17 baseline.** The first public run whose aggregate files are committed
+  under `evals/results/*-v17/results.*`.
+- **Release-branch v22 validation.** A fresh live validation run for the canonical
+  session/storage/prompt branch. Its raw stores were local validation artifacts, not
+  committed benchmark output.
 
-- commit: `78444eedd7261ef344998911f66a1918bfbe6e6e`
-- prompt: `repl`, prompt-version `17`
-- runtime change under test: leaf provider calls capped at 50 concurrent calls per
-  run tree
+## Model Split
 
-The result manifests record `engine/git-dirty? true` because the eval harness and
-result files were still untracked while the benchmarks ran. The engine commit under
-test is the `engine/git-sha` above.
-
-Models:
+Both runs used Vertex Gemini:
 
 | role | provider | model |
 |---|---|---|
@@ -25,47 +22,38 @@ Models:
 | child | `vertex-gemini` | `gemini-3.5-flash` |
 | leaf | `vertex-gemini` | `gemini-3.1-flash-lite-preview` |
 
-Limits:
-
-- `--budget-usd 50`
-- `--max-turns 1000000`
-- `--call-timeout-ms 180000`
-- engine-only mode, one benchmark at a time
-
-Validation before spend:
-
-- `clojure -M:evals-test`: green
-- `clojure -M:test`: green
-- live provider auth checked before the canary
-
-The aggregate result files are tracked under `evals/results/*-v17/results.*`.
-Raw `runs/` session journals and logs are intentionally not tracked: they are
-large, noisy, and reproducible from the recorded commands in each result file.
+The root and child roles use the same model because both are full recursive sessions.
+Leaves are cheaper non-recursive provider calls over bounded inputs.
 
 ## Results
 
-| benchmark | n | headline | strict / exact | cost | cost / q | tokens | mean wall |
-|---|--:|---:|---:|--:|--:|--:|--:|
-| OOLONG-synth smart subset | 15 | exact `0.867` | 13 / 15 | `$3.3989` | `$0.2266` | 6,721,220 | 95,714 ms |
-| FanOutQA smart subset | 15 | loose `0.695` | 8 / 15 | `$4.5360` | `$0.3024` | 7,129,764 | 91,578 ms |
+| run | benchmark | n | headline | strict / exact | cost | tokens | mean wall |
+|---|---|--:|---:|---:|--:|--:|--:|
+| tracked v17 | OOLONG-synth smart subset | 15 | exact `0.867` | 13 / 15 | `$3.3989` | 6,721,220 | 95,714 ms |
+| tracked v17 | FanOutQA smart subset | 15 | loose `0.695` | strict 8 / 15 | `$4.5360` | 7,129,764 | 91,578 ms |
+| release v22 validation | OOLONG-synth smart subset | 15 | exact `0.933` | 14 / 15 | `$3.3086` | 6,243,085 | 116,802 ms |
+| release v22 validation | FanOutQA smart subset | 15 | loose `0.704` | strict 7 / 15 | `$2.8873` | 4,805,633 | 54,115 ms |
 
-For FanOutQA, the benchmark headline is loose accuracy. Strict accuracy means all
-gold strings are present and is deliberately harsher.
+For OOLONG, the headline is exact accuracy. For FanOutQA, the headline is loose
+accuracy: fraction of gold reference strings present in the answer after SQuAD-style
+normalization. FanOutQA strict accuracy means every gold string is present exactly after
+normalization; it is useful as a diagnostic, but it under-credits some semantically
+correct structured answers.
 
-Human audit of FanOutQA final answers:
+## Tracked v17 Baseline
 
-| measure | value |
-|---|---:|
-| official strict rows | 8 / 15 = `0.533` |
-| official loose accuracy | `0.695` |
-| semantic row correctness | 11 / 15 = `0.733` |
+Engine:
 
-The semantic audit is not a replacement benchmark metric; it explains where the
-string scorer or stale gold under-counted the engine's final answer.
+- commit: `78444eedd7261ef344998911f66a1918bfbe6e6e`
+- prompt: `repl`, prompt-version `17`
+- runtime change under test: leaf provider calls capped at 50 concurrent calls per run
+  tree
 
-## OOLONG
+The result manifests record `engine/git-dirty? true` because the eval harness and result
+files were still untracked while the benchmarks ran. The engine commit under test is the
+`engine/git-sha` above.
 
-Command:
+Commands:
 
 ```bash
 clojure -M:evals run --benchmark oolong --data evals/data/oolong-smart.jsonl --mode engine \
@@ -74,33 +62,7 @@ clojure -M:evals run --benchmark oolong --data evals/data/oolong-smart.jsonl --m
   --leaf-provider vertex-gemini --leaf-model gemini-3.1-flash-lite-preview \
   --budget-usd 50 --max-turns 1000000 --call-timeout-ms 180000 \
   --runs-dir evals/results/oolong-v17/runs --out evals/results/oolong-v17
-```
 
-Result:
-
-- exact accuracy: `13 / 15 = 0.867`
-- numeric accuracy mean: `0.998`
-- spend: `$3.3989`
-- errors: `0`
-
-The two misses were genuine:
-
-| id | final | gold | note |
-|---|---|---|---|
-| `218020027` | `377` | `382` | 262K-token sentiment count; off by 5 |
-| `211020009` | same frequency | more common | small date comparison; counted equal positive before/after |
-
-The important success signal is not just the headline number. The six long OOLONG
-examples include 262K-token contexts; the engine decomposed them into Clojure
-parsing, `map-lm` chunks, and deterministic reductions instead of relying on one
-flat read. The result was high exact accuracy with near-perfect count accuracy on
-the numeric rows.
-
-## FanOutQA
-
-Command:
-
-```bash
 clojure -M:evals run --benchmark fanoutqa --data evals/data/fanoutqa-smart.jsonl --mode engine \
   --provider vertex-gemini --model gemini-3.5-flash \
   --child-provider vertex-gemini --child-model gemini-3.5-flash \
@@ -109,65 +71,127 @@ clojure -M:evals run --benchmark fanoutqa --data evals/data/fanoutqa-smart.jsonl
   --runs-dir evals/results/fanoutqa-v17/runs --out evals/results/fanoutqa-v17
 ```
 
-Result:
+OOLONG v17:
+
+- exact accuracy: `13 / 15 = 0.867`
+- numeric accuracy mean: `0.998`
+- spend: `$3.3989`
+- terminal errors: `0`
+
+The two exact-unmatched rows were real answer errors:
+
+| id | final | gold | note |
+|---|---|---|---|
+| `218020027` | `377` | `382` | 262K-token sentiment count; off by 5 |
+| `211020009` | same frequency | more common | small date comparison; counted equal positive before/after |
+
+FanOutQA v17:
 
 - strict accuracy: `8 / 15 = 0.533`
 - loose accuracy: `0.695`
 - semantic row correctness after audit: `11 / 15 = 0.733`
 - spend: `$4.5360`
-- errors: `0`
+- terminal errors: `0`
 
-Rows the official scorer marked wrong but the final answer was semantically right:
+Rows strict scoring under-credited but the final answer was semantically right:
 
 | id | reason |
 |---|---|
-| `71552a38345f892e` | all codons were present; the scorer missed labels and comma/`and` formatting |
-| `ff866ee3e2bf4820` | all Ivy League acre values were present; the scorer missed comma-normalized numbers and extra detail |
+| `71552a38345f892e` | all codons were present; strict string matching under-credited labels and comma/`and` formatting |
+| `ff866ee3e2bf4820` | all Ivy League acre values were present; strict string matching under-credited comma-normalized numbers and extra detail |
 | `146e74771fcf6a30` | founder ages matched the provided evidence; the gold was stale |
 
-Actually wrong rows:
+Rows that were semantically wrong:
 
 | id | reason |
 |---|---|
 | `29242cc91b49e88e` | returned only Samuel L. Jackson; incomplete for the cast-wide Academy Award question |
 | `ae1c3cec94b75e55` | age answer used a stale/as-of date and several ages were wrong |
-| `00065f204bddb94d` | missed J. K. Rowling's `1965` birth year |
+| `00065f204bddb94d` | omitted J. K. Rowling's `1965` birth year |
 | `585ead607ef66fb1` | included the United Kingdom via the wrong EGOT span interpretation |
 
-FanOutQA is useful as a fan-out and join stress test, but this run shows why it
-should not be treated as a clean headline benchmark without auditing. Some golds
-are time-sensitive, and loose substring scoring can under-credit correct structured
-answers.
+## Release-Branch v22 Validation
+
+Engine:
+
+- prompt: `repl`, prompt-version `22`
+- storage: canonical SQLite facts + BlobStore payloads; derived Datahike query index
+- eval runner: cost derived from canonical session call facts, not from old file-based
+  usage summaries
+- fanout: partial-failure tolerant `map-lm` / `map-rlm`
+- parallelism: `5`
+- call timeout: `600000` ms
+- max turns: `1000000`
+
+Commands:
+
+```bash
+clojure -M:evals run --benchmark oolong --data evals/data/oolong-smart.jsonl --mode engine \
+  --provider vertex-gemini --model gemini-3.5-flash \
+  --child-provider vertex-gemini --child-model gemini-3.5-flash \
+  --leaf-provider vertex-gemini --leaf-model gemini-3.1-flash-lite-preview \
+  --parallelism 5 --budget-usd 50 --max-turns 1000000 --call-timeout-ms 600000 \
+  --runs-dir evals/results/oolong-v22/runs --out evals/results/oolong-v22
+
+clojure -M:evals run --benchmark fanoutqa --data evals/data/fanoutqa-smart.jsonl --mode engine \
+  --provider vertex-gemini --model gemini-3.5-flash \
+  --child-provider vertex-gemini --child-model gemini-3.5-flash \
+  --leaf-provider vertex-gemini --leaf-model gemini-3.1-flash-lite-preview \
+  --parallelism 5 --budget-usd 50 --max-turns 1000000 --call-timeout-ms 600000 \
+  --runs-dir evals/results/fanoutqa-v22/runs --out evals/results/fanoutqa-v22
+```
+
+The validation run used temporary local stores and did not commit raw session data.
+Store consistency checks passed with `:status :ok` and `:issue-count 0` for both
+benchmarks.
+
+OOLONG v22:
+
+- exact accuracy: `14 / 15 = 0.933`
+- numeric accuracy mean: `0.998`
+- spend: `$3.3086`
+- tokens: `6,243,085`
+- mean wall: `116,802` ms
+
+FanOutQA v22:
+
+- strict accuracy: `7 / 15 = 0.467`
+- loose accuracy: `0.704`
+- spend: `$2.8873`
+- tokens: `4,805,633`
+- mean wall: `54,115` ms
+
+FanOutQA strict-unmatched rows need semantic audit before being called failures. The
+observed strict-unmatched set mixed:
+
+- real semantic issues or incomplete answers,
+- scorer under-credit for grouping/formatting/aliases,
+- time-sensitive or stale-gold disagreements,
+- multiplicity issues where the answer was correct as a set but not in the expected
+  repeated-string form.
 
 ## Runtime Notes
 
-The v17 leaf concurrency cap did its main job on this run: there were no terminal
-provider overloads, rate-limit failures, or fan-out limit failures. Across the two
-benchmarks:
+The v17 leaf concurrency cap did its main job: no terminal provider overloads,
+rate-limit failures, or fan-out limit failures. Since then, `map-lm` and `map-rlm` have
+also become partial-failure tolerant: failed slots return
+`{:fractal/failed true :index i :error ...}` sentinels in an input-aligned vector while
+successful slots remain usable.
 
-- terminal errors: `0`
-- terminal `leaf-batch-failed`: `0`
-- recovered intermediate `leaf-batch-failed`: 2 unique OOLONG batches, both caused
-  by parse failures in a single leaf output and recovered by subsequent model work
-
-> **Resolved (post-v17).** This all-or-nothing weakness is fixed. `map-lm` / `map-rlm`
-> are now partial-failure tolerant: a failed item no longer throws the whole batch — the
-> call returns an input-aligned vector with the successes intact and each failed slot as
-> a `{:fractal/failed true :index i :error ...}` sentinel the model folds into its
-> missingness. A failed leaf is also recorded on its call row (`:item-failed`), so it is
-> legible in `fractal inspect` rather than masquerading as a successful leaf. The two
-> OOLONG batches above would now return their successful items directly instead of
-> needing a recovery step.
+The v22 run validates the newer canonical store path: per-example sessions are stored as
+SQLite facts and BlobStore payloads, Datahike is a rebuildable query index, and the eval
+runner computes cost/tokens from canonical call facts.
 
 ## What This Establishes
 
-This run supports the engine thesis on long-context aggregation:
+These runs support the engine thesis on long-context aggregation:
 
 - The model used ordinary Clojure for parsing, partitioning, counting, and reducing.
 - Leaf calls handled bounded probabilistic judgments.
-- The host preserved order, costs, event journals, and reproducibility manifests.
+- Recursive sessions handled decomposed sub-problems.
+- The host preserved order, costs, canonical state, and reproducibility manifests.
 - The engine completed both long-context suites under modest spend with no terminal
   runtime failures.
 
 It does not yet establish a same-model flat baseline comparison. The harness can run
-that with `--mode both` or `--mode all`; this public v17 report is engine-only.
+that with `--mode both` or `--mode all`; the public reports above are engine-only.

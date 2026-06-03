@@ -25,14 +25,14 @@ recursions. It is built in the spirit of
 ## Table of contents
 
 **Get it running:** [Requirements](#requirements) · [Install](#install) ·
-[Quickstart (no API keys)](#quickstart-no-api-keys) · [Where runs live](#where-runs-live-fractal) ·
+[Quickstart (no API keys)](#quickstart-no-api-keys) · [Where the store lives](#where-the-store-lives-fractal) ·
 [Use as a Clojure dependency](#use-as-a-clojure-dependency) · [The `fractal` CLI](#the-fractal-cli) ·
 [codebrain](#codebrain--a-code-discovery-brain) · [Going live: providers](#going-live-providers) ·
 [Troubleshooting](#troubleshooting)
 
 **Understand it:** [How the loop works](#how-the-loop-works) · [The six functions](#the-six-functions) ·
-[Artifacts & the journal](#artifacts--the-journal) · [The trust layer](#the-trust-layer) ·
-[Resume & fork](#resume--fork) · [Sandboxing](#sandboxing) · [Architecture](#architecture) ·
+[Canonical storage](#canonical-storage) · [The trust layer](#the-trust-layer) ·
+[Resume, fork, attach](#resume-fork-attach) · [Sandboxing](#sandboxing) · [Architecture](#architecture) ·
 [Evaluations](#evaluations) · [Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
 
 **Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/API.md`](docs/API.md) ·
@@ -132,8 +132,8 @@ scripted provider has no real pricing (a live run shows a dollar amount here).
 **Did it work?** Two checks:
 
 ```bash
-ls .fractal/                # a run directory appeared here (see "Where runs live")
-fractal ls                  # ○ session-…  s2 c0 final
+test -d .fractal            # a local store root appeared here
+fractal ls                  # ○ session-...  s2 c0 final
 ```
 
 Now look inside what it did:
@@ -150,33 +150,35 @@ observation the host fed back at each step — ending in the `FINAL` value.
 Run the test suite to confirm a healthy checkout (all offline, no keys):
 
 ```bash
-clojure -M:test                # Ran 53 tests containing 502 assertions. 0 failures, 0 errors.
+clojure -M:test                # offline engine suite
+clojure -M:evals-test          # offline eval harness suite
 ```
 
 Other offline scenarios are available via `--fake-script`: `simple`, `lm`, `map-lm`,
 `map-lm-partial` (demonstrates partial-failure sentinels), `rlm`, `map-rlm`,
 `multi-turn-chat`, and more (see `src/fractal_engine/scripts.clj`).
 
-## Where runs live: `.fractal/`
+## Where the store lives: `.fractal/`
 
-Every session writes a directory. Like `git` and `bd`, `fractal` keeps its data in a
-**`.fractal/` directory in the directory you invoke it from**, and finds it the same
-way git finds `.git`:
+Like `git` and `bd`, `fractal` keeps local durable state in a **`.fractal/` store root
+in the directory you invoke it from**, and finds it the same way git finds `.git`:
 
 - If a `.fractal/` already exists in the current directory **or any ancestor**, that
-  one is reused — so running from a subdirectory still lands in the project's runs.
+  one is reused — so running from a subdirectory still lands in the project's store.
 - Otherwise a fresh `.fractal/` is created in the current directory on first write.
 
-So `cd ~/some-project && fractal run "…"` just works, and keeps that project's runs
+So `cd ~/some-project && fractal run "..."` just works, and keeps that project's sessions
 with that project. Point it somewhere else for a single command with `--runs-dir`:
 
 ```bash
-fractal run "…" --runs-dir /tmp/scratch-runs       # write here instead of ./.fractal
-fractal ls       --runs-dir /tmp/scratch-runs       # read from there too
+fractal run "..." --runs-dir scratch-store
+fractal ls       --runs-dir scratch-store
 ```
 
-`.fractal/` is git-ignored by default. A `<run>` argument is either a path
-(`.fractal/foo`) or a bare name resolved under the runs dir (`foo` → `.fractal/foo`).
+`.fractal/` is git-ignored by default. It contains the local SQLite fact/ref store, the
+local content-addressed BlobStore, the derived Datahike query index, and store identity.
+Session identity is a canonical store fact, not a session directory. A `<run>` argument
+is a session id or alias resolved under the store.
 
 ## Use as a Clojure dependency
 
@@ -184,7 +186,7 @@ The engine is published to [Clojars](https://clojars.org/net.clojars.deadmeme544
 Add it to `deps.edn`:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.1.1"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.0"}}}
 ```
 
 The CLI is one consumer of the engine. Clojure applications should prefer the stable
@@ -202,14 +204,14 @@ such as `process`, `session`, `projection`, or `provenance`.
 
 (def s
   (fe/start-session! cfg {:id "demo"
-                          :dir ".fractal/demo"
+                          :alias "demo"
                           :overlay "Additional application role instructions can go here."}))
 
 (def result
   (fe/run-turn! s "Define x and FINAL {:answer 42}."))
 
 (fe/stop-session! s)
-(fe/load-node (:dir result))
+(fe/load-node (:locator result))
 ```
 
 The overlay is session-level specialization: it is appended once to the base system
@@ -218,9 +220,9 @@ surface or change engine behavior. That surface remains exactly `FINAL`, `lm`,
 `map-lm`, `rlm`, `map-rlm`, and `attach-rlm`.
 
 Applications may put their own Clojure namespaces on the classpath and ask the model,
-through the overlay or task prompt, to require and use them. Run artifacts stay
+through the overlay or task prompt, to require and use them. Session state stays
 engine-shaped and can be read with `fe/load-node`, `fe/load-at`, `fe/tree`,
-`fe/journal-events`, and the claim/provenance helpers. Full reference:
+`fe/event-stream`, `fe/check-consistency`, and the claim/provenance helpers. Full reference:
 [`docs/API.md`](docs/API.md).
 
 ## The `fractal` CLI
@@ -241,9 +243,9 @@ fractal fork   <run> "<task>" # branch a session at a turn
 ```
 
 `fractal chat` is the headline. It holds one live session and runs each message as a
-turn — REPL vars persist in memory, the journal grows, and a live `◐ thinking…` line
-shows children/steps/leaves as the engine works. Leave with `/quit`; come back with
-`fractal chat <run>`.
+session input — REPL vars persist through canonical snapshots, the current-head ref
+advances, and a live `◐ thinking…` line shows children/steps/leaves as the engine works.
+Leave with `/quit`; come back with `fractal chat <run>`.
 
 ### Read (look inside its head)
 
@@ -257,7 +259,7 @@ fractal trace  <run> [node]   # claim provenance
 fractal cost   <run>          # spend breakdown
 fractal leaves <run> [node]   # leaf inputs/outputs
 fractal step   <run> [node] N # one step, in full
-fractal stream <run>          # journal events as JSONL
+fractal stream <run>          # canonical events as JSONL
 ```
 
 A **node address** is `root`, `child-0001`, or `child-0001/child-0004` — the leading
@@ -276,7 +278,11 @@ agent's questions about the code with small, **cited** EDN — so the agent spen
 its context on the change, not on reading the tree.
 
 ```bash
-fractal codebrain init --path ./src --provider vertex-gemini --model gemini-3.1-pro-preview
+fractal codebrain init --path ./src \
+  --provider vertex-gemini       --model gemini-3.5-flash \
+  --child-provider vertex-gemini --child-model gemini-3.5-flash \
+  --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
+  --call-timeout-ms 600000
 fractal codebrain ask  "Where are CLI verbs registered and what's the handler contract?"
 fractal codebrain map        # show the persisted map  ·  status  # freshness + HEAD
 ```
@@ -293,10 +299,10 @@ split is a strong root with cheaper children and leaves):
 
 ```bash
 fractal run "Map this repo's subsystems with evidence." \
-  --provider vertex-gemini       --model gemini-3.1-pro-preview \
+  --provider vertex-gemini       --model gemini-3.5-flash \
   --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
   --child-provider vertex-gemini --child-model gemini-3.5-flash \
-  --max-turns 15 --call-timeout-ms 120000
+  --max-turns 50 --call-timeout-ms 600000
 ```
 
 Credentials come from environment variables (an ignored `.env` is read for local dev —
@@ -324,13 +330,16 @@ The repository includes a small eval harness under [`evals/`](evals/README.md).
 It is an external consumer of the engine behind the `:evals` deps alias, not part of
 the shipped runtime or model-facing surface.
 
-The current public v17 run covers OOLONG-synth and FanOutQA long-context examples
-with a strong-root / cheap-leaf model split. Headline results:
+The tracked public v17 run covers OOLONG-synth and FanOutQA long-context examples
+with a strong-root / cheap-leaf model split. The current v22 release branch was also
+live-validated on the same smart subsets with parallelism 5. Headline results:
 
-| benchmark | n | headline | spend |
-|---|--:|---:|--:|
-| OOLONG-synth | 15 | exact accuracy `0.867` | `$3.3989` |
-| FanOutQA | 15 | loose accuracy `0.695`; semantic audit `11/15` | `$4.5360` |
+| run | benchmark | n | headline | spend |
+|---|---|--:|---:|--:|
+| tracked v17 | OOLONG-synth | 15 | exact accuracy `0.867` | `$3.3989` |
+| tracked v17 | FanOutQA | 15 | loose accuracy `0.695`; semantic audit `11/15` | `$4.5360` |
+| release v22 validation | OOLONG-synth | 15 | exact accuracy `0.933`; numeric `0.998` | `$3.3086` |
+| release v22 validation | FanOutQA | 15 | loose accuracy `0.704`; strict `0.467` | `$2.8873` |
 
 See [`docs/EVALS.md`](docs/EVALS.md) for exact commands, aggregate outputs, scorer
 caveats, and what the results do and do not establish.
@@ -372,16 +381,17 @@ The entire model-facing surface is six functions, plus ordinary Clojure:
 | `(FINAL value)` | — | end the current turn and return `value` to the caller |
 | `(lm input query [mode])` | probabilistic | one bounded input → one model judgment (`:string`/`:edn`) |
 | `(map-lm inputs query [mode])` | probabilistic | `lm` mapped over up to 50 inputs, in parallel |
-| `(rlm task)` | recursive | run this whole loop on a sub-problem; returns its `FINAL` |
+| `(rlm task)` | recursive | run this whole loop on a sub-problem; returns an RLM envelope with `:rlm/value`, session, and head refs |
 | `(map-rlm tasks [shared])` | recursive | `rlm` over up to 50 independent sub-problems, in parallel |
-| `(attach-rlm path task [opts])` | recursive | resume a prior session as a child, then run `task` |
+| `(attach-rlm handle task [opts])` | recursive | create a new attached child from a prior source snapshot |
 
 Everything is `input -> processing -> output`; only the *kind* of processing varies —
 **deterministic** (plain Clojure), **probabilistic** (a *leaf*, `lm`/`map-lm`, whose
 body is a model), or **recursive** (a *child*, `rlm`/`map-rlm`, a full recursion of the
 loop). A leaf is the non-recursive base case. There is **no magic `context` variable** —
 working state lives in REPL vars the model defines with `def`. The root, every child,
-and every leaf run the *same* loop; there is no separate "planner" or "executor." See
+and every child run the *same* loop; leaves are the non-recursive base case. There is
+no separate "planner" or "executor." See
 [`docs/CONCEPTS.md`](docs/CONCEPTS.md) for the model in depth.
 
 A `map-lm` / `map-rlm` fan-out is **partial-failure tolerant**: if some items fail, the
@@ -392,27 +402,35 @@ aggregating (`(remove :fractal/failed results)`) and fold the failures into your
 missingness. (Singular `lm`/`rlm` have no batch, so they surface a failure directly; and
 the pre-flight fan-out cap is a separate, recoverable error you retry by chunking.)
 
-## Artifacts & the journal
+## Canonical storage
 
-Every session writes a directory under `.fractal/`. The **source of truth** is
-`events.ednl`, an append-only event log (one EDN form per line); everything else is a
-**projection** of it, materialized at turn boundaries for convenient reading.
+The durable model is:
 
 ```text
-.fractal/<session-id>/
-  events.ednl        # append-only journal — the source of truth
-  session.edn  messages.edn  turns.edn  evals.edn  calls.edn  snapshots.edn
-  final.edn  usage.edn  tree.edn        # derived views
-  blobs/                               # large values, referenced by SHA-256
-  children/child-0001/ …               # child sessions, same shape, recursively
+SQLite    = canonical facts, identity, refs, time, graph
+BlobStore = canonical bytes and payloads
+Datahike  = derived Datalog query index, rebuilt from SQLite batches
+Filesystem = local physical backend for blobs and the derived index
 ```
 
-The load-bearing invariant is **results, not recipes**: an event carries the *outcome*
-of work (inline, or a blob ref for large values), so folding the journal reconstructs
-the full state without ever re-invoking a model. Reading, resuming, and inspecting are
-all pure folds that cost zero provider calls. Mid-turn, the journal is authoritative
-(the `.edn` projections are only rebuilt at boundaries) — which is why `fractal`'s read
-verbs fold `events.ednl` rather than trusting the projections.
+SQLite stores facts the engine queries or uses for state transitions: session ids,
+aliases, statuses, timestamps, cache ids, current-head refs, immutable head lineage,
+call/eval/message identities, invocation caller/callee/source edges, model/provider ids,
+token/cost metadata, and blob hash/size/key facts.
+
+BlobStore stores payloads the engine replays, restores, renders, inspects, or verifies:
+message content, provider request/response bodies, eval code/results/observations, final
+values, snapshots, vars, raw errors, stack traces, and export bodies.
+
+The boundary is semantic, not size-based. Small final values and small snapshots are
+still blobs; arbitrary generated content is not inlined into Datahike. Writes are
+blob-first and transaction-second: hash/write/verify the payload, then transact facts
+pointing to it. Orphan blobs after failed transactions are acceptable; dangling facts are
+not.
+
+Session homes are not source truth. If a file tree is ever emitted for debugging/export,
+it is a projection of Datahike + BlobStore and is not required for `show`, `tree`,
+`inspect`, resume, fork, attach, or API reads.
 
 ## The trust layer
 
@@ -433,17 +451,26 @@ catches confabulations the grep waves through. Details in
 [`docs/CONCEPTS.md`](docs/CONCEPTS.md#the-trust-layer).
 
 ```bash
-fractal verify <run> child-0001 --root /path/to/repo          # grep floor
-fractal verify <run> child-0001 --root /path/to/repo --deep \
-  --provider vertex-gemini --model gemini-3.1-pro-preview     # + engine judge
+fractal verify <run> child-0001 --root .          # grep floor
+fractal verify <run> child-0001 --root . --deep \
+  --provider vertex-gemini --model gemini-3.5-flash     # + engine judge
 ```
 
-## Resume & fork
+## Resume, fork, attach
 
-Snapshots are written at graceful turn boundaries: message history plus EDN-safe REPL
-vars (non-EDN values are recorded as unresumable, never silently dropped). `resume`
-restores that state into a fresh namespace, reinstalls the runtime functions, and runs
-a new turn. `fork` does the same into a new directory, branching the lineage.
+Snapshots are blobbed at completed turn heads: message history plus EDN-safe REPL vars
+(non-EDN values are recorded as unresumable, never silently dropped).
+
+`resume` restores a snapshot into the same logical session, preserves the same cache id,
+runs a new turn, and advances that same session's current-head.
+
+`fork` restores a source snapshot into a new user/API session with a new cache id by
+default. The source current-head and fingerprint do not change.
+
+`attach-rlm` resolves a prior completed source session/head by id, alias, or stable
+handle, restores that snapshot into a new attached child session, runs the task there,
+and records caller -> attached-child plus attached-from source facts. Attach never
+advances the source session.
 
 ```bash
 fractal resume <run> "Use the var you defined and FINAL the result."
@@ -480,11 +507,12 @@ namespaces. Full map in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 | layer | responsibility | namespaces |
 |---|---|---|
-| compute engine | the agent + persistent REPL loop, fanout, child/attach | `process` `runtime` `prompt` `concurrent` `call` |
-| journal & projections | append-only events + pure folds into views | `journal` `event` `artifacts` |
+| compute engine | session input loop, persistent REPL, leaves, child/attach edges | `process` `session-loop` `leaf` `session-invocation` `runtime` `rlm` `call` |
+| canonical storage | SQLite facts/refs + BlobStore payloads, with Datahike as derived index | `session-db` `session-sqlite` `blob-store` `session-model` `store.*` |
+| event projection | canonical events + pure folds into views | `event` `artifacts` |
 | persistence | snapshot / restore / resume / fork / lineage | `snapshot` `resume` `session` |
 | provider | the LLM adapter boundary | `provider` |
-| read surface | journal-folding projection + the trust layer | `projection` `provenance` `render` |
+| read surface | Datahike/blob projection + the trust layer | `projection` `provenance` `render` `inspect` |
 | public API | stable Clojure facade for library consumers | `api` |
 | product | the `fractal` CLI | `agentcli` `cli` |
 

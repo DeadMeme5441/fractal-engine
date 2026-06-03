@@ -4,13 +4,15 @@
   cost, tokens, wall-clock, and the run dir for the engine path.
 
   Budget enforcement lives HERE, not in the engine — the engine has no governor yet.
-  The runner totals cost as it goes (engine cost from the run's usage.edn; flat cost
-  from the provider response) and refuses to start an example once the cap is hit."
-  (:require [clojure.java.io :as io]
-            [fractal-engine.artifacts :as artifacts]
+  The runner totals cost as it goes (engine cost derived from canonical session
+  calls; flat cost from the provider response) and refuses to start an example once
+  the cap is hit."
+  (:require [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cliopts :as cli]
             [fractal-engine.process :as process]
+            [fractal-engine.projection :as projection]
             [fractal-engine.provider :as provider]
+            [fractal-engine.session-db :as session-db]
             [fractal-eval.fanoutqa :as fanoutqa]
             [fractal-eval.oolong :as oolong]))
 
@@ -30,16 +32,15 @@
 
 (defn- known [m] (when (= :known (:status m)) (:known m)))
 
-(defn- usage-from-dir
-  "Pull {:cost-usd :tokens-in :tokens-out :tokens-total} from a run's usage.edn.
-  Values are nil when the provider reported them as unknown (e.g. scripted).
-
-  Cost lives one level deeper than the token totals: the engine writes
-  `:cost/total-tree {:cost/usd {:status :known :known <usd>} :cost/status :known}`,
-  so the dollar amount is under `[:cost/total-tree :cost/usd]`, not directly under
-  `:cost/total-tree` (which carries `:cost/status`, not `:status`)."
-  [dir]
-  (let [u (artifacts/read-edn-file (artifacts/path dir "usage.edn") nil)
+(defn- usage-from-locator
+  "Pull {:cost-usd :tokens-in :tokens-out :tokens-total} from the canonical
+  session store. Older evals read a file-based usage summary from a run dir; the
+  canonical session model stores calls in SQLite/blob facts, so usage must be derived
+  from the completed session locator."
+  [locator]
+  (let [v (session-db/view (artifacts/store-root-for-locator locator)
+                           (artifacts/session-id-for-locator locator))
+        u (artifacts/derive-usage locator (:calls v))
         tree (:usage/total-tree u)]
     {:cost-usd (some-> (known (get-in u [:cost/total-tree :cost/usd])) double)
      :tokens-in (known (:tokens/input tree))
@@ -80,15 +81,12 @@
        "sessions.\n\n"))
 
 (defn count-children
-  "Post-hoc audit: how many child sessions the run actually spawned, by counting
-  directories under <run-dir>/children/. Children are named child-XXXX (rlm/map-rlm)
-  or attached-XXXX (attach-rlm); both live directly under children/. Returns 0 when
-  the dir is absent (no children spawned)."
-  [run-dir]
-  (let [children (when run-dir (io/file (str run-dir) "children"))]
-    (if (and children (.isDirectory children))
-      (count (filter #(.isDirectory ^java.io.File %) (.listFiles children)))
-      0)))
+  "Post-hoc audit: how many direct child sessions the run spawned. Children are now
+  canonical invocation/session facts, not filesystem directories."
+  [locator]
+  (if locator
+    (count (:children (projection/tree locator)))
+    0))
 
 (defn run-engine-example
   "Run one example through the recursive engine. `mode` is :engine (full recursion)
@@ -104,12 +102,13 @@
          ms (quot (- (System/nanoTime) t0) 1000000)
          final (when (contains? result :final-value) (:final-value result))
          scored ((:score adapter) example final)
-         usage (when (:dir result) (usage-from-dir (:dir result)))
-         children (count-children (:dir result))]
+         usage (when (:locator result) (usage-from-locator (:locator result)))
+         children (count-children (:locator result))]
      (merge {:id (:id example) :mode mode
              :status (:status result)
              :final final
-             :run-dir (str (:dir result))
+             :run-locator (:locator result)
+             :run-dir (str (:locator result))
              :children-spawned children
              :wall-ms ms}
             (when norec?
@@ -147,6 +146,14 @@
 
 ;; ── budgeted batch ────────────────────────────────────────────────────────────
 
+(defn- run-window [cfg adapter mode window]
+  (if (= 1 (count window))
+    [(run-example cfg adapter mode (first window))]
+    (mapv deref
+          (mapv (fn [example]
+                  (future (run-example cfg adapter mode example)))
+                window))))
+
 (defn run-batch
   "Run `examples` through `mode`, stopping before any example that would risk
   exceeding `budget-usd` (nil = no cap). `on-result` is called with each result map
@@ -156,18 +163,26 @@
   `:spent-so-far` (default 0.0) seeds the budget check with spend from earlier modes
   in the same invocation, so `budget-usd` acts as ONE shared cumulative cap across
   modes: a later mode is refused once the COMBINED spend reaches the cap. This
-  batch's reported :spent excludes that seed (it is only this batch's own cost)."
-  [{:keys [cfg benchmark mode budget-usd on-result spent-so-far]} examples]
+  batch's reported :spent excludes that seed (it is only this batch's own cost).
+
+  `:parallelism` runs examples in bounded chunks. Budget checks happen before each
+  chunk; with parallelism > 1 a cap can be exceeded by the in-flight chunk because
+  costs are only known after provider calls complete."
+  [{:keys [cfg benchmark mode budget-usd on-result spent-so-far parallelism]} examples]
   (let [adapter (get adapters benchmark)
-        spent-so-far (or spent-so-far 0.0)]
+        spent-so-far (or spent-so-far 0.0)
+        parallelism (max 1 (long (or parallelism 1)))]
     (when-not adapter (throw (ex-info "Unknown benchmark" {:benchmark benchmark})))
     (loop [todo examples results [] spent 0.0]
       (if (empty? todo)
         {:results results :spent spent :stopped-early? false}
         (if (and budget-usd (>= (+ spent-so-far spent) budget-usd))
           {:results results :spent spent :stopped-early? true}
-          (let [ex (first todo)
-                r (run-example cfg adapter mode ex)
-                spent' (+ spent (or (:cost-usd r) 0.0))]
-            (when on-result (on-result (assoc r :cumulative-usd (+ spent-so-far spent'))))
-            (recur (rest todo) (conj results r) spent')))))))
+          (let [window (vec (take parallelism todo))
+                rs (run-window cfg adapter mode window)
+                progress (reductions + spent (map #(or (:cost-usd %) 0.0) rs))
+                spent' (last progress)]
+            (when on-result
+              (doseq [[r subtotal] (map vector rs (rest progress))]
+                (on-result (assoc r :cumulative-usd (+ spent-so-far subtotal)))))
+            (recur (drop parallelism todo) (into results rs) spent')))))))

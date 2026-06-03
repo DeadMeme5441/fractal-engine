@@ -232,7 +232,7 @@
 (defn node-provenance
   "For the node at `address`, the chain that backs its FINAL value: the final value
   itself, the evidenced claims it contains, and the child/leaf calls that fed it.
-  Pure structural read over the journal fold."
+  Pure structural read over the canonical head-state projection."
   [root-dir address]
   (when-let [node (proj/load-at root-dir address)]
     {:address  address
