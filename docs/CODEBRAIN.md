@@ -17,10 +17,10 @@ every turn and every resume:
 > compact and cited. Delegate the reading to children so your own context stays
 > small. Ground every claim in a real file:line.*
 
-Used like `bd`: durable state lives on disk under `<runs-dir>/codebrain/` and
-survives across invocations. You **born it once**, it builds its repo map; each
-**ask resumes** that same brain (its map and REPL vars stay warm) and advances the
-brain's HEAD.
+Used like `bd`: a small sidecar lives under `<runs-dir>/codebrain/`, while the live
+brain session itself is a canonical session in the engine store. You **born it once**,
+it builds its repo map; each **ask resumes** that same brain (its map and REPL vars stay
+warm) and advances the brain's current head.
 
 ## Why a brain and not a regex index
 
@@ -39,16 +39,17 @@ later `ask` reuse it cheaply.
 ```bash
 # 1. born once — builds the repo map for the target repo (live; costs money)
 fractal codebrain init --path ./src \
-  --provider vertex-gemini --model gemini-3.1-pro-preview \
-  --child-model gemini-3.5-flash --leaf-model gemini-3.1-flash-lite-preview \
-  --max-turns 20 --max-fanout 14 --call-timeout-ms 180000
+  --provider vertex-gemini       --model gemini-3.5-flash \
+  --child-provider vertex-gemini --child-model gemini-3.5-flash \
+  --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
+  --max-turns 50 --max-fanout 14 --call-timeout-ms 600000
 
 # 2. ask it anything about the code — resumes the warm brain, answers cited
 fractal codebrain ask "Where are CLI verbs registered and what's the handler contract?"
 
 # 3. read the map yourself (no model call), or check freshness
 fractal codebrain map           # rendered markdown;  --json for the raw EDN
-fractal codebrain status        # root, when built, turn count, HEAD
+fractal codebrain status        # root, when built, turn count, current head
 ```
 
 `--path` defaults to the current directory. Point it at a subtree (`./src`) to
@@ -100,7 +101,9 @@ it is **not** pushed to `System/getenv`, and the GCP SDK reads them from there. 
 gcloud auth application-default login        # one-time: creates ADC
 export GOOGLE_CLOUD_PROJECT="your-project"
 export GOOGLE_CLOUD_LOCATION="us-central1"   # or your region
-fractal codebrain init --path ./src --provider vertex-gemini --model gemini-3.1-pro-preview …
+fractal codebrain init --path ./src \
+  --provider vertex-gemini --model gemini-3.5-flash \
+  --leaf-model gemini-3.1-flash-lite-preview
 ```
 
 If you keep them in `.env`, export them before launching, e.g.
@@ -110,16 +113,20 @@ If you keep them in `.env`, export them before launching, e.g.
 
 ```
 <runs-dir>/codebrain/
-  meta.edn        # root, born-at, map-built-at, turn count, HEAD pointer
-  repo-map.edn    # the latest built map (the brain's memory, on disk)
+  meta.edn        # root, born-at, map-built-at, turn count, current-head pointer
+  repo-map.edn    # latest map export for humans/tools
   repo-map.md     # human-readable rendering (what `codebrain map` prints)
-  t0000/          # birth run (the build); addressable with `fractal show`
-  t0001/ t0002/…  # each ask is a resumed run; HEAD advances
 ```
 
 `<runs-dir>` is discovered like `git`/`bd`: a `.fractal/` in the current dir or any
-ancestor, else created in the cwd. Override with `--runs-dir DIR`. The brain's turn
-dirs are nested one level under `codebrain/`, so they never clutter `fractal ls`.
+ancestor, else created in the cwd. Override with `--runs-dir DIR`.
+
+The authoritative brain state is not a tree of turn directories. It is the canonical
+session whose id/alias is `codebrain`: SQLite rows hold session identity, aliases,
+current-head refs, calls, invocations, and costs; BlobStore holds messages, snapshots,
+final values, vars, and provider payloads; Datahike is a rebuildable query index. The
+sidecar `repo-map.*` files are exports of values already held in the session, kept so a
+coding agent can read the map without running a model call.
 
 ## Cost & leashing
 

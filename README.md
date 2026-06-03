@@ -150,7 +150,8 @@ observation the host fed back at each step — ending in the `FINAL` value.
 Run the test suite to confirm a healthy checkout (all offline, no keys):
 
 ```bash
-clojure -M:test                # Ran 17 tests containing 147 assertions. 0 failures, 0 errors.
+clojure -M:test                # offline engine suite
+clojure -M:evals-test          # offline eval harness suite
 ```
 
 Other offline scenarios are available via `--fake-script`: `simple`, `lm`, `map-lm`,
@@ -185,7 +186,7 @@ The engine is published to [Clojars](https://clojars.org/net.clojars.deadmeme544
 Add it to `deps.edn`:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.1.1"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.0"}}}
 ```
 
 The CLI is one consumer of the engine. Clojure applications should prefer the stable
@@ -277,7 +278,11 @@ agent's questions about the code with small, **cited** EDN — so the agent spen
 its context on the change, not on reading the tree.
 
 ```bash
-fractal codebrain init --path ./src --provider vertex-gemini --model gemini-3.1-pro-preview
+fractal codebrain init --path ./src \
+  --provider vertex-gemini       --model gemini-3.5-flash \
+  --child-provider vertex-gemini --child-model gemini-3.5-flash \
+  --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
+  --call-timeout-ms 600000
 fractal codebrain ask  "Where are CLI verbs registered and what's the handler contract?"
 fractal codebrain map        # show the persisted map  ·  status  # freshness + HEAD
 ```
@@ -294,10 +299,10 @@ split is a strong root with cheaper children and leaves):
 
 ```bash
 fractal run "Map this repo's subsystems with evidence." \
-  --provider vertex-gemini       --model gemini-3.1-pro-preview \
+  --provider vertex-gemini       --model gemini-3.5-flash \
   --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
   --child-provider vertex-gemini --child-model gemini-3.5-flash \
-  --max-turns 15 --call-timeout-ms 120000
+  --max-turns 50 --call-timeout-ms 600000
 ```
 
 Credentials come from environment variables (an ignored `.env` is read for local dev —
@@ -325,13 +330,16 @@ The repository includes a small eval harness under [`evals/`](evals/README.md).
 It is an external consumer of the engine behind the `:evals` deps alias, not part of
 the shipped runtime or model-facing surface.
 
-The current public v17 run covers OOLONG-synth and FanOutQA long-context examples
-with a strong-root / cheap-leaf model split. Headline results:
+The tracked public v17 run covers OOLONG-synth and FanOutQA long-context examples
+with a strong-root / cheap-leaf model split. The current v22 release branch was also
+live-validated on the same smart subsets with parallelism 5. Headline results:
 
-| benchmark | n | headline | spend |
-|---|--:|---:|--:|
-| OOLONG-synth | 15 | exact accuracy `0.867` | `$3.3989` |
-| FanOutQA | 15 | loose accuracy `0.695`; semantic audit `11/15` | `$4.5360` |
+| run | benchmark | n | headline | spend |
+|---|---|--:|---:|--:|
+| tracked v17 | OOLONG-synth | 15 | exact accuracy `0.867` | `$3.3989` |
+| tracked v17 | FanOutQA | 15 | loose accuracy `0.695`; semantic audit `11/15` | `$4.5360` |
+| release v22 validation | OOLONG-synth | 15 | exact accuracy `0.933`; numeric `0.998` | `$3.3086` |
+| release v22 validation | FanOutQA | 15 | loose accuracy `0.704`; strict `0.467` | `$2.8873` |
 
 See [`docs/EVALS.md`](docs/EVALS.md) for exact commands, aggregate outputs, scorer
 caveats, and what the results do and do not establish.
@@ -373,7 +381,7 @@ The entire model-facing surface is six functions, plus ordinary Clojure:
 | `(FINAL value)` | — | end the current turn and return `value` to the caller |
 | `(lm input query [mode])` | probabilistic | one bounded input → one model judgment (`:string`/`:edn`) |
 | `(map-lm inputs query [mode])` | probabilistic | `lm` mapped over up to 50 inputs, in parallel |
-| `(rlm task)` | recursive | run this whole loop on a sub-problem; returns its `FINAL` |
+| `(rlm task)` | recursive | run this whole loop on a sub-problem; returns an RLM envelope with `:rlm/value`, session, and head refs |
 | `(map-rlm tasks [shared])` | recursive | `rlm` over up to 50 independent sub-problems, in parallel |
 | `(attach-rlm handle task [opts])` | recursive | create a new attached child from a prior source snapshot |
 
@@ -382,7 +390,8 @@ Everything is `input -> processing -> output`; only the *kind* of processing var
 body is a model), or **recursive** (a *child*, `rlm`/`map-rlm`, a full recursion of the
 loop). A leaf is the non-recursive base case. There is **no magic `context` variable** —
 working state lives in REPL vars the model defines with `def`. The root, every child,
-and every leaf run the *same* loop; there is no separate "planner" or "executor." See
+and every child run the *same* loop; leaves are the non-recursive base case. There is
+no separate "planner" or "executor." See
 [`docs/CONCEPTS.md`](docs/CONCEPTS.md) for the model in depth.
 
 A `map-lm` / `map-rlm` fan-out is **partial-failure tolerant**: if some items fail, the
@@ -442,9 +451,9 @@ catches confabulations the grep waves through. Details in
 [`docs/CONCEPTS.md`](docs/CONCEPTS.md#the-trust-layer).
 
 ```bash
-fractal verify <run> child-0001 --root /path/to/repo          # grep floor
-fractal verify <run> child-0001 --root /path/to/repo --deep \
-  --provider vertex-gemini --model gemini-3.1-pro-preview     # + engine judge
+fractal verify <run> child-0001 --root .          # grep floor
+fractal verify <run> child-0001 --root . --deep \
+  --provider vertex-gemini --model gemini-3.5-flash     # + engine judge
 ```
 
 ## Resume, fork, attach

@@ -36,7 +36,7 @@ The exact physical layout is an implementation detail. Public callers should car
 session locators:
 
 ```clojure
-{:store/root "/path/to/.fractal"
+{:store/root ".fractal"
  :session/id "session-..."
  :head/id "head-..."} ; optional
 ```

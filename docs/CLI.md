@@ -121,8 +121,8 @@ Run the trust layer over a node's `FINAL` value.
 - `--deep`: use the engine as an adversarial judge.
 
 ```bash
-fractal verify my-run child-0001 --root /path/to/repo
-fractal verify my-run child-0001 --root /path/to/repo --deep \
+fractal verify my-run child-0001 --root .
+fractal verify my-run child-0001 --root . --deep \
   --provider vertex-gemini --model gemini-3.5-flash
 ```
 
@@ -208,5 +208,5 @@ fractal show demo --json | jq '.final'
 
 ## Backend status
 
-This pass implements local filesystem-backed Datahike plus local filesystem-backed
-BlobStore. No S3/AWS backend is implemented.
+This pass implements local SQLite, a filesystem-backed BlobStore, and a rebuildable
+filesystem-backed Datahike index. No S3/AWS backend is implemented.

@@ -2,9 +2,9 @@
 
 A small, self-contained harness that measures the **fractal-engine** on real
 long-context benchmarks. It is an **external consumer** of the engine: everything
-lives under `evals/` behind the `:evals` deps alias, imports the engine's public
-seams (`fractal-engine.process/run-task!`, `provider/complete`, `artifacts`), and
-adds **nothing** to the core surface. The uberjar build only sees `src/`, so the
+lives under `evals/` behind the `:evals` deps alias, imports the engine as an external
+consumer (`process/run-task!`, provider calls, and read/usage helpers), and adds
+**nothing** to the core surface. The uberjar build only sees `src/`, so the
 harness can never leak into the shipped engine.
 
 > **Run it from a fresh session?** Read this whole file first, then the
@@ -61,7 +61,7 @@ evals/
   resources/fixtures/  tiny hand-written examples for offline tests (NOT the real corpora)
   test/                offline scorer + harness smoke tests (no keys, no spend)
   data/                built smart-subset datasets (see "Build datasets")
-  results/             run outputs (per run: results.{edn,json,md} + runs/<sessions>)
+  results/             run outputs (results.{edn,json,md}; canonical stores are local)
 ```
 
 ---
@@ -94,7 +94,7 @@ Scripted parse-check (validates a dataset end-to-end with the offline fake provi
 
 ```bash
 clojure -M:evals run --benchmark oolong --data evals/data/oolong-smart.jsonl \
-  --mode engine --provider scripted --runs-dir /tmp/check --out /tmp/check-out
+  --mode engine --provider scripted --runs-dir target/evals-check/store --out target/evals-check/out
 ```
 
 ---
@@ -123,7 +123,9 @@ extrapolation.
 We measure **just the fractal-engine** (`--mode engine`). Model split: strong root +
 child, cheap leaf. **No turn cap** (the engine's loop needs an integer, so pass a huge
 value; the real leashes are the dollar budget + call timeout). The dollar cap is
-enforced **between examples** by the runner reading each run's `usage.edn`.
+enforced **between examples** by deriving usage from each completed canonical session's
+call facts. With `--parallelism > 1`, examples run in bounded chunks; the budget is
+checked before each chunk, so in-flight examples can overshoot the cap by one chunk.
 
 ```bash
 # OOLONG — all 15, engine only, leashed
@@ -132,7 +134,7 @@ clojure -M:evals run \
   --provider vertex-gemini       --model gemini-3.5-flash \
   --child-provider vertex-gemini --child-model gemini-3.5-flash \
   --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
-  --budget-usd 30 --max-turns 1000000 --call-timeout-ms 180000 \
+  --parallelism 5 --budget-usd 30 --max-turns 1000000 --call-timeout-ms 600000 \
   --runs-dir evals/results/oolong-run/runs --out evals/results/oolong-run
 
 # FanOutQA — same flags, different data/out
@@ -141,14 +143,16 @@ clojure -M:evals run \
   --provider vertex-gemini       --model gemini-3.5-flash \
   --child-provider vertex-gemini --child-model gemini-3.5-flash \
   --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
-  --budget-usd 30 --max-turns 1000000 --call-timeout-ms 180000 \
+  --parallelism 5 --budget-usd 30 --max-turns 1000000 --call-timeout-ms 600000 \
   --runs-dir evals/results/fanoutqa-run/runs --out evals/results/fanoutqa-run
 ```
 
 Flags: `--mode` = `engine|flat|engine-norec|both|all` (we use `engine`); `--limit N`
-(first N examples, e.g. a 1-example canary); `--budget-usd` is a hard backstop checked
-between examples; leaf concurrency is capped at 50 by the engine (`:max-leaf-concurrency`,
-default). Per-example sessions land under `--runs-dir`; aggregate under `--out`.
+(first N examples, e.g. a 1-example canary); `--parallelism N` runs N examples at a
+time; `--budget-usd` is a backstop checked before each serial example or parallel
+chunk; leaf concurrency is capped at 50 by the engine (`:max-leaf-concurrency`,
+default). Per-example sessions are canonical sessions in the `--runs-dir` store;
+aggregate results are written under `--out`.
 
 ### Run it leashed (background + monitor)
 Live runs can hang and the 262K / huge-evidence examples take minutes each. Launch in
@@ -156,7 +160,7 @@ the background, log to a file, and watch per-example cost; kill if a single exam
 stalls or cost approaches the cap:
 
 ```bash
-nohup clojure -M:evals run --benchmark oolong ... > /tmp/oolong-run.log 2>&1 &
+nohup clojure -M:evals run --benchmark oolong ... > oolong-run.log 2>&1 &
 # then tail the log for per-example lines:  [engine] <id>  ✓/✗  cost=$..  cum=$..  ..ms
 ```
 
@@ -172,10 +176,11 @@ Each run writes `results.{edn,json,md}` under `--out`:
 **Cost/question** = `total-cost-usd / n` (extrapolate to the full set with
 `oolong-full-meta.jsonl`'s length distribution — don't flat-multiply; weight by bucket).
 
-Inspect what the engine actually did on any example via its session under
-`--runs-dir` (the `:run-dir` in the result row): `final.edn` has the `{:answer …}`,
-`events.ednl` is the source of truth, and per-call `:usage{:input-tokens …}` in
-`calls.edn` shows fan-out sizes.
+Inspect what the engine actually did on any example via its session locator in the
+result row. The `--runs-dir` store contains `store.sqlite`, content-addressed blobs,
+and a rebuildable Datahike index; use the normal read surface (`fractal show`,
+`fractal tree`, `fractal inspect`, `fractal cost`) rather than looking for per-session
+directories.
 
 ---
 
@@ -184,16 +189,20 @@ Inspect what the engine actually did on any example via its session under
 - **Answer format ≠ wrong answer.** OOLONG asks for `Label: X` / `Answer: N`; the
   engine returns exactly that. The scorer strips the lead-in — don't "fix" answers that
   look prefixed.
-- **`:turn-final` is the terminal state.** Intermediate `leaf-batch-failed` /
-  macroexpand errors in `events.ednl` are usually *recovered* — check the terminal
-  event, not mid-run events, before calling something an error.
-- **Cost is read from `usage.edn`** at `[:cost/total-tree :cost/usd]`. If it ever reads
-  `nil`, the budget cap goes blind — confirm a non-zero `cost=` on the first example.
+- **Strict unmatched is not automatically semantic failure.** FanOutQA's strict scorer
+  is exact-string/all-gold-string matching. A row can be semantically correct while
+  strict under-credits formatting, grouping, aliases, or repeated values. Audit the
+  final answer before calling it a miss.
+- **`:turn-final` is the terminal state.** Intermediate leaf parse errors or
+  macroexpand errors can be recovered by later steps. Check the terminal status and
+  final value before calling something an error.
+- **Cost is derived from canonical call facts.** If a progress line prints `cost=—` on
+  live examples, stop and inspect the row; the budget cap depends on non-nil usage from
+  completed sessions.
 - **Huge contexts cost real money.** OOLONG 262K and FanOutQA 700K–1.4M-char examples
   fan out hundreds of leaf calls (~$0.3–1 each). Budget and monitor accordingly.
-- **Clean up `.fractal/`** if you ever run without `--runs-dir`: eval sessions are the
-  ones whose `messages.edn` references `fractal-eval-` temp context files. Removing
-  those is safe; leave `codebrain/` and unrelated sessions.
+- **Clean up `.fractal/`** if you ever run without `--runs-dir`: eval sessions are easy
+  to recreate from the command and dataset fingerprint. Do not commit local stores.
 - **Public repo.** Never write a cloud project id, ADC path, or any internal identifier
   into a tracked file under `evals/` (results/docs included).
 
@@ -208,7 +217,8 @@ dataset fingerprint ⇒ a re-runnable claim.
 
 ## Status
 
-- Engine: `prompt-version 17`, leaf-concurrency capped at 50 (commit `78444ee`).
+- Tracked baseline: `prompt-version 17`, leaf-concurrency capped at 50 (commit
+  `78444ee`).
 - Published v17 aggregates live under `evals/results/oolong-v17/results.*` and
   `evals/results/fanoutqa-v17/results.*`. Raw per-example `runs/` journals and logs
   are local-only and ignored.
@@ -216,6 +226,11 @@ dataset fingerprint ⇒ a re-runnable claim.
   no terminal errors.
 - FanOutQA: official **loose-acc 0.695** (`strict 8/15`), `$4.5360` total spend, no
   terminal errors. A human audit of the final answers counts **11/15 semantically
-  correct**: three official misses were scorer/gold false negatives, and four rows
-  were genuinely wrong.
+  correct**: three strict-unmatched rows were scorer/gold false negatives, and four
+  rows were genuinely wrong.
+- Release-branch live validation: `prompt-version 22`, parallelism 5, same smart
+  subsets. OOLONG: **14/15 exact** (`accuracy 0.933`, `num-acc 0.998`), `$3.3086`.
+  FanOutQA: **loose-acc 0.704** (`strict 7/15`), `$2.8873`. The FanOutQA strict
+  unmatched rows mix real semantic issues with scorer/gold under-credit; treat strict
+  as a diagnostic, not the headline.
 - Full public report: [`docs/EVALS.md`](../docs/EVALS.md).

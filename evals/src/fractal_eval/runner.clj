@@ -4,8 +4,9 @@
   cost, tokens, wall-clock, and the run dir for the engine path.
 
   Budget enforcement lives HERE, not in the engine — the engine has no governor yet.
-  The runner totals cost as it goes (engine cost from the run's usage.edn; flat cost
-  from the provider response) and refuses to start an example once the cap is hit."
+  The runner totals cost as it goes (engine cost derived from canonical session
+  calls; flat cost from the provider response) and refuses to start an example once
+  the cap is hit."
   (:require [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cliopts :as cli]
             [fractal-engine.process :as process]
@@ -33,9 +34,9 @@
 
 (defn- usage-from-locator
   "Pull {:cost-usd :tokens-in :tokens-out :tokens-total} from the canonical
-  session store. Older evals read usage.edn from a run dir; the canonical session
-  model stores calls in SQLite/blob facts, so usage must be derived from the
-  completed session locator."
+  session store. Older evals read a file-based usage summary from a run dir; the
+  canonical session model stores calls in SQLite/blob facts, so usage must be derived
+  from the completed session locator."
   [locator]
   (let [v (session-db/view (artifacts/store-root-for-locator locator)
                            (artifacts/session-id-for-locator locator))
