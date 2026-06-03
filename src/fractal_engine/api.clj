@@ -11,10 +11,7 @@
             [fractal-engine.provenance :as provenance]
             [fractal-engine.provider :as provider]
             [fractal-engine.session :as session]
-            [fractal-engine.session-db :as session-db]
-            [fractal-engine.store.consistency :as store-consistency]
-            [fractal-engine.store.index :as store-index]
-            [fractal-engine.store.schema :as store-schema]))
+            [fractal-engine.session-db :as session-db]))
 
 ;; Configuration
 
@@ -129,6 +126,20 @@
   [locator]
   (projection/event-stream locator))
 
+(defn event-trace
+  "Return an operator-facing audit trace for a session locator.
+
+  Trace rows are derived from compact canonical event rows plus typed row
+  metadata. They include row refs, summaries, and causal refs without resolving
+  large payload blobs."
+  [locator]
+  (projection/event-trace locator))
+
+(defn event-chain
+  "Return causal ancestors plus `event-id` for a session locator."
+  [locator event-id]
+  (projection/event-chain locator event-id))
+
 (defn progress
   "A lightweight, ref-free live snapshot of a session locator. Pairs with
   `run-turn-async!`."
@@ -141,14 +152,16 @@
   Returns a report map with typed issue maps in `:issues`; ordinary consistency
   failures are reported, not thrown."
   ([store-root]
-   (store-consistency/check-consistency store-root))
+   ((requiring-resolve 'fractal-engine.store.consistency/check-consistency) store-root))
   ([store-root opts]
-   (store-consistency/check-consistency store-root opts)))
+   ((requiring-resolve 'fractal-engine.store.consistency/check-consistency) store-root opts)))
 
 (defn rebuild-index!
   "Rebuild the derived Datahike index from canonical SQLite rows and BlobStore refs."
   [store-root]
-  (store-index/rebuild! store-root store-schema/schema))
+  ((requiring-resolve 'fractal-engine.store.index/rebuild!)
+   store-root
+   (var-get (requiring-resolve 'fractal-engine.store.schema/schema))))
 
 (defn list-sessions
   "List canonical session records under `store-root`."

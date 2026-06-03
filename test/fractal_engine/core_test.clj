@@ -256,6 +256,16 @@
         snapshot-row (last (:snapshots view))
         snapshot-blob (snapshot/require-snapshot-blob locator snapshot-row)
         events (projection/event-stream locator)
+        trace (projection/event-trace locator)
+        head-trace (first (filter #(and (= :head/created (:event/type %))
+                                        (= (:head/id head)
+                                           (get-in % [:trace/row :ref/id])))
+                                  trace))
+        ref-trace (first (filter #(and (= :session/ref-updated (:event/type %))
+                                       (= (:head/id head)
+                                          (get-in % [:trace/row :ref/id])))
+                                 trace))
+        ref-chain (projection/event-chain locator (:event/id ref-trace))
         event-payload-refs (attr-values root :event/payload-ref)
         files (->> (file-seq (java.io.File. root)) (map #(.getName %)) set)]
     (is (= 1 (:final node)))
@@ -293,6 +303,21 @@
       (is (not (str/includes? (pr-str events) ":message/content")))
       (is (not (str/includes? (pr-str events) ":eval/code")))
       (is (not (str/includes? (pr-str events) ":request/messages"))))
+    (testing "event trace is a causal audit surface, not a restore surface"
+      (is (= (count events) (count trace)))
+      (is (every? :trace/summary trace))
+      (is (every? :trace/row trace))
+      (is (not (str/includes? (pr-str trace) ":message/content")))
+      (is (not (str/includes? (pr-str trace) ":eval/code")))
+      (is (some #(= {:ref/kind :snapshot
+                     :ref/id (str (:head/snapshot-id head))}
+                  %)
+                (:trace/causes head-trace))
+          "head creation is causally linked to the snapshot it seals")
+      (is (some #{(:event/id head-trace)} (:trace/cause-event-ids ref-trace))
+          "current-head ref movement is causally linked to the head event")
+      (is (= (:event/id ref-trace) (:event/id (last ref-chain))))
+      (is (some #(= :head/created (:event/type %)) ref-chain)))
     (testing "runtime did not create legacy per-session source files"
       (is (not (contains? files "session.edn")))
       (is (not (contains? files "events.ednl")))

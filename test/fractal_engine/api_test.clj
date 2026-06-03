@@ -47,7 +47,10 @@
         loaded (fe/load-at locator "root")
         tree (fe/tree locator)
         provenance (fe/node-provenance locator "root")
-        events (fe/event-stream locator)]
+        events (fe/event-stream locator)
+        trace (fe/event-trace locator)
+        ref-event (first (filter #(= :session/ref-updated (:event/type %)) trace))
+        chain (fe/event-chain locator (:event/id ref-event))]
     (is (= :final (:status result)))
     (is (= {:answer 42} (:final-value result)))
     (is (= :stopped (:session/status stopped)))
@@ -56,6 +59,10 @@
     (is (= (:final node) (:final provenance)))
     (is (= "root" (:address tree)))
     (is (pos? (count events)))
+    (is (= (count events) (count trace)))
+    (is (seq (:trace/causes ref-event)))
+    (is (= (:event/id ref-event) (:event/id (last chain))))
+    (is (some #(= :head/created (:event/type %)) chain))
     (is (= locator (fe/node-locator locator "root")))
     (is (= :ok (:status (fe/check-consistency runs-dir))))))
 

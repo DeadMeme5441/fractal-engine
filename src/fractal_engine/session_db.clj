@@ -13,10 +13,8 @@
             [fractal-engine.event :as event]
             [fractal-engine.session-sqlite :as sqlite]
             [fractal-engine.session-model :as session-model]
-            [fractal-engine.store.index :as store-index]
             [fractal-engine.store.io :as store-io]
             [fractal-engine.store.payload :as store-payload]
-            [fractal-engine.store.schema :as store-schema]
             [fractal-engine.store.value :as store-value]
             [fractal-engine.time :as time]
             [taoensso.timbre :as timbre])
@@ -60,18 +58,6 @@
 (defn store-root
   [session]
   (some-> (get-in session [:session/storage :storage/root]) store-path))
-
-(defn- index-current!
-  [root]
-  (store-index/ensure-current! root store-schema/schema))
-
-(defn- index-q
-  [root query & args]
-  (apply store-index/q root store-schema/schema query args))
-
-(defn- index-pull
-  [root pattern lookup-ref]
-  (store-index/pull root store-schema/schema pattern lookup-ref))
 
 (defn transact-facts!
   [root blob-refs facts]
@@ -282,7 +268,8 @@
        :event/head-id (:caller/head-after i)})
 
     {:event/row-kind :annotation
-     :event/row-id (str (or (:call/id ev)
+     :event/row-id (str (or (:invocation/id ev)
+                            (:call/id ev)
                             (:turn/id ev)
                             (:snapshot/id ev)
                             (:head/id ev)
@@ -290,6 +277,7 @@
                             (:event/id ev)))
      :event/call-id (some-> (:call/id ev) long)
      :event/turn-id (some-> (:turn/id ev) long)
+     :event/invocation-id (:invocation/id ev)
      :event/snapshot-id (some-> (:snapshot/id ev) long)
      :event/head-id (:head/id ev)
      :event/status (or (:call/status ev) (:restore/status ev))}))

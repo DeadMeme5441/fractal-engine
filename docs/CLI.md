@@ -149,10 +149,31 @@ Resolve a node's leaf call inputs and outputs from BlobStore.
 
 Print one model/eval step in full.
 
+### `events <run>`
+
+Print the agent/operator audit view for a session. This is the readable event-log
+surface: a compact panel plus a timeline of meaningful facts such as model calls,
+`FINAL`, snapshots, checkpoint sealing, child invocation, and current-head movement.
+
+Use `--event N` to focus on one event's causal chain:
+
+```bash
+fractal events demo
+fractal events demo --event 12
+fractal events demo --limit 40
+fractal events demo --json
+```
+
+`events` suppresses repetitive progress churn by default. It does not resolve raw
+payload blobs and is not a restore/replay mechanism. It is for understanding what
+happened and why a checkpoint, call, invocation, or ref movement exists. See
+[`EVENT_LOG.md`](EVENT_LOG.md).
+
 ### `stream <run>` (alias `tail`)
 
 Print canonical event facts as JSONL in append order. This is not `tail events.ednl`; no
-session event file is required.
+session event file is required. Use `stream` when you want raw compact event rows for
+another program; use `events` when a human or agent needs the audit trace.
 
 ## Engine options
 
@@ -203,6 +224,7 @@ fractal chat --provider vertex-gemini --model gemini-3.5-flash \
 
 # machine-readable events
 fractal stream demo | jq 'select(.["event/type"] == "call/started")'
+fractal events demo --event 12 --json | jq '.chain'
 fractal show demo --json | jq '.final'
 ```
 

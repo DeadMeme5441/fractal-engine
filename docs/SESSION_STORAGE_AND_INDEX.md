@@ -230,13 +230,24 @@ Blob payload examples:
 - rendered markdown/export bodies.
 
 Event payload blobs are not the normal event store. Persisted event records are compact
-SQLite rows with row identities and payload refs. A successful `:message/added` event
-points at the message row/content ref; `:eval/added` points at eval code/result/error
-refs; `:call/started` and `:call/put` point at call request/response/result/error refs;
-`:snapshot/added` points at the snapshot ref; `:head/created` points at head facts and
-the head state/final/snapshot refs. The same compact records are available to Datahike
-after index catch-up. Only exceptional annotation events may carry a small
-`:event/payload-ref` containing compact metadata.
+SQLite rows with append order, row identity, status, source ids, and payload refs. A
+successful `:message/added` event points at the message row/content ref; `:eval/added`
+points at eval code/result/error refs; `:call/started` and `:call/put` point at call
+request/response/result/error refs; `:snapshot/added` points at the snapshot ref;
+`:head/created` points at head facts and the head state/final/snapshot refs. The same
+compact records are available to Datahike after index catch-up. Only exceptional
+annotation events may carry a small `:event/payload-ref` containing compact metadata.
+
+The read surface has two levels:
+
+- `event-stream`: raw compact canonical event rows in append order;
+- `event-trace`: a derived audit trace over those rows plus typed row metadata. Trace
+  rows add `:trace/summary`, `:trace/row`, `:trace/causes`, and
+  `:trace/cause-event-ids` so an operator can ask "what caused this head/ref/call?"
+  without resolving raw payload blobs.
+
+The trace is an audit/provenance view. It is not a replay mechanism and it is not used
+to restore the REPL. Restore still reads `session/current-head -> head/state-ref`.
 
 Removed behavior:
 

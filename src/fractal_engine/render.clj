@@ -46,6 +46,7 @@
 (defn- status-glyph [status]
   (case (keyword status)
     :final   (c :green "●")
+    :ok      (c :green "✓")
     :running (c :yellow "◐")
     :error   (c :red "✗")
     (:stopped :final-reached) (c :gray "○")
@@ -406,7 +407,278 @@
                                (c :dim (format "%s calls   ↳ %s show %s %s"
                                                (get-in ch [:child/usage :usage/total-tree :call/count] "?")
                                                exe run (:child/session-id ch))))))
-                   kids)))))))
+	                   kids)))))))
+
+;; ── events (audit log: what happened, in order, and why) ─────────────────────
+
+(defn- event-status [row]
+  (or (:event/status row)
+      (get-in row [:trace/row-data :call/status])
+      (get-in row [:trace/row-data :turn/status])
+      (get-in row [:trace/row-data :eval/status])
+      (get-in row [:trace/row-data :invocation/status])
+      (get-in row [:trace/row-data :head/status])))
+
+(defn- event-glyph [type status]
+  (case type
+    :session/started (c :gray "○")
+    :session/status (status-glyph status)
+    :session/error (c :red "✗")
+    :session/restored (c :cyan "↺")
+    :message/added (c :blue "▸")
+    :turn/started (c :yellow "◐")
+    :turn/put (status-glyph status)
+    :eval/added (c :magenta "λ")
+    :call/started (c :cyan "↗")
+    :call/put (status-glyph status)
+    :snapshot/added (c :blue "◫")
+    :head/created (c :green "◆")
+    :session/ref-updated (c :green "→")
+    :invocation/started (c :cyan "↳")
+    :invocation/completed (c :green "✓")
+    :invocation/failed (c :red "✗")
+    :invocation/caller-head-recorded (c :green "↰")
+    (c :gray "·")))
+
+(defn- short-id [x]
+  (let [s (str x)]
+    (cond
+      (str/starts-with? s "head-") (subs s 0 (min (count s) 13))
+      (str/starts-with? s "session-") (subs s 0 (min (count s) 16))
+      :else s)))
+
+(defn- cause-brief [row]
+  (when-let [ids (seq (:trace/cause-event-ids row))]
+    (str " because #" (str/join ",#" ids))))
+
+(defn- call-kind [row]
+  (get-in row [:trace/row-data :call/type]))
+
+(defn- call-start-title [kind]
+  (cond
+    (= :root kind) "root model called"
+    (#{:leaf :leaf-batch-item} kind) "leaf called"
+    (#{:child :child-batch-item :attached-child :attached-session} kind) "child called"
+    :else "model called"))
+
+(defn- call-finish-title [kind]
+  (cond
+    (= :root kind) "root answered"
+    (#{:leaf :leaf-batch-item} kind) "leaf answered"
+    (#{:child :child-batch-item :attached-child :attached-session} kind) "child answered"
+    :else "model answered"))
+
+(defn- event-title [row]
+  (let [type (:event/type row)
+        data (:trace/row-data row)]
+    (case type
+      :session/started "session opened"
+      :session/status (if (= :stopped (:event/status row)) "session stopped" "session status")
+      :session/error "session errored"
+      :session/restored "state restored"
+      :session/final "final stored"
+      :message/added (case (:message/role data)
+                       :system "system prompt"
+                       :user "user input"
+                       :assistant "model response"
+                       :observation "repl observation"
+                       "message stored")
+      :turn/started "turn started"
+      :turn/put (case (:event/status row)
+                  :final "turn settled"
+                  :error "turn failed"
+                  :timeout "turn timed out"
+                  "turn updated")
+      :eval/added (case (:event/status row)
+                    :final "FINAL returned"
+                    :error "repl failed"
+                    "repl evaluated")
+      :call/started (call-start-title (call-kind row))
+      :call/put (call-finish-title (call-kind row))
+      :snapshot/added "snapshot saved"
+      :head/created (if (:head/turn-id data) "checkpoint sealed" "genesis checkpoint")
+      :session/ref-updated "session advanced"
+      :invocation/started "child opened"
+      :invocation/completed "child settled"
+      :invocation/failed "child failed"
+      :invocation/caller-head-recorded "caller linked"
+      (name type))))
+
+(defn- event-detail [row]
+  (let [type (:event/type row)
+        data (:trace/row-data row)]
+    (case type
+      :session/started (str "id " (:event/session row))
+      :session/status (str "status " (:event/status row))
+      :session/error "error payload recorded"
+      :session/restored (str "from " (or (:event/source-head-id row)
+                                         (:event/source-session-id row)
+                                         "source head"))
+      :session/final "turn produced a return value"
+      :message/added (format "#%s · %s chars"
+                             (or (:message/id data) (get-in row [:trace/row :ref/id]))
+                             (or (:message/char-count data) "?"))
+      :turn/started (format "#%s · from %s"
+                            (or (:turn/id data) (get-in row [:trace/row :ref/id]))
+                            (short-id (:turn/head-before data)))
+      :turn/put (format "#%s · %s"
+                        (or (:turn/id data) (get-in row [:trace/row :ref/id]))
+                        (or (:event/status row) (:turn/status data) "updated"))
+      :eval/added (format "#%s · message #%s"
+                          (or (:eval/id data) (get-in row [:trace/row :ref/id]))
+                          (or (:eval/message-id data) "?"))
+      :call/started (format "#%s · %s/%s"
+                            (or (:call/id data) (get-in row [:trace/row :ref/id]))
+                            (or (:call/provider data) "?")
+                            (or (:call/model data) "?"))
+      :call/put (format "#%s · %s"
+                        (or (:call/id data) (get-in row [:trace/row :ref/id]))
+                        (or (:event/status row) (:call/status data) "stored"))
+      :snapshot/added (format "#%s · turn %s"
+                              (or (:snapshot/id data) (get-in row [:trace/row :ref/id]))
+                              (or (:snapshot/turn-id data) "?"))
+      :head/created (format "%s · turn %s · snapshot %s"
+                            (short-id (or (:head/id data) (get-in row [:trace/row :ref/id])))
+                            (or (:head/turn-id data) "genesis")
+                            (or (:head/snapshot-id data) "none"))
+      :session/ref-updated (str "current checkpoint -> "
+                                (short-id (get-in row [:trace/row :ref/id])))
+      :invocation/started (format "%s · %s"
+                                  (short-id (or (:invocation/id data)
+                                                (get-in row [:trace/row :ref/id])))
+                                  (or (:invocation/type data) "child"))
+      :invocation/completed (format "%s · callee %s"
+                                    (short-id (or (:invocation/id data)
+                                                  (get-in row [:trace/row :ref/id])))
+                                    (or (:callee/session data) "?"))
+      :invocation/failed (short-id (or (:invocation/id data)
+                                       (get-in row [:trace/row :ref/id])))
+      :invocation/caller-head-recorded (str "caller -> " (short-id (:caller/head-after data)))
+      (clip (one-line (:trace/summary row)) 92))))
+
+(defn- turn-update? [row]
+  (= :turn/put (:event/type row)))
+
+(defn- visible-event? [row]
+  (not (or (turn-update? row)
+           (= :session/final (:event/type row))
+           (= :turn-final (:event/type row))
+           (= :session-stopped (:event/type row)))))
+
+(defn- event-line [row]
+  (let [type (:event/type row)
+        status (event-status row)]
+    (format "  %s #%04d  %-22s %s%s"
+            (event-glyph type status)
+            (:event/id row)
+            (clip (event-title row) 22)
+            (clip (event-detail row) 92)
+            (c :dim (or (cause-brief row) "")))))
+
+(defn- event-summary [rows]
+  (let [visible (filter visible-event? rows)
+        calls (filter #(= :call/started (:event/type %)) rows)
+        leaves (filter #(#{:leaf :leaf-batch-item} (call-kind %)) calls)
+        children (filter #(= :invocation/started (:event/type %)) rows)
+        checkpoints (filter #(and (= :head/created (:event/type %))
+                                  (get-in % [:trace/row-data :head/turn-id]))
+                            rows)
+        errors (filter #(or (= :session/error (:event/type %))
+                            (= :error (event-status %)))
+                       rows)
+        current (last (filter #(= :session/ref-updated (:event/type %)) rows))]
+    {:total (count rows)
+     :visible (count visible)
+     :turns (count (filter #(= :turn/started (:event/type %)) rows))
+     :calls (count calls)
+     :leaves (count leaves)
+     :children (count children)
+     :checkpoints (count checkpoints)
+     :errors (count errors)
+     :current-head (get-in current [:trace/row :ref/id])
+     :current-event (:event/id current)}))
+
+(defn- plural [n singular]
+  (str n " "
+       (if (= 1 n)
+         singular
+         (case singular
+           "leaf" "leaves"
+           "child" "children"
+           (str singular "s")))))
+
+(defn- selected-event-description [rows event-id]
+  (when-let [row (first (filter #(= event-id (:event/id %)) rows))]
+    (str (event-title row) " · " (event-detail row))))
+
+(defn event-trace-str
+  "Render the event-log audit surface. Unlike `stream`, this is for humans and
+  agents operating the engine: milestones, checkpoint movement, and causal
+  breadcrumbs with follow-up commands."
+  [run rows {:keys [exe event-id limit]}]
+  (let [exe (or exe "fractal")
+        rows (vec rows)
+        chain? (some? event-id)
+        visible (if chain?
+                  (vec (remove #(or (and (turn-update? %)
+                                         (not (#{:final :error :timeout} (:event/status %))))
+                                    (= :session/final (:event/type %))
+                                    (= :turn-final (:event/type %))
+                                    (= :session-stopped (:event/type %)))
+                               rows))
+                  (vec (filter visible-event? rows)))
+        shown (if (and limit (> (count visible) limit))
+                (subvec visible (- (count visible) limit))
+                visible)
+        summary (event-summary rows)]
+    (str
+     (c :bold (if chain?
+                (format "why event #%s — %s" event-id run)
+                (format "audit — %s" run)))
+     "\n"
+     (if chain?
+       (str "  " (or (selected-event-description rows event-id) "causal chain")
+            "\n  " (count rows) " linked facts"
+            (when (not= (count rows) (count shown))
+              (str " · showing " (count shown) " useful facts"))
+            "\n")
+       (format "  %s · %s · %s · %s · %s · %s%s\n"
+               (plural (:total summary) "fact")
+               (plural (:turns summary) "turn")
+               (plural (:calls summary) "model call")
+               (plural (:leaves summary) "leaf")
+               (plural (:children summary) "child")
+               (plural (:checkpoints summary) "checkpoint")
+               (if (pos? (:errors summary))
+                 (str " · " (plural (:errors summary) "error"))
+                 "")))
+     (when-let [head (:current-head summary)]
+       (str "  current checkpoint " (short-id head)
+            (when-let [eid (:current-event summary)] (str " via event #" eid))
+            "\n"))
+     (str "  " (c :dim "event log explains what happened; checkpoints restore state") "\n\n")
+     (c :bold (if chain? "chain" "timeline"))
+     "\n"
+     (if (seq shown)
+       (str/join "\n" (map event-line shown))
+       "  no events")
+     "\n\n"
+     (c :dim "next:")
+     "\n"
+     (let [why-event (or (and (not chain?) (:current-event summary))
+                         (:event/id (last shown)))
+           entries (remove nil?
+                           [[(str exe " show " run) "# inspect current checkpoint"]
+                            (when why-event
+                              [(str exe " events " run " --event " why-event)
+                               "# ask why that fact happened"])
+                            [(str exe " stream " run) "# raw JSONL facts for scripts"]
+                            [(str exe " inspect " run " --json") "# structured detail"]])
+           width (+ 2 (apply max 24 (map (comp count first) entries)))]
+       (str/join "\n"
+                 (map (fn [[cmd note]]
+                        (format (str "  %-" width "s %s") cmd note))
+                      entries))))))
 
 ;; ── chat: live progress + per-turn summary (the "second brain" you talk to) ───
 

@@ -149,7 +149,9 @@ active output. History and progress reads use SQLite rows directly, so they rema
 mid-run. No command requires Datahike or a generated projection file to exist.
 The history/event stream is a compact audit surface: append order, event type, row
 identity, status, source ids, and payload refs. It is not the current-state source and is
-not a byte-for-byte replay of the rich in-memory event values.
+not a byte-for-byte replay of the rich in-memory event values. The derived event trace
+adds summaries and causal refs over that compact stream for operators and product UIs;
+it still does not participate in restore.
 
 ## Concurrency
 

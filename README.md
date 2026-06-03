@@ -37,7 +37,8 @@ recursions. It is built in the spirit of
 
 **Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/API.md`](docs/API.md) ·
 [`docs/CLI.md`](docs/CLI.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
-[`docs/CODEBRAIN.md`](docs/CODEBRAIN.md) · [`docs/EVALS.md`](docs/EVALS.md)
+[`docs/CODEBRAIN.md`](docs/CODEBRAIN.md) · [`docs/EVENT_LOG.md`](docs/EVENT_LOG.md) ·
+[`docs/EVALS.md`](docs/EVALS.md)
 
 ---
 
@@ -186,7 +187,7 @@ The engine is published to [Clojars](https://clojars.org/net.clojars.deadmeme544
 Add it to `deps.edn`:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.0"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.1"}}}
 ```
 
 The CLI is one consumer of the engine. Clojure applications should prefer the stable
@@ -222,7 +223,8 @@ surface or change engine behavior. That surface remains exactly `FINAL`, `lm`,
 Applications may put their own Clojure namespaces on the classpath and ask the model,
 through the overlay or task prompt, to require and use them. Session state stays
 engine-shaped and can be read with `fe/load-node`, `fe/load-at`, `fe/tree`,
-`fe/event-stream`, `fe/check-consistency`, and the claim/provenance helpers. Full reference:
+`fe/event-trace`, `fe/event-stream`, `fe/check-consistency`, and the
+claim/provenance helpers. Full reference:
 [`docs/API.md`](docs/API.md).
 
 ## The `fractal` CLI
@@ -259,12 +261,31 @@ fractal trace  <run> [node]   # claim provenance
 fractal cost   <run>          # spend breakdown
 fractal leaves <run> [node]   # leaf inputs/outputs
 fractal step   <run> [node] N # one step, in full
+fractal events <run>          # agent/operator audit timeline
 fractal stream <run>          # canonical events as JSONL
 ```
 
 A **node address** is `root`, `child-0001`, or `child-0001/child-0004` — the leading
 `root/` is implied. Drilling is just following the addresses a node view prints for its
 children.
+
+### Audit (what happened and why)
+
+`fractal events <run>` is the product-grade event-log UI. It shows a compact audit
+panel: total facts, turns, model calls, leaves, children, checkpoints, the current
+checkpoint, and a timeline of meaningful facts such as model calls, `FINAL`, snapshot
+capture, checkpoint sealing, and ref movement.
+
+```bash
+fractal events <run>
+fractal events <run> --event 31   # causal chain for one fact
+fractal events <run> --limit 40   # keep large runs readable
+```
+
+Use `fractal stream <run>` when a script wants raw JSONL compact facts. Use
+`fractal events <run>` when a human or agent needs to understand the run. The event log
+explains what happened; immutable head state restores the REPL. Full guide:
+[`docs/EVENT_LOG.md`](docs/EVENT_LOG.md).
 
 **Exit codes:** `0` final · `1` error · `2` no-final · `3` timeout · `5` confabulation
 suspected. So you can gate on them: `fractal verify <run> --deep --root . && deploy`.

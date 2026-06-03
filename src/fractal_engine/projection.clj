@@ -8,6 +8,7 @@
   child's address. Same scheme on the CLI and (later) in the TUI."
   (:require [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
+            [fractal-engine.event-log :as event-log]
             [fractal-engine.session-db :as session-db]))
 
 ;; ── canonical events → view ───────────────────────────────────────────────────
@@ -31,6 +32,20 @@
   [locator]
   (session-db/history-view (artifacts/store-root-for-locator locator)
                            (artifacts/session-id-for-locator locator)))
+
+(defn event-trace
+  "Operator-facing audit trace for a session locator.
+
+  This derives summaries and causal refs from compact canonical event rows plus
+  typed row metadata. It never reads raw payload blobs and is not used for
+  restore."
+  [locator]
+  (event-log/trace (history-view locator)))
+
+(defn event-chain
+  "Causal ancestors plus the requested event, in causal order."
+  [locator event-id]
+  (event-log/causal-chain (event-trace locator) event-id))
 
 (defn resolve-ref
   "Resolve a payload blob ref against its session locator.

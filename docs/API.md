@@ -90,6 +90,8 @@ generated projection files.
 |---|---|
 | `view` | dereference the current or selected head state into the materialized session view |
 | `event-stream` | read compact canonical event records in append order |
+| `event-trace` | derive an operator audit trace from compact event rows |
+| `event-chain` | return causal ancestors plus one event |
 | `progress` | lightweight mid-run status for polling |
 | `load-node` | load one node, including steps, leaves, children, and final value |
 | `load-at` | resolve an address within a root run and load that node |
@@ -105,6 +107,8 @@ Example:
 (def root (fe/load-node locator))
 (def full-tree (fe/tree locator))
 (def events (fe/event-stream locator))
+(def trace (fe/event-trace locator))
+(def cause-chain (fe/event-chain locator 12))
 (def report (fe/check-consistency ".fractal"))          ; deep by default
 (def quick (fe/check-consistency ".fractal" {:mode :quick}))
 (fe/rebuild-index! ".fractal")
@@ -117,6 +121,11 @@ abandoned branch events remain available through `event-stream`, inspection deta
 direct relationship queries. `event-stream` returns compact audit records: event id,
 type, session, timestamp, row identity, status, source ids, and payload refs. It does not
 duplicate full message/eval/call/snapshot/head payloads.
+
+`event-trace` is the operator layer over `event-stream`. It adds compact summaries and
+derived causal refs such as "this ref update was caused by this head event" or "this
+head was sealed from this snapshot." `event-chain` walks those refs for a single event.
+Both are audit views; restore and resume still dereference immutable head state roots.
 
 `progress` remains useful while a turn is in flight because calls, messages,
 invocations, and progress rows are committed as events arrive.

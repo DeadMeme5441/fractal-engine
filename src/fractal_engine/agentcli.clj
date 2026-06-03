@@ -13,6 +13,7 @@
                                              fractal cost   <run>          spend
                                              fractal leaves <run> [node]   leaf I/O
                                              fractal step   <run> [node] N one step
+                                             fractal events <run>          audit trace
                                              fractal stream <run>          events as JSONL
                                              fractal inspect <run>         full artifact dump
 
@@ -39,10 +40,7 @@
             [fractal-engine.render :as r]
             [fractal-engine.resume :as resume]
             [fractal-engine.session :as session]
-            [fractal-engine.session-db :as session-db]
-            [fractal-engine.store.consistency :as store-consistency]
-            [fractal-engine.store.index :as store-index]
-            [fractal-engine.store.schema :as store-schema]))
+            [fractal-engine.session-db :as session-db]))
 
 ;; ── argument parsing (positionals + flags, no ceremony) ───────────────────────
 
@@ -244,6 +242,30 @@
         {:out (str/join "\n" (map #(json/generate-string (json-safe %)) events))
          :exit 0}))))
 
+(defn cmd-events [pos flags]
+  (with-run pos flags
+    (fn [dir token]
+      (let [event-id (cli/parse-long-opt (:event flags))
+            limit (cli/parse-long-opt (:limit flags))
+            rows (if event-id
+                   (proj/event-chain dir event-id)
+                   (proj/event-trace dir))]
+        (cond
+          (and event-id (empty? rows))
+          (err (format "no event %s in %s" event-id token))
+
+          (:json flags)
+          {:out (json-str (if event-id
+                            {:event/id event-id :chain rows}
+                            {:events rows}))
+           :exit 0}
+
+          :else
+          {:out (r/event-trace-str token rows {:exe "fractal"
+                                               :event-id event-id
+                                               :limit limit})
+           :exit 0})))))
+
 (defn cmd-inspect
   "The offline inspector: a full dump of a run's artifacts. `show`/`tree`/`stream`
   are the focused read verbs; `inspect` is the everything-at-once view. Accepts a
@@ -296,7 +318,8 @@
         subcmd (first pos)]
     (case subcmd
       "check"
-      (let [report (store-consistency/check-consistency runs-dir)]
+      (let [check-consistency (requiring-resolve 'fractal-engine.store.consistency/check-consistency)
+            report (check-consistency runs-dir)]
         (if (:json flags)
           {:out (json-str report) :exit (if (= :ok (:status report)) 0 1)}
           {:out (if (= :ok (:status report))
@@ -308,9 +331,11 @@
            :exit (if (= :ok (:status report)) 0 1)}))
 
       "rebuild-index"
-      (do
-        (store-index/rebuild! runs-dir store-schema/schema)
-        (let [report (store-consistency/check-consistency runs-dir {:mode :quick})]
+      (let [rebuild! (requiring-resolve 'fractal-engine.store.index/rebuild!)
+            schema (var-get (requiring-resolve 'fractal-engine.store.schema/schema))
+            check-consistency (requiring-resolve 'fractal-engine.store.consistency/check-consistency)]
+        (rebuild! runs-dir schema)
+        (let [report (check-consistency runs-dir {:mode :quick})]
           (if (:json flags)
             {:out (json-str report) :exit (if (= :ok (:status report)) 0 1)}
             {:out (if (= :ok (:status report))
@@ -453,6 +478,7 @@
              "  fractal cost   <run>            spend breakdown\n"
              "  fractal leaves <run> [node]     leaf inputs/outputs\n"
              "  fractal step   <run> [node] N   one step, in full\n"
+             "  fractal events <run>            audit trace; --event N, --limit N\n"
              "  fractal stream <run>            canonical events as JSONL\n"
              "  fractal inspect <run>           full artifact dump (everything at once)\n\n"
              "store:\n"
@@ -470,7 +496,8 @@
    ;; read
    "show" cmd-show "tree" cmd-tree "prime" cmd-prime "ls" cmd-ls "list" cmd-ls
    "verify" cmd-verify "trace" cmd-trace "cost" cmd-cost "leaves" cmd-leaves
-   "step" cmd-step "stream" cmd-stream "tail" cmd-stream "inspect" cmd-inspect
+   "step" cmd-step "events" cmd-events "event-log" cmd-events
+   "stream" cmd-stream "tail" cmd-stream "inspect" cmd-inspect
    "store" cmd-store "check" cmd-store
    ;; meta
    "help" cmd-help "--help" cmd-help "-h" cmd-help})
