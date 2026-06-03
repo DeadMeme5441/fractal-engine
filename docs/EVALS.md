@@ -121,8 +121,8 @@ Rows the official scorer marked wrong but the final answer was semantically righ
 
 | id | reason |
 |---|---|
-| `71552a38345f892e` | all codons were present; the scorer missed labels and comma/`and` formatting |
-| `ff866ee3e2bf4820` | all Ivy League acre values were present; the scorer missed comma-normalized numbers and extra detail |
+| `71552a38345f892e` | all codons were present; strict string matching under-credited labels and comma/`and` formatting |
+| `ff866ee3e2bf4820` | all Ivy League acre values were present; strict string matching under-credited comma-normalized numbers and extra detail |
 | `146e74771fcf6a30` | founder ages matched the provided evidence; the gold was stale |
 
 Actually wrong rows:
@@ -131,7 +131,7 @@ Actually wrong rows:
 |---|---|
 | `29242cc91b49e88e` | returned only Samuel L. Jackson; incomplete for the cast-wide Academy Award question |
 | `ae1c3cec94b75e55` | age answer used a stale/as-of date and several ages were wrong |
-| `00065f204bddb94d` | missed J. K. Rowling's `1965` birth year |
+| `00065f204bddb94d` | omitted J. K. Rowling's `1965` birth year |
 | `585ead607ef66fb1` | included the United Kingdom via the wrong EGOT span interpretation |
 
 FanOutQA is useful as a fan-out and join stress test, but this run shows why it

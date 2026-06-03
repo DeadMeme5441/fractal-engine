@@ -42,12 +42,37 @@
     (is (every? #(= 1 (:correct? %)) results) "scripted answers match the gold")
     (is (= 1.0 (:accuracy (report/aggregate results))))))
 
+(deftest engine-mode-reads-cost-from-canonical-store
+  (let [answer-fn (fn [request]
+                    {:response/parts [{:part/type :text
+                                       :text "```clojure\n(FINAL {:answer 2})\n```"}]
+                     :response/usage {:usage/input-tokens 10
+                                      :usage/output-tokens 3
+                                      :usage/total-tokens 13}
+                     :response/cost {:cost/usd 0.25}})
+        cfg (runner/build-cfg {:runs-dir (tmp-dir)} :response-fn answer-fn)
+        examples (take 1 (dataset/load-examples oolong-fixture))
+        {:keys [results spent]}
+        (runner/run-batch {:cfg cfg :benchmark "oolong" :mode :engine} examples)
+        r (first results)]
+    (is (= 0.25 (:cost-usd r)))
+    (is (= 0.25 spent))
+    (is (= 13 (:tokens-total r)))))
+
 (deftest flat-mode-scores-correctly
   (let [cfg (runner/build-cfg {:runs-dir (tmp-dir)} :response-fn scripted-answer-fn)
         examples (dataset/load-examples oolong-fixture)
         {:keys [results]}
         (runner/run-batch {:cfg cfg :benchmark "oolong" :mode :flat} examples)]
     (is (= 2 (count results)))
+    (is (every? #(= 1 (:correct? %)) results))))
+
+(deftest parallelism-preserves-result-order
+  (let [cfg (runner/build-cfg {:runs-dir (tmp-dir)} :response-fn scripted-answer-fn)
+        examples (dataset/load-examples oolong-fixture)
+        {:keys [results]}
+        (runner/run-batch {:cfg cfg :benchmark "oolong" :mode :flat :parallelism 2} examples)]
+    (is (= (mapv :id examples) (mapv :id results)))
     (is (every? #(= 1 (:correct? %)) results))))
 
 (deftest budget-cap-stops-early

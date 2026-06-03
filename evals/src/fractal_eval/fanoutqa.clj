@@ -64,4 +64,5 @@
      :n-found found
      :loose-accuracy loose            ; HEADLINE metric (per-question recall of gold strings)
      :correct? (if strict? 1 0)        ; FanOutQA strict accuracy = all gold strings present
-     :missed (vec (keep (fn [[g gn]] (when-not (present? gn) g)) (map vector golds gnorm)))}))
+     :strict-unmatched-gold
+     (vec (keep (fn [[g gn]] (when-not (present? gn) g)) (map vector golds gnorm)))}))

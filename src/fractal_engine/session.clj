@@ -137,10 +137,11 @@
                                     :storage/root (str source-store-root)})))
         source-store-root (store-io/path (:store/root target))
         source-session-id (:session-id target)
+        target-head-id (:head-id target)
         source-locator (select-keys target [:store/root :session/id :head/id])
         snapshot-opts (cond-> {}
                         turn (assoc :turn turn)
-                        head (assoc :head head))
+                        (or head target-head-id) (assoc :head (or head target-head-id)))
         snapshot-row (snapshot/require-snapshot source-locator snapshot-opts)
         snapshot-blob (snapshot/require-snapshot-blob source-locator snapshot-row)
         source-session (or (session-db/read-session source-store-root source-session-id)
@@ -153,6 +154,7 @@
         source-cache-id (or (:session/cache-id source-session)
                             source-logical-id)
         source-head-id (or head
+                           target-head-id
                            (:head/id (first (filter #(= (:snapshot/id snapshot-row)
                                                         (:head/snapshot-id %))
                                                     (snapshot/heads source-locator))))

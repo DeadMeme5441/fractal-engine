@@ -5,6 +5,7 @@
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.blob-store :as blob]
             [fractal-engine.cache :as cache]
+            [fractal-engine.codebrain :as codebrain]
             [fractal-engine.inspect :as inspect]
             [fractal-engine.process :as process]
             [fractal-engine.projection :as projection]
@@ -179,6 +180,38 @@
     (is (str/includes? (:message/content user-message) "EDGE_TASK"))
     (is (= #{"scripted-child"} (set (map :call/model (:calls child-view))))
         "the invocation edge still uses the configured child model")))
+
+(deftest codebrain-prompts-calibrate-decomposition
+  (let [root "/repo"
+        overlay (codebrain/session-overlay root)
+        build (codebrain/build-message root)
+        ask (codebrain/ask-message "Where is the CLI dispatched?")]
+    (is (str/includes? overlay "Do not over-decompose."))
+    (is (str/includes? overlay "only spawn children for lanes that genuinely need"))
+    (is (str/includes? build "Do not spawn a child just because a folder exists."))
+    (is (str/includes? build "If Clojure/leaves were"))
+    (is (str/includes? build ":decomposition"))
+    (is (str/includes? ask "Use the cheapest sufficient work:"))
+    (is (str/includes? ask "rlm/map-rlm only when"))))
+
+(deftest codebrain-fake-script-builds-and-resumes-warm-map
+  (let [root (tmp-dir "codebrain")
+        flags {:runs-dir root :fake-script "codebrain" :max-turns "8" :max-fanout "8"}
+        init-result (codebrain/command ["init"] flags)
+        ask-result (codebrain/command ["ask" "Where is the loop?"] flags)
+        bdir (codebrain/brain-dir root)
+        m (codebrain/load-map bdir)
+        meta (codebrain/load-meta bdir)]
+    (is (= 0 (:exit init-result)))
+    (is (= 0 (:exit ask-result)))
+    (is (= "r" (:root m)))
+    (is (= {:strategy "bounded toy repo; no child needed"
+            :child-count 0
+            :leaf-count 0}
+           (:decomposition m)))
+    (is (= 1 (:turns meta)))
+    (is (str/includes? (:out ask-result) "the map knows 1 subsystem"))
+    (is (quick-ok? root))))
 
 (deftest model-facing-surface-is-exact
   (let [root (tmp-dir "surface")
@@ -516,6 +549,28 @@
     (is (str/includes? (pr-str (projection/history-view (:locator second-result))) second-head))
     (is (not (str/includes? fork-text "define y")))
     (is (not (str/includes? fork-text "def y")))
+    (is (quick-ok? root))))
+
+(deftest fork-from-stable-head-handle-uses_that_heads_snapshot
+  (let [root (tmp-dir "stable-handle-fork")
+        source (session/start-session!
+                (scripted-cfg root ["```clojure\n(def x 1)\n(FINAL {:x x})\n```"
+                                    "```clojure\n(def y 2)\n(FINAL {:x x :y y})\n```"])
+                {:id "source" :alias "source" :store-root root})
+        first-result (session/run-turn! source "define x")
+        first-head (:head-id first-result)
+        _second-result (session/run-turn! source "define y")
+        source-handle (session-model/invocation-handle "source" first-head (:cache-id first-result) root)
+        forked (session/fork-session!
+                (scripted-cfg root ["```clojure\n(FINAL {:x x :y-bound? (contains? (ns-publics *ns*) 'y)})\n```"])
+                source-handle
+                root
+                {:id "fork" :alias "fork"})
+        fork-result (session/run-turn! forked "fork from stable handle")
+        fork-session (session-db/read-session root "fork")]
+    (is (= {:x 1 :y-bound? false} (:final-value fork-result)))
+    (is (= first-head (get-in fork-session [:session/restored-from :source/head-id])))
+    (is (= 1 (get-in fork-session [:session/restored-from :source/snapshot-id])))
     (is (quick-ok? root))))
 
 (deftest attach-from-older-head-restores_exact_child_state_and_records_edges

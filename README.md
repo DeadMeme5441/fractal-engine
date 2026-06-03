@@ -170,8 +170,8 @@ So `cd ~/some-project && fractal run "..."` just works, and keeps that project's
 with that project. Point it somewhere else for a single command with `--runs-dir`:
 
 ```bash
-fractal run "..." --runs-dir /tmp/scratch-store
-fractal ls       --runs-dir /tmp/scratch-store
+fractal run "..." --runs-dir scratch-store
+fractal ls       --runs-dir scratch-store
 ```
 
 `.fractal/` is git-ignored by default. It contains the local SQLite fact/ref store, the

@@ -7,7 +7,7 @@
       --mode both --provider vertex-gemini --model gemini-3.5-flash \\
       --child-model gemini-3.5-flash \\
       --leaf-provider vertex-gemini --leaf-model gemini-3.1-flash-lite-preview \\
-      --limit 5 --budget-usd 30 --max-turns 15 --call-timeout-ms 120000 \\
+      --limit 5 --parallelism 5 --budget-usd 30 --max-turns 15 --call-timeout-ms 120000 \\
       --out evals/results/oolong-live
 
   --mode is flat | engine | engine-norec | both | all.
@@ -79,7 +79,10 @@
                      (dataset/limit-examples {:limit (parse-long-opt (:limit flags))}))
         cfg (runner/build-cfg (engine-opts flags))
         command (str "clojure -M:evals run " (str/join " " (map (fn [[k v]] (str "--" (name k) " " v)) flags)))
-        base-batch {:cfg cfg :benchmark benchmark :on-result progress}
+        base-batch {:cfg cfg
+                    :benchmark benchmark
+                    :on-result progress
+                    :parallelism (or (parse-long-opt (:parallelism flags)) 1)}
         ;; Which sub-modes run, in order, for this --mode. Multiple sub-modes share
         ;; ONE cumulative budget cap (threaded below).
         sub-modes (case mode
@@ -124,6 +127,7 @@
                    :seed (parse-long-opt (:seed flags))
                    :limits {:limit (parse-long-opt (:limit flags))
                             :budget-usd budget
+                            :parallelism (or (parse-long-opt (:parallelism flags)) 1)
                             :max-turns (parse-long-opt (:max-turns flags))
                             :max-fanout (parse-long-opt (:max-fanout flags))
                             :call-timeout-ms (parse-long-opt (:call-timeout-ms flags))}
@@ -161,7 +165,7 @@
       "run" (cmd-run flags)
       (do (println "fractal-eval — evaluation harness for fractal-engine\n")
           (println "  clojure -M:evals run --benchmark <oolong|fanoutqa> --data <file.jsonl>")
-          (println "      [--mode engine|flat|both] [--limit N] [--budget-usd N] [--out DIR]")
+          (println "      [--mode engine|flat|both] [--limit N] [--parallelism N] [--budget-usd N] [--out DIR]")
           (println "      [--provider P --model M --leaf-provider P --leaf-model M --child-model M]")
           (println "      [--max-turns N --max-fanout N --call-timeout-ms N] [--split NAME] [--notes ...]")
           (println "\n  Offline smoke test (no keys, no spend):  clojure -M:evals-test")))))
