@@ -422,6 +422,52 @@
     (is (= "main" (get-in inspected [:session :id])))
     (is (quick-ok? root))))
 
+(deftest request-cache-pins-explicit-ttl
+  (testing "request-cache defaults to an explicit 1h ttl, not the implicit server default"
+    (is (= "1h" (:ttl (cache/request-cache "sid" :agent))))
+    (is (= "1h" (:ttl (cache/request-cache "sid" :leaf nil)))
+        "nil ttl falls back to the explicit default rather than emitting no ttl")
+    (is (= "5m" (:ttl (cache/request-cache "sid" :agent "5m"))))
+    (is (true? (:enabled? (cache/request-cache "sid" :agent)))))
+  (testing "unsupported ttl values fail loudly instead of silently degrading to the server default"
+    (is (thrown? clojure.lang.ExceptionInfo (cache/request-cache "sid" :agent "30m")))
+    (is (= :fractal/invalid-cache-ttl
+           (try (cache/normalize-ttl "nope")
+                (catch clojure.lang.ExceptionInfo e (:error/type (ex-data e))))))))
+
+(deftest config-cache-ttl-default-and-override
+  (testing "config defaults cache-ttl to 1h and accepts a valid override"
+    (is (= "1h" (:cache-ttl (process/config {}))))
+    (is (= "5m" (:cache-ttl (process/config {:cache-ttl "5m"})))))
+  (testing "config rejects an unsupported cache-ttl at construction time"
+    (is (thrown? clojure.lang.ExceptionInfo (process/config {:cache-ttl "12h"})))))
+
+(deftest cache-ttl-threads_into_root_and_leaf_requests
+  (let [root (tmp-dir "cache-ttl")
+        responder (fn [request]
+                    (let [text (request-text request)]
+                      (cond
+                        (str/includes? text "DRIVE")
+                        "```clojure\n(def v (lm {:id 1} \"Return id as EDN.\" :edn))\n(FINAL {:leaf v})\n```"
+                        (some? (leaf-input request))
+                        (pr-str (:id (leaf-input request)))
+                        :else "```clojure\n(FINAL :unknown)\n```")))
+        cfg (assoc (scripted-fn-cfg root responder) :cache-ttl "1h")
+        s (session/start-session! cfg {:id "main" :alias "main" :store-root root})
+        result (session/run-turn! s "DRIVE")
+        view (projection/view (:locator result))
+        calls (:calls view)
+        root-call (first (filter #(= :root (:call/type %)) calls))
+        leaf-call (first (filter #(= :leaf (:call/type %)) calls))]
+    (is (= {:leaf 1} (:final-value result)))
+    (is (= "1h" (get-in root-call [:call/cache-request :ttl]))
+        "root agent calls carry the configured 1h cache ttl")
+    (is (= "1h" (get-in leaf-call [:call/cache-request :ttl]))
+        "leaf calls carry the configured cache ttl too")
+    (is (= "1h" (get-in (read-call-request root leaf-call) [:request/cache :ttl]))
+        "the rendered leaf request the provider receives carries the ttl")
+    (is (quick-ok? root))))
+
 (deftest final-keeps-session-live-resume-advances-and-fork-does-not_mutate_source
   (let [root (tmp-dir "lifecycle")
         cfg (scripted-cfg root ["```clojure\n(def saved 9)\n(FINAL {:saved saved})\n```"

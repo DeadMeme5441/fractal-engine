@@ -48,6 +48,7 @@
        (:max-fanout opts) (assoc :max-fanout (parse-long-opt (:max-fanout opts)))
        (:max-leaf-concurrency opts) (assoc :max-leaf-concurrency (parse-long-opt (:max-leaf-concurrency opts)))
        (:call-timeout-ms opts) (assoc :call-timeout-ms (parse-long-opt (:call-timeout-ms opts)))
+       (:cache-ttl opts) (assoc :cache-ttl (:cache-ttl opts))
        response-fn (assoc :scripted/response-fn response-fn)
        script (assoc :scripted/responses script)))))
 

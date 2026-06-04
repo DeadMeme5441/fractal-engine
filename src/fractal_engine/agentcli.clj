@@ -27,7 +27,7 @@
   Provider/model flags match the engine:
   `--provider`, `--model`, `--leaf-model`, `--child-model`, `--fake-script`,
   `--max-turns`, `--max-fanout`, `--max-leaf-concurrency`,
-  `--call-timeout-ms`."
+  `--call-timeout-ms`, `--cache-ttl` (5m|1h, default 1h)."
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.walk :as walk]

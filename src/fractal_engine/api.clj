@@ -20,8 +20,9 @@
 
   Accepts the same generic keys used by the engine, including `:runs-dir`,
   `:models`, `:max-turns`, `:max-fanout`, `:max-leaf-concurrency`,
-  `:call-timeout-ms`, `:retry`, and provider-specific test hooks such as
-  `:scripted/responses` or `:scripted/response-fn`."
+  `:call-timeout-ms`, `:cache-ttl` (\"5m\" or \"1h\", default \"1h\"), `:retry`,
+  and provider-specific test hooks such as `:scripted/responses` or
+  `:scripted/response-fn`."
   ([] (process/config))
   ([opts] (process/config opts)))
 

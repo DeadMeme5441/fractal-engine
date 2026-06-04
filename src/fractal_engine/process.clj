@@ -1,5 +1,6 @@
 (ns fractal-engine.process
   (:require [fractal-engine.artifacts :as artifacts]
+            [fractal-engine.cache :as cache]
             [fractal-engine.concurrent :as concurrent]
             [fractal-engine.leaf :as leaf]
             [fractal-engine.prompt :as prompt]
@@ -23,6 +24,12 @@
                :max-fanout 50
                :max-leaf-concurrency 50
                :call-timeout-ms 120000
+               ;; Explicit prompt-cache ttl. "1h" keeps the root transcript cached
+               ;; across long inter-step gaps (leaf fan-out, child recursion) instead
+               ;; of relying on Anthropic's implicit ephemeral default, which dropped
+               ;; from 1h to 5m on 2026-03-06. Override with --cache-ttl 5m for
+               ;; cost-sensitive short jobs. See fractal-engine.cache/default-ttl.
+               :cache-ttl cache/default-ttl
                :models provider/default-models
                ;; Retry transient transport failures by default. The SDK classifies
                ;; errors before retrying (`:retry true` -> llm.sdk.retry/default-policy):
@@ -44,7 +51,9 @@
                             (= (:leaf-concurrency/max m) max-leaf-concurrency))
                      (:leaf-concurrency/limiter m)
                      (concurrent/semaphore max-leaf-concurrency)))]
-     (cond-> (assoc cfg :leaf-concurrency/max max-leaf-concurrency)
+     (cond-> (assoc cfg
+                    :leaf-concurrency/max max-leaf-concurrency
+                    :cache-ttl (cache/normalize-ttl (:cache-ttl cfg)))
        limiter (assoc :leaf-concurrency/limiter limiter)))))
 
 (defn maybe-add-child-finalization-warning! [state cfg turn-id step-n]

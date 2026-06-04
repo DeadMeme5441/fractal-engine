@@ -155,7 +155,8 @@
             (before-step state cfg turn-id step-n))
           (let [request (provider-call/provider-request
                          (:messages @state)
-                         (cache/request-cache (provider-call/session-cache-id state) :agent))
+                         (cache/request-cache (provider-call/session-cache-id state)
+                                              :agent (:cache-ttl cfg)))
                 step (try
                        (let [{:keys [call-id response]} (provider-call/call-provider!
                                                          state cfg :root

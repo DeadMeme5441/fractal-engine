@@ -23,7 +23,8 @@
                      :call/mode mode
                      :request (provider-call/leaf-request
                                input query
-                               (cache/request-cache (provider-call/session-cache-id state) :leaf))}
+                               (cache/request-cache (provider-call/session-cache-id state)
+                                                    :leaf (:cache-ttl cfg)))}
                     extra)
         {:keys [call-id response]} (provider-call/call-provider! state cfg :leaf call)
         text (provider/response-text response)
