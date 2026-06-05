@@ -102,10 +102,10 @@
     (fn [request]
       (let [content (:message/content (last (:request/messages request)))]
         (cond
-          (clojure.string/includes? content "Build (or rebuild) your repo map")
+          (clojure.string/includes? content ":codebrain/op :build-map")
           "```clojure\n(def repo-map-checks {:used-map-rlm? false :reason \"toy map is bounded\"})\n(def repo-evidence [{:file \"a.clj\" :quote \"f\" :why \"entry symbol\"}])\n(def repo-map {:root \"r\" :overview \"toy repo\" :languages [\"clojure\"] :coverage {:included 1 :excluded 0 :subsystems 1 :unmapped 0} :subsystems [{:subsystem \"core\" :purpose \"the loop\" :key-files [{:path \"a.clj\" :role \"entry\" :symbols [\"f\"]}] :evidence repo-evidence}] :where-to-look [{:topic \"loop\" :start [\"a.clj\"]}] :entrypoints [{:path \"a.clj\" :what \"main\"}] :decomposition {:strategy \"bounded toy repo; no child needed\" :child-count 0 :leaf-count 0} :checks repo-map-checks :missing []})\n(FINAL repo-map)\n```"
 
-          (clojure.string/includes? content "Coding-agent query")
+          (clojure.string/includes? content ":codebrain/op :ask")
           "```clojure\n(FINAL {:answer (str \"the map knows \" (count (:subsystems repo-map)) \" subsystem(s); root=\" (:root repo-map)) :evidence [{:file \"a.clj\" :lines \"1-2\" :quote \"f\"}] :files-read [\"a.clj\"] :pointers [{:what \"start here\" :file \"a.clj\" :lines \"1\"}] :checks {:used-map? true :current-source-read? true :child-count 0 :leaf-count 0} :missing [] :map-stale? false})\n```"
 
           :else "```clojure\n(FINAL :ok)\n```")))

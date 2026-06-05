@@ -187,7 +187,7 @@ The engine is published to [Clojars](https://clojars.org/net.clojars.deadmeme544
 Add it to `deps.edn`:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.2"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.4"}}}
 ```
 
 The CLI is one consumer of the engine. Clojure applications should prefer the stable

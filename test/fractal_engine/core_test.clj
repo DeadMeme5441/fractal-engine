@@ -188,11 +188,16 @@
         ask (codebrain/ask-message "Where is the CLI dispatched?")]
     (is (str/includes? overlay "Do not over-decompose."))
     (is (str/includes? overlay "only spawn children for lanes that genuinely need"))
-    (is (str/includes? build "Do not spawn a child just because a folder exists."))
-    (is (str/includes? build "If Clojure/leaves were"))
-    (is (str/includes? build ":decomposition"))
-    (is (str/includes? ask "Use the cheapest sufficient work:"))
-    (is (str/includes? ask "rlm/map-rlm only when"))))
+    (is (str/includes? overlay "Operation contracts live here"))
+    (is (str/includes? (str/lower-case overlay)
+                       "do not spawn a child just because a folder exists."))
+    (is (str/includes? overlay "rlm/map-rlm only"))
+    (is (str/includes? build ":codebrain/op :build-map"))
+    (is (str/includes? ask ":codebrain/op :ask"))
+    (is (not (str/includes? build "Do not spawn a child just because a folder exists.")))
+    (is (not (str/includes? ask "Use the cheapest sufficient work:")))
+    (is (< (count build) 120))
+    (is (< (count ask) 180))))
 
 (deftest codebrain-fake-script-builds-and-resumes-warm-map
   (let [root (tmp-dir "codebrain")
