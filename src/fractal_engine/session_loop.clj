@@ -8,6 +8,7 @@
   head-boundary transition."
   (:require [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
+            [fractal-engine.context :as context]
             [fractal-engine.provider :as provider]
             [fractal-engine.provider-call :as provider-call]
             [fractal-engine.rlm :as rlm]
@@ -157,33 +158,41 @@
                          (:messages @state)
                          (cache/request-cache (provider-call/session-cache-id state)
                                               :agent (:cache-ttl cfg)))
-                step (try
-                       (let [{:keys [call-id response]} (provider-call/call-provider!
-                                                         state cfg :root
-                                                         {:call/type :root
-                                                          :call/turn-id turn-id
-                                                          :call/message-ids (mapv :message/id (:messages @state))
-                                                          :request request})
-                             content (provider/response-text response)
-                             assistant (artifacts/add-message! state :assistant content turn-id
-                                                               {:message/call-id call-id})]
-                         (artifacts/add-turn-id! state turn-id :turn/assistant-message-ids (:message/id assistant))
-                         (eval-assistant! state cfg ns-sym turn-id assistant))
-                       (catch clojure.lang.ExceptionInfo e
-                         (if (= :provider/failed (:error/type (ex-data e)))
-                           {:status :provider-error :error (ex-data e)}
-                           (throw e))))]
-            (cond
-              (= :provider-error (:status step))
-              (let [err (:error step)]
+                assessment (context/assess-request cfg :root (:request/messages request))]
+            (if (:context/over-hard? assessment)
+              (let [err {:error/type :fractal/context-limit
+                         :error/role :root
+                         :context assessment
+                         :error/retryable? true}]
                 (finish-input-error! state turn-id err)
                 (error-result state turn-id err))
+              (let [step (try
+                           (let [{:keys [call-id response]} (provider-call/call-provider!
+                                                             state cfg :root
+                                                             {:call/type :root
+                                                              :call/turn-id turn-id
+                                                              :call/message-ids (mapv :message/id (:messages @state))
+                                                              :request request})
+                                 content (provider/response-text response)
+                                 assistant (artifacts/add-message! state :assistant content turn-id
+                                                                   {:message/call-id call-id})]
+                             (artifacts/add-turn-id! state turn-id :turn/assistant-message-ids (:message/id assistant))
+                             (eval-assistant! state cfg ns-sym turn-id assistant))
+                           (catch clojure.lang.ExceptionInfo e
+                             (if (= :provider/failed (:error/type (ex-data e)))
+                               {:status :provider-error :error (ex-data e)}
+                               (throw e))))]
+                (cond
+                  (= :provider-error (:status step))
+                  (let [err (:error step)]
+                    (finish-input-error! state turn-id err)
+                    (error-result state turn-id err))
 
-              (= :final (:status step))
-              (commit-final-head! state ns-sym turn-id step)
+                  (= :final (:status step))
+                  (commit-final-head! state ns-sym turn-id step)
 
-              :else
-              (recur (inc step-n)))))))))
+                  :else
+                  (recur (inc step-n)))))))))))
 
 (defn open-input!
   [state user-message]

@@ -124,6 +124,29 @@
       (is (= :stopped (get-in (fe/view (:locator one-shot))
                               [:session :session/status]))))))
 
+(deftest public-api-compacts-live-session-current-head
+  (let [runs-dir (tmp-dir "compact")
+        response-fn (fn [request]
+                      (let [text (req-last-user request)]
+                        (cond
+                          (str/includes? text "Create a compact continuation user message")
+                          "Continuation frame: saved remains available as a restored REPL var."
+
+                          (str/includes? text "seed")
+                          "```clojure\n(def saved 7)\n(FINAL {:saved saved})\n```"
+
+                          :else
+                          "```clojure\n(FINAL {:restored saved})\n```")))
+        cfg (fe/config {:runs-dir runs-dir :scripted/response-fn response-fn})
+        s (fe/start-session! cfg {:id "compact" :store-root runs-dir})
+        seed (fe/run-turn! s "seed")
+        compacted (fe/compact-session! s)
+        resumed (fe/run-turn! s "use restored var")]
+    (fe/stop-session! s)
+    (is (= {:saved 7} (:final-value seed)))
+    (is (= :compacted (:status compacted)))
+    (is (= {:restored 7} (:final-value resumed)))))
+
 (deftest public-api-exposes-trust-and-provider-data
   (let [final {:risk {:description "grounded"
                       :evidence "src/fractal_engine/api.clj: `start-session!` is public"}}

@@ -22,6 +22,12 @@ brain session itself is a canonical session in the engine store. You **born it o
 it builds its repo map; each **ask resumes** that same brain (its map and REPL vars stay
 warm) and advances the brain's current head.
 
+Long-lived brains use the same provider-history compaction as any other session. If an
+ask would push the root provider transcript near the model window, the engine first
+advances the brain to a compacted head with a model-generated continuation frame. The
+repo-map vars and prior heads remain durable; codebrain does not append operational
+rules on every ask to solve context pressure.
+
 ## Why a brain and not a regex index
 
 The repo map is **not** a deterministic symbol dump. The brain builds it the way

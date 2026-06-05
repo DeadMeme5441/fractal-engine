@@ -46,15 +46,18 @@
     (cache/sha256-string content)))
 
 (defn root-request-descriptor [model-cfg call request cache-request]
-  {:request/version 2
-   :request/kind :root-agent
-   :request/rendered? false
-   :request/message-ids (:call/message-ids call)
-   :request/message-count (count (:request/messages request))
-   :request/system-hash (request-system-hash request)
-   :request/cache cache-request
-   :request/provider (:provider model-cfg)
-   :request/model (:model model-cfg)})
+  (cond-> {:request/version 2
+           :request/kind (or (:call/request-kind call) :root-agent)
+           :request/rendered? false
+           :request/message-ids (:call/message-ids call)
+           :request/message-count (count (:request/messages request))
+           :request/system-hash (request-system-hash request)
+           :request/cache cache-request
+           :request/provider (:provider model-cfg)
+           :request/model (:model model-cfg)}
+    (:call/purpose call) (assoc :request/purpose (:call/purpose call))
+    (:call/source-head-id call) (assoc :request/source-head-id (:call/source-head-id call))
+    (:call/source-message-count call) (assoc :request/source-message-count (:call/source-message-count call))))
 
 (defn call-payload-ref! [state part value]
   (artifacts/value-ref! (:locator @state)

@@ -427,6 +427,120 @@
     (is (= "main" (get-in inspected [:session :id])))
     (is (quick-ok? root))))
 
+(deftest model-driven-context-compaction-advances-current-head-and-preserves-vars
+  (let [root (tmp-dir "model-compaction")
+        large-payload (apply str (repeat 500 " public-safe transcript payload"))
+        compaction-seen (atom nil)
+        responder (fn [request]
+                    (let [text (request-text request)]
+                      (cond
+                        (str/includes? text "Create a compact continuation user message")
+                        (do
+                          (reset! compaction-seen text)
+                          "Continuation frame: the session defined `saved` as 42, completed the seed turn, and should use the preserved REPL var for later turns.")
+
+                        (str/includes? text "SEED_COMPACTION")
+                        "```clojure\n(def saved 42)\n(FINAL {:seed saved})\n```"
+
+                        (str/includes? text "USE_COMPACTED")
+                        "```clojure\n(FINAL {:saved saved :compact-frame-visible true})\n```"
+
+                        :else
+                        "```clojure\n(FINAL :unknown)\n```")))
+        cfg (scripted-fn-cfg root responder)
+        s (session/start-session! cfg {:id "main" :alias "main" :store-root root})
+        seed-result (session/run-turn! s (str "SEED_COMPACTION\n" large-payload))
+        seed-head (:head-id seed-result)
+        compact-result (session/compact-session! s)
+        compact-head (:head-id compact-result)
+        compacted-view (projection/view (:locator compact-result))
+        use-result (session/run-turn! s "USE_COMPACTED")
+        current-view (projection/view (:locator use-result))
+        compacted-messages (:messages compacted-view)
+        active-text (pr-str (:messages current-view))
+        seed-head-text (pr-str (:messages (session-db/read-head-state root "main" seed-head)))
+        compaction-head (session-db/read-head root "main" compact-head)
+        compaction-call (first (filter #(= :context-compaction (:call/purpose %))
+                                       (:calls current-view)))
+        compaction-request (read-call-request root compaction-call)]
+    (is (= {:seed 42} (:final-value seed-result)))
+    (is (= :compacted (:status compact-result)))
+    (is (= seed-head (:head/basis compaction-head)))
+    (is (= :context-compaction (:head/kind compaction-head)))
+    (is (= {:saved 42 :compact-frame-visible true} (:final-value use-result)))
+    (is (str/includes? @compaction-seen "SEED_COMPACTION"))
+    (is (str/includes? @compaction-seen "public-safe transcript payload"))
+    (is (= [:system :user] (mapv :message/role compacted-messages)))
+    (is (str/includes? active-text "Continuation frame:"))
+    (is (not (str/includes? active-text "SEED_COMPACTION")))
+    (is (not (str/includes? active-text "public-safe transcript payload")))
+    (is (str/includes? seed-head-text "SEED_COMPACTION")
+        "prior transcript remains reachable through the previous immutable head")
+    (is (= :context-compaction (:request/kind compaction-request)))
+    (is (= seed-head (:request/source-head-id compaction-request)))
+    (is (false? (:request/rendered? compaction-request)))
+    (is (quick-ok? root))))
+
+(deftest context-hard-preflight-refuses-oversized-provider-request
+  (let [root (tmp-dir "context-hard-limit")
+        called? (atom false)
+        cfg (base-config root {:scripted/response-fn (fn [_]
+                                                       (reset! called? true)
+                                                       "```clojure\n(FINAL :called)\n```")
+                               :context {:auto-compact? false
+                                         :window-tokens 100
+                                         :hard-ratio 0.5
+                                         :output-reserve-tokens 0
+                                         :chars-per-token 1}})
+        s (session/start-session! cfg {:id "main" :store-root root})
+        result (session/run-turn! s "too large for the deliberately tiny context window")]
+    (is (= :error (:status result)))
+    (is (= :fractal/context-limit (get-in result [:error :error/type])))
+    (is (false? @called?)
+        "the provider is not called after hard context preflight fails")
+    (is (quick-ok? root))))
+
+(deftest context-soft-threshold-auto-compacts-before-next-user-turn
+  (let [root (tmp-dir "context-auto-compact")
+        compactions (atom 0)
+        responder (fn [request]
+                    (let [text (request-text request)
+                          full-text (str/join "\n" (map :message/content (:request/messages request)))]
+                      (cond
+                        (str/includes? text "Create a compact continuation user message")
+                        (do
+                          (swap! compactions inc)
+                          "Auto compact frame: saved remains 5 and the next turn should use the preserved var.")
+
+                        (str/includes? text "AUTO_SEED")
+                        "```clojure\n(def saved 5)\n(FINAL {:saved saved})\n```"
+
+                        (str/includes? text "AUTO_USE")
+                        (do
+                          (is (str/includes? full-text "Auto compact frame:"))
+                          (is (not (str/includes? full-text "AUTO_SEED")))
+                          "```clojure\n(FINAL {:saved saved :auto-compacted true})\n```")
+
+                        :else
+                        "```clojure\n(FINAL :unknown)\n```")))
+        cfg (base-config root {:scripted/response-fn responder
+                               :context {:window-tokens 100000
+                                         :compact-at-ratio 0.01
+                                         :hard-ratio 0.95
+                                         :output-reserve-tokens 0
+                                         :chars-per-token 1}})
+        s (session/start-session! cfg {:id "main" :store-root root})
+        seed-result (session/run-turn! s "AUTO_SEED")
+        use-result (session/run-turn! s "AUTO_USE")
+        current-view (projection/view (:locator use-result))
+        compact-heads (filterv #(= :context-compaction (:head/kind %))
+                               (:heads current-view))]
+    (is (= {:saved 5} (:final-value seed-result)))
+    (is (= {:saved 5 :auto-compacted true} (:final-value use-result)))
+    (is (= 1 @compactions))
+    (is (= 1 (count compact-heads)))
+    (is (quick-ok? root))))
+
 (deftest request-cache-pins-explicit-ttl
   (testing "request-cache defaults to an explicit 1h ttl, not the implicit server default"
     (is (= "1h" (:ttl (cache/request-cache "sid" :agent))))

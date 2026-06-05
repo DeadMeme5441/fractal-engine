@@ -1,8 +1,10 @@
 (ns fractal-engine.session
   (:require [clojure.string :as str]
             [fractal-engine.artifacts :as artifacts]
+            [fractal-engine.context :as context]
             [fractal-engine.process :as process]
             [fractal-engine.prompt :as prompt]
+            [fractal-engine.provider :as provider]
             [fractal-engine.provider-call :as provider-call]
             [fractal-engine.runtime :as runtime]
             [fractal-engine.session-db :as session-db]
@@ -12,6 +14,147 @@
 
 (defn latest-complete-snapshot [state]
   (last (filter snapshot/completed-turn-snapshot? (:snapshots @state))))
+
+(defn- result-base [state turn-id]
+  {:locator (:locator @state)
+   :session-id (get-in @state [:session :session/id])
+   :logical-session-id (artifacts/logical-session-id state)
+   :cache-id (provider-call/session-cache-id state)
+   :store-root (str (artifacts/store-root state))
+   :turn-id turn-id})
+
+(defn- finish-compaction-error! [state turn-id err]
+  (artifacts/update-turn! state turn-id assoc
+                          :turn/status :error
+                          :turn/ended-at (time/now-str)
+                          :turn/error err
+                          :turn/usage (artifacts/derive-usage (:locator @state) (:calls @state)))
+  (artifacts/add-event! state {:event/type :context-compaction/error
+                               :turn/id turn-id
+                               :error err})
+  (artifacts/mark-error! state err)
+  (merge {:status :error :error err} (result-base state turn-id)))
+
+(defn- active-system-message [messages]
+  (or (first (filter #(= :system (:message/role %)) messages))
+      (throw (ex-info "Cannot compact a session with no system message"
+                      {:error/type :fractal/context-compaction-no-system}))))
+
+(defn- current-head-view [state basis-head-id messages]
+  (let [snapshots (:snapshots @state)
+        latest-snapshot (when-let [row (last snapshots)]
+                          (let [value (artifacts/read-ref (:locator @state) (:snapshot/ref row))]
+                            (when-not (= ::artifacts/missing value)
+                              value)))]
+    {:session-id (artifacts/logical-session-id state)
+     :head-id basis-head-id
+     :messages messages
+     :turns (:turns @state)
+     :evals (:evals @state)
+     :calls (:calls @state)
+     :snapshots snapshots
+     :latest-snapshot latest-snapshot}))
+
+(defn- compact-state!
+  [session opts]
+  (let [{:keys [state cfg ns-sym]} session
+        status (get-in @state [:session :session/status])]
+    (when-not (= :running status)
+      (throw (ex-info "Session is not running"
+                      {:error/type :fractal/session-not-running
+                       :session/status status})))
+    (let [basis-head-id (artifacts/current-head-id state)
+          source-messages (vec (:messages @state))]
+      (if (<= (count source-messages) 2)
+        (merge {:status :skipped
+                :reason :fractal/context-already-compact
+                :head-id basis-head-id
+                :message-count-before (count source-messages)
+                :message-count-after (count source-messages)}
+               (result-base state nil))
+        (let [turn (artifacts/add-turn! state {:turn/kind :context-compaction
+                                               :turn/head-before basis-head-id
+                                               :turn/compaction (select-keys opts [:reason])})
+              turn-id (:turn/id turn)
+              request-messages (context/compaction-request-messages
+                                cfg
+                                (current-head-view state basis-head-id source-messages))
+              request (provider-call/provider-request request-messages nil)
+              assessment (context/assess-request cfg :root (:request/messages request))]
+          (if (:context/over-hard? assessment)
+            (finish-compaction-error!
+             state turn-id
+             {:error/type :fractal/context-compaction-limit
+              :error/role :root
+              :context assessment
+              :error/retryable? true})
+            (try
+              (let [{:keys [call-id response]}
+                    (provider-call/call-provider!
+                     state cfg :root
+                     {:call/type :root
+                      :call/purpose :context-compaction
+                      :call/request-kind :context-compaction
+                      :call/source-head-id basis-head-id
+                      :call/source-message-count (count source-messages)
+                      :call/turn-id turn-id
+                      :call/message-ids (mapv :message/id source-messages)
+                      :request request})
+                    content (str/trim (provider/response-text response))]
+                (if (str/blank? content)
+                  (finish-compaction-error!
+                   state turn-id
+                   {:error/type :fractal/context-compaction-empty
+                    :call/id call-id
+                    :error/retryable? true})
+                  (let [system-message (active-system-message source-messages)
+                        compact-message (artifacts/add-message!
+                                         state :user content turn-id
+                                         {:message/kind :context-compaction
+                                          :message/source-head basis-head-id
+                                          :message/call-id call-id})
+                        compact-messages [system-message compact-message]]
+                    (swap! state assoc :messages compact-messages)
+                    (artifacts/update-turn! state turn-id assoc
+                                            :turn/status :final
+                                            :turn/ended-at (time/now-str)
+                                            :turn/user-message-id (:message/id compact-message)
+                                            :turn/usage (artifacts/derive-usage (:locator @state) (:calls @state))
+                                            :turn/compaction {:source-head basis-head-id
+                                                              :message-count-before (count source-messages)
+                                                              :message-count-after (count compact-messages)
+                                                              :call-id call-id})
+                    (artifacts/add-event! state {:event/type :context-compaction/final
+                                                 :turn/id turn-id
+                                                 :head/source basis-head-id
+                                                 :message/id (:message/id compact-message)
+                                                 :message/count-before (count source-messages)
+                                                 :message/count-after (count compact-messages)})
+                    (let [turn-row (artifacts/current-turn state turn-id)
+                          snapshot-row (snapshot/write-context-snapshot! state ns-sym turn-row)
+                          head-row (artifacts/create-head!
+                                    state
+                                    {:head/kind :context-compaction
+                                     :head/turn-id turn-id
+                                     :head/message-through-id (:snapshot/message-through-id snapshot-row)
+                                     :head/snapshot-id (:snapshot/id snapshot-row)
+                                     :head/snapshot-ref (:snapshot/ref snapshot-row)
+                                     :head/event-range {:to-event (get-in @state [:counters :event])}})
+                          head-id (:head/id head-row)]
+                      (artifacts/update-turn! state turn-id assoc :turn/head-after head-id)
+                      (artifacts/flush! state)
+                      (merge {:status :compacted
+                              :head-before basis-head-id
+                              :head-id head-id
+                              :head head-row
+                              :message-id (:message/id compact-message)
+                              :message-count-before (count source-messages)
+                              :message-count-after (count compact-messages)}
+                             (result-base state turn-id))))))
+              (catch clojure.lang.ExceptionInfo e
+                (if (= :provider/failed (:error/type (ex-data e)))
+                  (finish-compaction-error! state turn-id (ex-data e))
+                  (throw e))))))))))
 
 (defn session-handle [state cfg ns-sym ops]
   {:state state
@@ -74,7 +217,15 @@
       (throw (ex-info "Session is not running"
                       {:error/type :fractal/session-not-running
                        :session/status status})))
-    (process/run-turn-on-state! state cfg ns-sym user-message)))
+    (if (context/should-compact-before-turn? cfg :root (:messages @state) user-message)
+      (let [result (compact-state! session {:reason :auto-before-turn})]
+        (if (= :error (:status result))
+          (reduced result)
+          (process/run-turn-on-state! state cfg ns-sym user-message)))
+      (process/run-turn-on-state! state cfg ns-sym user-message))))
+
+(defn- unreduced-result [result]
+  (if (reduced? result) @result result))
 
 (defn- acquire-turn! [session]
   (when-not (compare-and-set! (:busy session) false true)
@@ -85,9 +236,21 @@
 (defn run-turn! [session user-message]
   (acquire-turn! session)
   (try
-    (run-turn-checked! session user-message)
+    (unreduced-result (run-turn-checked! session user-message))
     (finally
       (reset! (:busy session) false))))
+
+(defn compact-session!
+  "Advance the session current head to a model-generated compact provider frame.
+  The same session identity and REPL namespace are preserved; only the active
+  provider-visible message projection stored on the new head is compacted."
+  ([session] (compact-session! session {}))
+  ([session opts]
+   (acquire-turn! session)
+   (try
+     (compact-state! session (assoc opts :reason (or (:reason opts) :manual)))
+     (finally
+       (reset! (:busy session) false)))))
 
 (defn run-turn-async!
   "Run one turn on a background daemon thread. Returns a promise that delivers the
@@ -102,7 +265,7 @@
   (let [p (promise)
         run (fn []
               (try
-                (deliver p (run-turn-checked! session user-message))
+                (deliver p (unreduced-result (run-turn-checked! session user-message)))
                 (catch Throwable t
                   (deliver p {:status :error
                               :error {:error/type (or (:error/type (ex-data t)) :fractal/turn-failed)

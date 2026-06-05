@@ -121,6 +121,11 @@ content is not.
 - **Turn reaching `FINAL`** writes final/snapshot blobs, commits call/eval/message rows,
   writes a compact immutable head-state root, creates an immutable head, and advances the
   same session's current-head. `FINAL` does not terminate the session.
+- **Provider-history compaction** is an internal model-mediated head transition. The
+  engine asks the configured root model to rewrite the current head's transcript and
+  state facts into one semantic continuation frame, records that output as a synthetic
+  user message, writes a `:context-compaction` snapshot/head, and advances the same
+  session's current-head. Prior heads keep the old transcript.
 - **Resume** reads a selected head state, restores that exact state into the same
   session, and advances that same session from the selected basis head.
 - **Fork** reads a selected source head state into a new user/API session and leaves the

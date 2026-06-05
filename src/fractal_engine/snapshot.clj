@@ -10,6 +10,7 @@
            [java.util.concurrent Future]))
 
 (def special-symbols '#{FINAL lm map-lm rlm map-rlm attach-rlm})
+(def restorable-snapshot-kinds #{:turn-final :context-compaction})
 
 (declare source-session-id)
 
@@ -83,14 +84,15 @@
    :var/unrestorable (count (filter #(= :unrestorable (:var/status %)) var-rows))
    :blob/count (count (filter #(some? (get-in % [:var/value-ref :blob/id])) var-rows))})
 
-(defn write-turn-snapshot! [state ns-sym turn-row eval-row]
+(defn- write-snapshot!
+  [state ns-sym turn-row eval-row kind]
   (let [dir (:locator @state)
         turn-id (:turn/id turn-row)
         snapshot-id (artifacts/next-counter! state :snapshot)
         created-at (time/now-str)
         var-rows (snapshot-session-vars! dir ns-sym turn-id)
         snapshot (cond-> {:snapshot/id snapshot-id
-                          :snapshot/kind :turn-final
+                          :snapshot/kind kind
                           :snapshot/turn-id turn-id
                           :snapshot/message-through-id (apply max 0 (map :message/id (:messages @state)))
                           :snapshot/eval-id (:eval/id eval-row)
@@ -101,7 +103,7 @@
                    (:eval/id eval-row) (assoc :snapshot/eval-row (select-keys eval-row [:eval/id :eval/status])))
         snapshot-ref (artifacts/value-ref! dir snapshot {:payload/kind :snapshot})
         row {:snapshot/id snapshot-id
-             :snapshot/kind :turn-final
+             :snapshot/kind kind
              :snapshot/turn-id turn-id
              :snapshot/message-through-id (:snapshot/message-through-id snapshot)
              :snapshot/eval-id (:snapshot/eval-id snapshot)
@@ -112,8 +114,14 @@
     (artifacts/emit! state {:event/type :snapshot/added :snapshot row})
     row))
 
+(defn write-turn-snapshot! [state ns-sym turn-row eval-row]
+  (write-snapshot! state ns-sym turn-row eval-row :turn-final))
+
+(defn write-context-snapshot! [state ns-sym turn-row]
+  (write-snapshot! state ns-sym turn-row nil :context-compaction))
+
 (defn completed-turn-snapshot? [row]
-  (= :turn-final (:snapshot/kind row)))
+  (contains? restorable-snapshot-kinds (:snapshot/kind row)))
 
 (defn snapshots [dir]
   (:snapshots (session-db/history-view (artifacts/store-root-for-locator dir)

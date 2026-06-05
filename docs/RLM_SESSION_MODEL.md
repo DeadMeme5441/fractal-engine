@@ -187,6 +187,39 @@ authority. History remains enabled, so the prior current-head is still auditable
 `FINAL` does not end a session. It only returns a value to the caller/user and creates a
 restorable completed head. The same session remains resumable for another turn.
 
+## Provider-history compaction
+
+Provider-history compaction is a normal same-session head transition:
+
+```text
+H' = compact(H)
+session/current-head := H'
+```
+
+It does not create a new session identity and it does not introduce a second current
+state pointer. The basis head remains the prior same-session head, and the compacted
+head has its own turn row, traced provider call, snapshot row, head-state root, and
+current-head ref update.
+
+The transition is model-mediated. The host renders a compaction request from the
+current head's active transcript plus structured current-head facts such as turns,
+evals, calls, and latest snapshot var summaries. The configured root model rewrites
+that material into one semantic continuation frame. That model output is then recorded
+as a synthetic user message on the compacted head. The compaction request itself is not
+left in the active transcript, and the response is not evaluated as Clojure.
+
+The compacted head's active `:messages` collection is the original system message plus
+the synthetic compact user frame. REPL/runtime state is preserved by a
+`:context-compaction` snapshot on the new head; old messages, calls, snapshots, and
+heads remain reachable through prior immutable heads and history/audit reads.
+
+Automatic compaction is checked before a new user turn is appended. The engine estimates
+the prospective provider request against the configured root model's context window
+using `clojure-llm-sdk` model metadata when available. If the soft threshold is crossed,
+the session first advances through a compacted head and then runs the user's turn from
+that head. If a provider request would cross the hard threshold, the turn records a
+typed `:fractal/context-limit` error before calling the provider.
+
 ## Resume
 
 Resume resolves the same session by id or alias, resolves the selected head/turn to a

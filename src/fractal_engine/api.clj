@@ -71,6 +71,16 @@
   ([cfg source-handle] (session/resume-session! cfg source-handle))
   ([cfg source-handle opts] (session/resume-session! cfg source-handle opts)))
 
+(defn compact-session!
+  "Advance a live session to a compacted current head.
+
+  The engine asks the root model to rewrite the current completed head transcript
+  into one semantic continuation frame, records that model output as a synthetic
+  user message, snapshots the preserved REPL vars, and advances
+  `session/current-head` to the new compacted head."
+  ([session] (session/compact-session! session))
+  ([session opts] (session/compact-session! session opts)))
+
 (defn fork-session!
   "Fork a session from a canonical session id, alias, or handle and return a live handle.
 

@@ -42,6 +42,30 @@ is a lossy projection; real EDN-safe values are snapshotted into BlobStore when 
 reaches `FINAL`. There is no magic `context` variable: if the model wants state, it
 defines a var.
 
+## Provider context and compaction
+
+The provider-visible transcript is not the session's source of truth. The source of
+truth for continuation is the current immutable head: active messages, turns, calls,
+evals, snapshots, refs, counters, and restorable REPL vars.
+
+When the active provider transcript approaches the configured model window, the engine
+can compact it by creating another normal same-session head. The compaction turn asks
+the configured root model to read the current head transcript plus structured state
+facts and produce one semantic continuation frame. That frame becomes a synthetic user
+message on the new head.
+
+After compaction:
+
+- session identity is unchanged;
+- `session/current-head` advances to the compacted head;
+- the active provider messages are the system prompt plus the compact frame;
+- REPL vars are preserved through a `:context-compaction` snapshot;
+- prior transcript rows remain reachable through earlier heads and history reads.
+
+The compact frame is provider-facing orientation, not runtime authority. If the model
+needs exact values, it should inspect restored vars or derive fresh observations with
+Clojure.
+
 ## The six functions
 
 ```clojure

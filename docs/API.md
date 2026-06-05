@@ -38,6 +38,7 @@ Public drive functions:
 | `start-session!` | start a live canonical session; accepts `:id`, `:alias`, `:title`, `:overlay` |
 | `run-turn!` | run one user message on a live session |
 | `run-turn-async!` | run one turn asynchronously and poll `progress` mid-run |
+| `compact-session!` | advance the live session current-head to a model-generated compact provider frame |
 | `stop-session!` | mark the live session stopped |
 | `resume-session!` | restore a completed head into the same session and advance it |
 | `fork-session!` | restore a source head into a new user/API session |
@@ -45,6 +46,11 @@ Public drive functions:
 
 `FINAL` does not terminate a session. A stopped live handle can be resumed later from the
 canonical store.
+
+`compact-session!` is an internal head transition, not a new model-facing function. It
+asks the configured root model to rewrite the current head transcript and state facts
+into one semantic continuation frame, records the model output as a synthetic user
+message, snapshots preserved REPL vars, and advances the same session's current-head.
 
 Session aliases are canonical SQLite rows pointing at session ids. The local filesystem
 is only the physical backend for SQLite, Datahike projection, and BlobStore files;

@@ -68,6 +68,12 @@ model/eval work, snapshot, sealed head, and final ref update. This is the operat
 path for understanding a session without dumping message bodies or provider
 requests.
 
+For provider-history compaction, the chain shows an internal compaction turn, a traced
+root call with `:call/purpose :context-compaction`, the synthetic compact user message,
+the `:context-compaction` snapshot, the compacted head, and the same session's
+current-head ref movement. The old transcript remains on prior heads; the compacted head
+is the active restore surface.
+
 ## Raw stream
 
 Use `stream` when another program wants compact facts:

@@ -45,6 +45,11 @@ Talk to a persistent, resumable session. Without `[run]`, starts a new session. 
 persist across turns through completed-head snapshots. A live progress line polls the
 canonical store while the turn runs.
 
+If the next root request approaches the configured model context window, chat/session
+turns compact provider history before appending the new user message. The same session
+current-head advances to a compacted head, runtime vars are preserved, and prior heads
+remain inspectable.
+
 ```bash
 fractal chat
 fractal chat my-session

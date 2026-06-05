@@ -31,7 +31,7 @@ recursions. It is built in the spirit of
 [Troubleshooting](#troubleshooting)
 
 **Understand it:** [How the loop works](#how-the-loop-works) · [The six functions](#the-six-functions) ·
-[Canonical storage](#canonical-storage) · [The trust layer](#the-trust-layer) ·
+[Context compaction](#context-compaction) · [Canonical storage](#canonical-storage) · [The trust layer](#the-trust-layer) ·
 [Resume, fork, attach](#resume-fork-attach) · [Sandboxing](#sandboxing) · [Architecture](#architecture) ·
 [Evaluations](#evaluations) · [Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
 
@@ -187,7 +187,7 @@ The engine is published to [Clojars](https://clojars.org/net.clojars.deadmeme544
 Add it to `deps.edn`:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.4"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.5"}}}
 ```
 
 The CLI is one consumer of the engine. Clojure applications should prefer the stable
@@ -248,6 +248,12 @@ fractal fork   <run> "<task>" # branch a session at a turn
 session input — REPL vars persist through canonical snapshots, the current-head ref
 advances, and a live `◐ thinking…` line shows children/steps/leaves as the engine works.
 Leave with `/quit`; come back with `fractal chat <run>`.
+
+Long chats do not keep appending the full provider transcript forever. When the next
+root request approaches the configured model window, the engine runs a model-mediated
+provider-history compaction first: the same session advances to a new immutable head
+whose active provider transcript is the system prompt plus one compact continuation
+frame, while REPL vars and prior heads remain durable.
 
 ### Read (look inside its head)
 
@@ -422,6 +428,31 @@ instead. One bad item never costs you the rest. Split the sentinels out before
 aggregating (`(remove :fractal/failed results)`) and fold the failures into your answer's
 missingness. (Singular `lm`/`rlm` have no batch, so they surface a failure directly; and
 the pre-flight fan-out cap is a separate, recoverable error you retry by chunking.)
+
+## Context compaction
+
+A session can outlive one provider context window. The engine handles that by advancing
+the same session through a normal immutable head transition:
+
+```text
+old current head -> compacted current head -> next user turn
+```
+
+Compaction is model-driven. The host asks the configured root model to rewrite the
+current head's transcript and state facts into one semantic continuation frame. That
+model output becomes a synthetic user message on the compacted head. The provider-facing
+history for the next turn is then the unchanged system prompt plus that compact frame.
+
+This does not summarize or discard runtime state. REPL vars are snapshotted on the
+compacted head, `session/current-head` remains the only current-state pointer, and older
+messages/heads remain queryable through history. It is indistinguishable from any other
+completed head transition to readers and restore code; only the active message
+projection is smaller.
+
+The engine estimates root requests against the configured model's window using
+`clojure-llm-sdk` metadata when available. Soft overflow triggers compaction before the
+next user message is appended. Hard overflow records a typed context-limit error before
+calling the provider.
 
 ## Canonical storage
 

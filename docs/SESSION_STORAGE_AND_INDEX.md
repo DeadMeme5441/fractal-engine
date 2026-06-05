@@ -356,6 +356,13 @@ keeps enough provenance to identify the transcript slice without duplicating the
 growing transcript. Leaf calls keep rendered request blobs because their inputs are
 bounded and independent.
 
+Provider-history compaction calls are traced root calls with
+`:call/purpose :context-compaction` and request descriptors of kind
+`:context-compaction`. The rendered compaction prompt is sent to the provider at
+runtime; the durable request ref records the source head and source message ids instead
+of storing another full transcript copy. The model's response becomes the synthetic user
+message on the compacted head.
+
 `lm` and `map-lm` create call facts/payloads only. `rlm` and `map-rlm` create invocation
 facts and child sessions, and return RLM envelopes with `:rlm/value`, `:rlm/session`,
 `:rlm/head`, and deterministic `:rlm/meta`. `attach-rlm` creates invocation facts and

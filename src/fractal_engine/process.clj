@@ -2,6 +2,7 @@
   (:require [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cache :as cache]
             [fractal-engine.concurrent :as concurrent]
+            [fractal-engine.context :as context]
             [fractal-engine.leaf :as leaf]
             [fractal-engine.prompt :as prompt]
             [fractal-engine.provider :as provider]
@@ -30,6 +31,7 @@
                ;; from 1h to 5m on 2026-03-06. Override with --cache-ttl 5m for
                ;; cost-sensitive short jobs. See fractal-engine.cache/default-ttl.
                :cache-ttl cache/default-ttl
+               :context context/default-policy
                :models provider/default-models
                ;; Retry transient transport failures by default. The SDK classifies
                ;; errors before retrying (`:retry true` -> llm.sdk.retry/default-policy):
@@ -41,8 +43,11 @@
                ;; including backoff, not per attempt. Set :retry false for one-shot.
                :retry true}
          models (merge-with merge provider/default-models (:models m))
+         context-policy (context/normalize-policy
+                         (merge (:context base) (:context m)))
          cfg (dissoc (assoc (merge (dissoc base :models) (dissoc m :models))
-                            :models models)
+                            :models models
+                            :context context-policy)
                      :leaf-concurrency/limiter
                      :leaf-concurrency/max)
          max-leaf-concurrency (:max-leaf-concurrency cfg)
