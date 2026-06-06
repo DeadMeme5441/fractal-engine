@@ -15,28 +15,35 @@
 
 (def providers
   "Provider descriptors. `:auth` is the source of credentials:
-     :api-key     read the named env var (or .env) and hand it to the SDK
-     :oauth-file  the SDK reads a credentials file itself; the engine supplies nothing
-     :adc         Application Default Credentials; the SDK gets the token, but the
-                  listed env vars must be exported into the JVM (the .env loader does
-                  NOT push them to System/getenv)
-     :none        the offline scripted fake; no network, no credentials
+     :api-key          read the named env var (or .env) and hand it to the SDK
+     :oauth-file       the SDK reads a credentials file itself; the engine supplies nothing
+     :adc              Application Default Credentials; the SDK gets the token, but the
+                       listed env vars must be exported into the JVM (the .env loader does
+                       NOT push them to System/getenv)
+     :none             the offline scripted fake; no network, no credentials
+     :custom-endpoint  any OpenAI-compatible HTTP endpoint. Requires :env-base-url; the
+                       API key is optional (:env-api-key) for endpoints that need one.
+                       Both are forwarded to the SDK as runtime config.
   This table is the single source of truth — it replaces the old hardcoded env map
   and the Codex/Vertex auth notes that used to live only in prose docs."
-  {:scripted      {:auth :none}
-   :openai        {:auth :api-key :env "OPENAI_API_KEY"}
-   :anthropic     {:auth :api-key :env "ANTHROPIC_API_KEY"}
-   :openrouter    {:auth :api-key :env "OPENROUTER_API_KEY"}
-   :deepseek      {:auth :api-key :env "DEEPSEEK_API_KEY"}
-   :kimi-code     {:auth :api-key :env "KIMI_API_KEY"}
-   :cohere        {:auth :api-key :env "COHERE_API_KEY"}
-   :codex         {:auth :api-key :env "OPENAI_API_KEY"
-                   :notes "API-key path; :codex-backend is the OAuth path."}
-   :codex-backend {:auth :oauth-file :file "~/.codex/auth.json"
-                   :notes "OAuth via Codex; the SDK reads the file. No api-key needed."}
-   :vertex-gemini {:auth :adc
-                   :env-required ["GOOGLE_CLOUD_PROJECT" "GOOGLE_CLOUD_LOCATION"]
-                   :notes "ADC supplies the token; the listed env vars must be exported into the JVM env."}})
+  {:scripted        {:auth :none}
+   :openai          {:auth :api-key :env "OPENAI_API_KEY"}
+   :anthropic       {:auth :api-key :env "ANTHROPIC_API_KEY"}
+   :openrouter      {:auth :api-key :env "OPENROUTER_API_KEY"}
+   :deepseek        {:auth :api-key :env "DEEPSEEK_API_KEY"}
+   :kimi-code       {:auth :api-key :env "KIMI_API_KEY"}
+   :cohere          {:auth :api-key :env "COHERE_API_KEY"}
+   :codex           {:auth :api-key :env "OPENAI_API_KEY"
+                     :notes "API-key path; :codex-backend is the OAuth path."}
+   :codex-backend   {:auth :oauth-file :file "~/.codex/auth.json"
+                     :notes "OAuth via Codex; the SDK reads the file. No api-key needed."}
+   :vertex-gemini   {:auth :adc
+                     :env-required ["GOOGLE_CLOUD_PROJECT" "GOOGLE_CLOUD_LOCATION"]
+                     :notes "ADC supplies the token; the listed env vars must be exported into the JVM env."}
+   :custom-endpoint {:auth :custom-endpoint
+                     :env-base-url "CUSTOM_ENDPOINT_BASE_URL"
+                     :env-api-key  "CUSTOM_ENDPOINT_API_KEY"
+                     :notes "OpenAI-compatible endpoint. Set CUSTOM_ENDPOINT_BASE_URL; CUSTOM_ENDPOINT_API_KEY is optional."}})
 
 (defn descriptor
   "The descriptor for a provider id. Unknown providers default to :sdk-default —
@@ -58,14 +65,25 @@
   (or (System/getenv k) (get (dotenv) k)))
 
 (defn api-key-config
-  "The {:api-key ...} the SDK needs, for :api-key providers only. Other auth
-  sources (:oauth-file, :adc, :none, :sdk-default) supply nothing here — the SDK
-  handles them."
+  "The runtime config map the SDK needs for a provider.
+   :api-key providers return {:api-key ...}.
+   :custom-endpoint returns {:base-url ...} plus {:api-key ...} when a key is set.
+   Other auth sources (:oauth-file, :adc, :none, :sdk-default) return nil — the SDK
+   handles them itself."
   [provider-id]
   (let [d (descriptor provider-id)]
-    (when (= :api-key (:auth d))
+    (case (:auth d)
+      :api-key
       (when-let [v (env-value (:env d))]
-        {:api-key v}))))
+        {:api-key v})
+
+      :custom-endpoint
+      (let [base-url (env-value (:env-base-url d))
+            api-key  (env-value (:env-api-key d))]
+        (cond-> {:base-url (or base-url "")}
+          api-key (assoc :api-key api-key)))
+
+      nil)))
 
 (defn auth-status
   "Introspect whether a provider's auth is satisfied — provider-as-value pays off:
@@ -81,6 +99,10 @@
       :adc {:provider provider-id :auth :adc
             :env-required (:env-required d)
             :satisfied? (every? #(some? (System/getenv %)) (:env-required d))}
+      :custom-endpoint {:provider provider-id :auth :custom-endpoint
+                        :env-base-url (:env-base-url d)
+                        :env-api-key  (:env-api-key d)
+                        :satisfied? (some? (env-value (:env-base-url d)))}
       {:provider provider-id :auth (:auth d) :satisfied? :unknown})))
 
 (defn response-text [resp]
