@@ -5,6 +5,7 @@
   dependency-light (no command/dispatch code, no `session`/`resume`/`inspect`) so it
   can sit underneath both without a cycle."
   (:require [fractal-engine.artifacts :as artifacts]
+            [fractal-engine.config :as config]
             [fractal-engine.process :as process]
             [fractal-engine.scripts :as scripts]
             [fractal-engine.session-db :as session-db]))
@@ -29,7 +30,10 @@
         :else                                          (recur (.getParentFile d))))))
 
 (defn cfg-from-opts [opts]
-  (let [provider (keyword (or (:provider opts) "scripted"))
+  (let [store-root (or (:runs-dir opts) (default-runs-dir))
+        ;; file config is the base layer; CLI flags (opts) win over it
+        opts (merge (config/load-config store-root) opts)
+        provider (keyword (or (:provider opts) "scripted"))
         model (or (:model opts) "scripted")
         leaf-provider (keyword (or (:leaf-provider opts) (name provider)))
         leaf-model (or (:leaf-model opts) model)
@@ -40,7 +44,7 @@
         script (when (and script-name (nil? response-fn))
                  (atom (vec (scripts/script-for script-name))))]
     (process/config
-     (cond-> {:runs-dir (or (:runs-dir opts) (default-runs-dir))
+     (cond-> {:runs-dir store-root
               :models {:root {:provider provider :model model}
                        :leaf {:provider leaf-provider :model leaf-model}
                        :child {:provider child-provider :model child-model}}}
