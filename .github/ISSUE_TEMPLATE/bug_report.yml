@@ -1,0 +1,59 @@
+name: Bug Report
+description: Report a reproducible fractal-engine bug.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Keep reports public-safe: do not include API keys, private repository names, customer data, proprietary code, or local secret paths.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Prefer an offline fake/scripted provider reproduction when possible.
+      placeholder: |
+        1. Run ...
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or Commit
+      placeholder: v0.3.5 or git SHA
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Java version, Clojure CLI version, and provider mode.
+      placeholder: |
+        OS:
+        java -version:
+        clojure --version:
+        provider:
+  - type: textarea
+    id: logs
+    attributes:
+      label: Public-Safe Logs
+      description: Redact secrets, private paths, hostnames, and proprietary content before posting.
+      render: text

@@ -1,5 +1,9 @@
 # fractal-engine
 
+[![ci](https://github.com/DeadMeme5441/fractal-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/DeadMeme5441/fractal-engine/actions/workflows/ci.yml)
+[![release](https://github.com/DeadMeme5441/fractal-engine/actions/workflows/release.yml/badge.svg)](https://github.com/DeadMeme5441/fractal-engine/actions/workflows/release.yml)
+[![Clojars Project](https://img.shields.io/clojars/v/net.clojars.deadmeme5441/fractal-engine.svg)](https://clojars.org/net.clojars.deadmeme5441/fractal-engine)
+
 A small **recursive language-model compute engine**. A model drives a persistent
 Clojure REPL: it writes fenced Clojure, the host evaluates it and returns a compact
 observation, and the loop repeats until the model calls `(FINAL value)`. Some of the
@@ -38,7 +42,7 @@ recursions. It is built in the spirit of
 **Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/API.md`](docs/API.md) ·
 [`docs/CLI.md`](docs/CLI.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 [`docs/CODEBRAIN.md`](docs/CODEBRAIN.md) · [`docs/EVENT_LOG.md`](docs/EVENT_LOG.md) ·
-[`docs/EVALS.md`](docs/EVALS.md)
+[`docs/EVALS.md`](docs/EVALS.md) · [`docs/RELEASE.md`](docs/RELEASE.md)
 
 ---
 

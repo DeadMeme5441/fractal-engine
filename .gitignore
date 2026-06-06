@@ -4,6 +4,7 @@
 .lsp/
 .nrepl-port
 target/
+release-assets/
 runs/
 .fractal/
 .env

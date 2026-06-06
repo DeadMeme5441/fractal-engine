@@ -1,0 +1,42 @@
+name: Feature Request
+description: Propose a public feature or design direction.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep feature requests public-safe. Avoid private workplace details, customer names, internal roadmaps, or proprietary examples.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Shape
+      description: What should change, and where should the responsibility live?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Primary Surface
+      options:
+        - CLI
+        - Clojure API
+        - compute engine
+        - storage/index
+        - event/trust layer
+        - eval harness
+        - docs
+        - unsure
+    validations:
+      required: true

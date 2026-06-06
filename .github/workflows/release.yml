@@ -1,16 +1,10 @@
 name: release
 
-# On every v* tag this does BOTH halves of a release:
-#   1. publishes the thin library jar to Clojars
-#      (net.clojars.deadmeme5441/fractal-engine), and
-#   2. builds the `fractal` CLI uberjar and attaches it to a GitHub release.
-# Cutting a release is then just:
-#   git tag -a v1.2.3 -F notes.md   # the tag's annotation becomes the release notes
-#   git push origin v1.2.3
-# The version is derived from the tag (minus the `v`) and threaded into the build
-# via RELEASE_VERSION, so the tag, jar name, and pom never drift. The workflow at
-# the tagged commit is the one that runs, so the tag must point at a commit that
-# already contains this file.
+# On every v* tag this workflow:
+#   1. reruns the public validation suite,
+#   2. publishes the thin library jar to Clojars when Clojars secrets are present,
+#      using coordinate net.clojars.deadmeme5441/fractal-engine, and
+#   3. builds the `fractal` CLI uberjar and attaches release assets to GitHub.
 
 on:
   push:
@@ -18,19 +12,37 @@ on:
       - 'v*'
 
 permissions:
-  contents: write          # needed to create the release
+  contents: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
+
+      - name: Cache Clojure dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+            ~/.clojure
+          key: ${{ runner.os }}-clojure-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-clojure-
 
       - name: Install Clojure CLI
         run: |
@@ -46,35 +58,54 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Releasing version $V"
 
-      - name: Run tests
+      - name: Check whitespace
+        run: git diff --check
+
+      - name: Run engine tests
         run: clojure -M:test
+
+      - name: Run eval harness tests
+        run: clojure -M:evals-test
 
       - name: Build library jar
         env:
           RELEASE_VERSION: ${{ steps.ver.outputs.version }}
         run: clojure -T:build jar      # -> target/fractal-engine-<version>.jar
 
-      - name: Publish library to Clojars
+      - name: Stage library asset
+        run: |
+          mkdir -p release-assets
+          cp "target/fractal-engine-${{ steps.ver.outputs.version }}.jar" release-assets/
+
+      - name: Publish library to Clojars when configured
         env:
           RELEASE_VERSION: ${{ steps.ver.outputs.version }}
           CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
         run: |
+          if [ -z "${CLOJARS_USERNAME:-}" ] || [ -z "${CLOJARS_PASSWORD:-}" ]; then
+            echo "::notice::Skipping Clojars publish because CLOJARS_USERNAME/CLOJARS_PASSWORD are not configured."
+            exit 0
+          fi
           clojure -X:deploy \
             :artifact "\"target/fractal-engine-${{ steps.ver.outputs.version }}.jar\""
 
       - name: Build uberjar
-        run: clojure -T:build uber      # -> target/fractal.jar (cleans target first)
+        run: clojure -T:build uber      # -> target/fractal.jar
 
       - name: Smoke-test the jar
         run: java -jar target/fractal.jar help
+
+      - name: Stage CLI asset
+        run: cp target/fractal.jar release-assets/
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            target/fractal.jar \
+            release-assets/fractal.jar \
+            "release-assets/fractal-engine-${{ steps.ver.outputs.version }}.jar" \
             --title "fractal-engine ${GITHUB_REF_NAME}" \
             --notes-from-tag \
             --verify-tag

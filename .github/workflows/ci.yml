@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test, evals, and jars
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache Clojure dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+            ~/.clojure
+          key: ${{ runner.os }}-clojure-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            ${{ runner.os }}-clojure-
+
+      - name: Install Clojure CLI
+        run: |
+          curl -fsSL -O https://github.com/clojure/brew-install/releases/latest/download/posix-install.sh
+          chmod +x posix-install.sh
+          sudo ./posix-install.sh
+          clojure --version
+
+      - name: Check whitespace
+        run: git diff --check
+
+      - name: Run engine tests
+        run: clojure -M:test
+
+      - name: Run eval harness tests
+        run: clojure -M:evals-test
+
+      - name: Build library jar
+        run: clojure -T:build jar
+
+      - name: Build CLI uberjar
+        run: clojure -T:build uber
+
+      - name: Smoke-test CLI jar
+        run: java -jar target/fractal.jar help
