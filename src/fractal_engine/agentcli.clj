@@ -34,6 +34,7 @@
             [fractal-engine.artifacts :as artifacts]
             [fractal-engine.cliopts :as cli]
             [fractal-engine.codebrain :as codebrain]
+            [fractal-engine.config :as config]
             [fractal-engine.inspect :as inspect]
             [fractal-engine.projection :as proj]
             [fractal-engine.provenance :as prov]
@@ -347,6 +348,17 @@
 
 ;; ── drive verbs (do work — the other half of the agent loop) ──────────────────
 
+(defn- ensure-config!
+  "Run the first-time setup wizard when no config file exists and the user
+  hasn't supplied --provider on the command line. Returns flags, potentially
+  augmented with :provider and :model from the wizard so the current run
+  proceeds without a restart."
+  [flags]
+  (let [store-root (or (:runs-dir flags) (cli/default-runs-dir))]
+    (if (or (:provider flags) (config/config-exists? store-root))
+      flags
+      (merge flags (config/run-setup! store-root)))))
+
 (defn- result-exit [result]
   (cond
     (= :error   (keyword (:status result)))   1
@@ -377,7 +389,8 @@
   (let [task (or (first pos) (:task flags))]
     (if-not task
       (err "missing <task>: fractal run \"your task\" [--provider … --model …]")
-      (let [cfg   (cli/cfg-from-opts (flags->opts flags))
+      (let [flags (ensure-config! flags)
+            cfg   (cli/cfg-from-opts (flags->opts flags))
             opts  (cond-> flags (:name flags) (assoc :session (:name flags)))
             s     (session/start-session! cfg (cli/session-start-opts cfg opts))
             result (session/run-turn! s task)]
@@ -385,24 +398,26 @@
         (drive-out result (run-name result) flags)))))
 
 (defn cmd-resume [pos flags]
-  (with-run pos flags
-    (fn [dir token]
-      (let [task (or (second pos) (:task flags) "Continue and call FINAL.")
-            result (resume/resume! (cli/cfg-from-opts (flags->opts flags)) dir task
-                                   (cond-> {}
-                                     (:turn flags) (assoc :turn (cli/parse-long-opt (:turn flags)))
-                                     (:name flags) (assoc :id (:name flags))))]
-        (drive-out result token flags)))))
+  (let [flags (ensure-config! flags)]
+    (with-run pos flags
+      (fn [dir token]
+        (let [task (or (second pos) (:task flags) "Continue and call FINAL.")
+              result (resume/resume! (cli/cfg-from-opts (flags->opts flags)) dir task
+                                     (cond-> {}
+                                       (:turn flags) (assoc :turn (cli/parse-long-opt (:turn flags)))
+                                       (:name flags) (assoc :id (:name flags))))]
+          (drive-out result token flags))))))
 
 (defn cmd-fork [pos flags]
-  (with-run pos flags
-    (fn [dir token]
-      (let [task    (or (second pos) (:task flags) "Continue.")
-            sid     (or (:name flags) (artifacts/session-id))
-            result  (resume/fork! (cli/cfg-from-opts (flags->opts flags)) dir nil task
-                                  (cond-> {:id sid :alias sid}
-                                    (:turn flags) (assoc :turn (cli/parse-long-opt (:turn flags)))))]
-        (drive-out result (run-name result) flags)))))
+  (let [flags (ensure-config! flags)]
+    (with-run pos flags
+      (fn [dir token]
+        (let [task    (or (second pos) (:task flags) "Continue.")
+              sid     (or (:name flags) (artifacts/session-id))
+              result  (resume/fork! (cli/cfg-from-opts (flags->opts flags)) dir nil task
+                                    (cond-> {:id sid :alias sid}
+                                      (:turn flags) (assoc :turn (cli/parse-long-opt (:turn flags)))))]
+          (drive-out result (run-name result) flags))))))
 
 ;; ── chat: the second brain you talk to (interactive, persistent, resumable) ───
 
@@ -427,7 +442,8 @@
 
 (defn cmd-chat [pos flags]
   ;; resume a named run if given and it exists; else start a fresh brain
-  (let [cfg      (cli/cfg-from-opts (flags->opts flags))
+  (let [flags    (ensure-config! flags)
+        cfg      (cli/cfg-from-opts (flags->opts flags))
         token    (first pos)
         locator  (when token (resolve-run token flags))
         fresh-id (or (:name flags) token)         ; --name, else the positional, else auto
