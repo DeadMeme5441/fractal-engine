@@ -29,6 +29,17 @@
         (.isDirectory (java.io.File. d ".fractal"))    (str (java.io.File. d ".fractal"))
         :else                                          (recur (.getParentFile d))))))
 
+(defn custom-endpoint-config
+  "Build the :provider/config map for :custom-endpoint from opts.
+  :base-url comes from --base-url or the CUSTOM_ENDPOINT_BASE_URL env var.
+  :api-key comes from the env var named by --api-key-env (or CUSTOM_ENDPOINT_API_KEY)."
+  [opts]
+  (let [base-url  (or (:base-url opts) (System/getenv "CUSTOM_ENDPOINT_BASE_URL"))
+        key-env   (or (:api-key-env opts) "CUSTOM_ENDPOINT_API_KEY")
+        api-key   (System/getenv key-env)]
+    (cond-> {:base-url (or base-url "")}
+      api-key (assoc :api-key api-key))))
+
 (defn cfg-from-opts [opts]
   (let [store-root (or (:runs-dir opts) (default-runs-dir))
         ;; file config is the base layer; CLI flags (opts) win over it
@@ -54,7 +65,8 @@
        (:call-timeout-ms opts) (assoc :call-timeout-ms (parse-long-opt (:call-timeout-ms opts)))
        (:cache-ttl opts) (assoc :cache-ttl (:cache-ttl opts))
        response-fn (assoc :scripted/response-fn response-fn)
-       script (assoc :scripted/responses script)))))
+       script (assoc :scripted/responses script)
+       (= :custom-endpoint provider) (assoc :provider/config (custom-endpoint-config opts))))))
 
 (defn session-start-opts [cfg opts]
   (if-let [sid (:session opts)]

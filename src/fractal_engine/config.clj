@@ -71,13 +71,14 @@
 
 ;; [display-label provider-id suggested-model]
 (def ^:private provider-menu
-  [["Anthropic"                   "anthropic"      "claude-opus-4-8-20251101"]
-   ["OpenAI"                      "openai"         "gpt-4o"]
-   ["OpenRouter"                  "openrouter"     "openai/gpt-4o"]
-   ["DeepSeek"                    "deepseek"       "deepseek-chat"]
-   ["Vertex Gemini"               "vertex-gemini"  "gemini-2.5-pro"]
-   ["Cohere"                      "cohere"         "command-r-plus"]
-   ["Scripted (offline/testing)"  "scripted"       "scripted"]])
+  [["Anthropic"                          "anthropic"        "claude-opus-4-8-20251101"]
+   ["OpenAI"                             "openai"           "gpt-4o"]
+   ["OpenRouter"                         "openrouter"       "openai/gpt-4o"]
+   ["DeepSeek"                           "deepseek"         "deepseek-chat"]
+   ["Vertex Gemini"                      "vertex-gemini"    "gemini-2.5-pro"]
+   ["Cohere"                             "cohere"           "command-r-plus"]
+   ["Custom OpenAI-compatible endpoint"  "custom-endpoint"  nil]
+   ["Scripted (offline/testing)"         "scripted"         "scripted"]])
 
 (defn- ask [prompt]
   (print prompt) (flush) (or (read-line) ""))
@@ -97,8 +98,20 @@
             (recur))))))
 
 (defn- pick-model [suggested]
-  (let [raw (ask (format "  Model [%s]: " suggested))]
-    (if (str/blank? raw) suggested (str/trim raw))))
+  (let [prompt (if suggested (format "  Model [%s]: " suggested) "  Model: ")
+        raw    (ask prompt)]
+    (if (str/blank? raw) (or suggested "") (str/trim raw))))
+
+(defn- pick-base-url []
+  (loop []
+    (let [raw (ask "  Base URL (e.g. http://localhost:11434/v1): ")]
+      (if (str/blank? raw)
+        (do (println "  Base URL is required for a custom endpoint.") (recur))
+        (str/trim raw)))))
+
+(defn- pick-api-key-env []
+  (let [raw (ask "  API key env var (leave blank if not required) [CUSTOM_ENDPOINT_API_KEY]: ")]
+    (if (str/blank? raw) nil (str/trim raw))))
 
 (defn- pick-scope []
   (println "\n  Save to:\n")
@@ -116,9 +129,14 @@
   [store-root]
   (println "\n┌─ fractal-engine: first-run setup ──────────────────────────────────────┐")
   (let [[_label prov suggested] (pick-provider)
-        model  (pick-model suggested)
-        scope  (pick-scope)
-        cfg    {:provider prov :model model}]
+        custom?   (= "custom-endpoint" prov)
+        base-url  (when custom? (pick-base-url))
+        api-key-env (when custom? (pick-api-key-env))
+        model     (pick-model suggested)
+        scope     (pick-scope)
+        cfg       (cond-> {:provider prov :model model}
+                    base-url    (assoc :base-url base-url)
+                    api-key-env (assoc :api-key-env api-key-env))]
     (if (= 2 scope)
       (do (save-user-config! cfg)
           (println (format "\n  Saved → %s" (user-config-path))))
