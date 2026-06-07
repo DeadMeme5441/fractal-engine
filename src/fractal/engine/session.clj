@@ -11,12 +11,19 @@
             [fractal.engine.kernel :as kernel]
             [fractal.engine.live :as live]
             [fractal.engine.payload-io :as payload-io]
+            [fractal.engine.recursion :as recursion]
             [fractal.engine.session-loop :as sloop]
             [fractal.engine.store :as store]
             [fractal.engine.store.memory :as mem]
             [fractal.engine.store.slots :as slots]
             [fractal.engine.store.sqlite :as sqlite]
             [fractal.engine.time :as time]))
+
+;; Forward declarations: the rlm host fns spawn child sessions + run their loop,
+;; but they are injected DURING start-session!/spawn-child!, before those fns are
+;; textually defined. recursion never requires session (no cycle); session
+;; injects these as an env of closures (dependency inversion, 03/Phase-3 gotcha).
+(declare run-turn! spawn-child!)
 
 ;; ---------------------------------------------------------------------------
 ;; start-session! (the composition root)
@@ -31,11 +38,15 @@
       base)))
 
 (defn- resolve-provider
-  "The session's provider: `:fake` for the fake adapter, else the catalog-resolved
-   provider for cfg's model (throws on an unknown model)."
+  "The session's provider: `:fake` for the fake adapter; an EXPLICIT cfg
+   `:provider` override when set (it WINS over catalog model-id resolution —
+   required for codex OAuth, whose model ids catalog-resolve to :openai); else
+   the catalog-resolved provider for cfg's model (throws on an unknown model)."
   [cfg]
-  (if (= :fake (:adapter cfg))
-    :fake
+  (cond
+    (= :fake (:adapter cfg)) :fake
+    (:provider cfg)          (:provider cfg)
+    :else
     (let [p (:provider (catalog/provider-from-model-id (:model cfg)))]
       (when-not p
         (throw (ex-info (str "could not resolve a provider for model: " (:model cfg))
@@ -46,6 +57,56 @@
   (if (= :fake (:adapter cfg))
     (fake/fake-adapter (:fake/respond cfg))
     (sdk/sdk-adapter provider (:provider/config cfg))))
+
+(defn- build-leaf
+  "Resolve the leaf adapter + model for a session (Phase 3). Leaves default to
+   the root adapter/model; an explicit :leaf-provider or a differing :leaf-model
+   builds a DEDICATED leaf adapter so leaves can target a cheaper model/provider.
+   Returns {:leaf-adapter … :leaf-model …} for the handle."
+  [cfg root-provider root-adapter]
+  (let [leaf-model    (or (:leaf-model cfg) (:model cfg))
+        leaf-provider (or (:leaf-provider cfg) root-provider)
+        leaf-adapter  (if (and (= leaf-provider root-provider) (= leaf-model (:model cfg)))
+                        root-adapter
+                        (build-adapter (assoc cfg :model leaf-model :provider leaf-provider)
+                                       leaf-provider))]
+    {:leaf-adapter leaf-adapter :leaf-model leaf-model}))
+
+;; ---------------------------------------------------------------------------
+;; SCI ctx assembly — harness-gated host fns (the hot-swap)
+;; ---------------------------------------------------------------------------
+
+(defn- live-meta [cfg]
+  {:fractal.engine.store.memory/live {:bound (:live/queue-bound cfg) :drop (:live/drop cfg)}})
+
+(defn- recursion-env
+  "The spawn/run/stop closures recursion needs (dependency inversion — recursion
+   never requires session). A child's events stay durable in the store; only its
+   live dispatch is stopped on return."
+  []
+  {:spawn-child! spawn-child!
+   :run-turn!    run-turn!
+   :stop-child!  (fn [child] (slots/stop-dispatch! (:store child) (:session-id child)))})
+
+(defn- assemble-engine-fns
+  "The host-fn impl map for a handle's harness mode (the hot-swap): :clojure ⇒
+   {:FINAL :inspect} (Phase-1 behavior); :rlm ⇒ those + the six recursion fns.
+   The capability profile's :engine-fns then GATES which actually inject
+   (capability/sci-opts select-keys; :locked-down drops lm/rlm)."
+  [handle]
+  (let [base (kernel/engine-fn-impls)]
+    (if (= :rlm (:harness (:cfg handle)))
+      (merge base (recursion/engine-fns handle (recursion-env)))
+      base)))
+
+(defn- init-session-ctx!
+  "Build + install the session SCI ctx from its resolved profile + the
+   harness-selected host fns, AFTER the handle (cfg/adapter/capability/cache-id)
+   exists. The rlm fns close over the handle and read cfg/adapter/store at CALL
+   time, so the :sci-ctx atom may still be nil here (the wiring chicken-and-egg)."
+  [handle profile]
+  (reset! (:sci-ctx handle)
+          (kernel/new-ctx (:session-id handle) profile (assemble-engine-fns handle))))
 
 (defn- build-store
   "Pick + construct the SessionStore off cfg :store (GD5 — the composition root,
@@ -75,6 +136,7 @@
        (let [sid      (or (:id opts) (gen-id))
              profile  (resolve-profile-for-session cfg opts)
              provider (resolve-provider cfg)
+             adapter  (build-adapter cfg provider)
              session-map (with-meta
                            {:session/id             sid
                             :session/status         :running
@@ -84,11 +146,12 @@
                             :session/capability     (:capability/name profile)
                             :session/cache-id       sid
                             :session/system-overlay (:system-overlay opts)}
-                           {:fractal.engine.store.memory/live
-                            {:bound (:live/queue-bound cfg) :drop (:live/drop cfg)}})
+                           (live-meta cfg))
              handle0 (store/create-session! store session-map)
-             handle  (assoc handle0 :cfg cfg :adapter (build-adapter cfg provider))]
-         (reset! (:sci-ctx handle) (kernel/new-ctx sid profile (kernel/engine-fn-impls)))
+             handle  (merge handle0
+                            {:cfg cfg :adapter adapter :capability profile :cache-id sid}
+                            (build-leaf cfg provider adapter))]
+         (init-session-ctx! handle profile)
          (store/append-event! store sid {:event/type :session/started :session session-map})
          handle)
        (catch Throwable e
@@ -112,13 +175,17 @@
      (try
        (let [profile  (resolve-profile-for-session cfg opts)
              provider (resolve-provider cfg)
+             adapter  (build-adapter cfg provider)
              handle0  (store/create-session! store {:session/id sid})   ; folds the durable log
-             handle   (assoc handle0 :cfg cfg :adapter (build-adapter cfg provider))
-             view     (store/current-view store sid)]
+             view     (store/current-view store sid)
+             cache-id (or (:session/cache-id (:session view)) sid)      ; cache affinity (08)
+             handle   (merge handle0
+                             {:cfg cfg :adapter adapter :capability profile :cache-id cache-id}
+                             (build-leaf cfg provider adapter))]
          (when-not (:session view)
            (throw (ex-info (str "no persisted session to resume: " sid)
                            {:error/type :fractal/unknown-session :session/id sid})))
-         (reset! (:sci-ctx handle) (kernel/new-ctx sid profile (kernel/engine-fn-impls)))
+         (init-session-ctx! handle profile)
          (let [snap (payload-io/read-payload store (:vars-ref view))]   ; the head proxy (02 §9)
            (when (and (map? snap) (:vars snap))
              (kernel/restore-vars! @(:sci-ctx handle) sid snap)))
@@ -281,3 +348,62 @@
     (compaction/compact-session! handle)
     handle
     (finally (reset! (:busy handle) false))))
+
+;; ---------------------------------------------------------------------------
+;; spawn-child! — the recursion composition root (Phase 3)
+;; ---------------------------------------------------------------------------
+
+(defn spawn-child!
+  "Spawn a FRESH child session that REUSES the parent's store (children are just
+   more sessions in the SAME memory/sqlite store — the port is unchanged). The
+   composition root for a recursion:
+   - capability = inherit-and-clamp: clamp(parent-resolved, child-override)
+     (engine-default is ROOT-ONLY, 04 §3). With no override, child = parent — so
+     a :locked-down parent's clamp keeps lm/rlm dropped, and a :default parent's
+     child cannot exceed :default (the escalation is closed).
+   - model/provider default to the root's (cfg :child-model / :child-provider).
+   - harness = :rlm, so the child gets the six fns and can itself recurse
+     (nesting works: independent ctxs, one per session).
+   The child's REPL ctx + adapter + leaf + cache-id (FRESH per child, 08) are
+   stashed on its handle exactly as start-session! does. Returns the child
+   handle; the caller (recursion/child-call) drives run-turn! on it."
+  [parent-handle child-opts]
+  (let [store        (:store parent-handle)
+        parent-cfg   (:cfg parent-handle)
+        parent-prof  (:capability parent-handle)
+        override     (:capability child-opts)
+        child-prof   (if override
+                       (capability/clamp parent-prof
+                                         (capability/validate-profile!
+                                           (capability/resolve-profile override)))
+                       parent-prof)
+        child-sid    (gen-id)
+        child-model  (or (:child-model parent-cfg) (:model parent-cfg))
+        child-prov   (or (:child-provider parent-cfg) (resolve-provider parent-cfg))
+        child-cfg    (assoc parent-cfg
+                            :model          child-model
+                            :provider       child-prov
+                            :context-window (or (catalog/context-window child-model) :unknown)
+                            :harness        :rlm
+                            ;; leaf model/provider re-resolve against the child's model
+                            :leaf-model     (or (:leaf-model parent-cfg) child-model))
+        child-adpt   (build-adapter child-cfg child-prov)
+        session-map  (with-meta
+                       {:session/id             child-sid
+                        :session/status         :running
+                        :session/created-at     (time/now-str)
+                        :session/provider       child-prov
+                        :session/model          child-model
+                        :session/capability     (:capability/name child-prof)
+                        :session/cache-id       child-sid
+                        :session/kind           :child
+                        :session/system-overlay (:system-overlay child-opts)}
+                       (live-meta child-cfg))
+        handle0      (store/create-session! store session-map)
+        child        (merge handle0
+                            {:cfg child-cfg :adapter child-adpt
+                             :capability child-prof :cache-id child-sid}
+                            (build-leaf child-cfg child-prov child-adpt))]
+    (init-session-ctx! child child-prof)
+    (store/append-event! store child-sid {:event/type :session/started :session session-map})
+    child))

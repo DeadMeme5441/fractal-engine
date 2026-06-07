@@ -9,9 +9,29 @@
 (def defaults
   {:adapter          :sdk
    :model            nil
+   :provider         nil           ; EXPLICIT provider override (Phase 3). When set it
+                                   ; WINS over catalog model-id resolution — required for
+                                   ; codex OAuth, whose model ids catalog-resolve to :openai
+                                   ; (05/GD gotcha). nil ⇒ resolve from the model id.
    :fake/respond     nil
    :provider/config  nil
    :capability       :default
+   ;; Phase 3 · the harness switch (the hot-swap). Drives BOTH the system prompt AND
+   ;; which engine host fns are assembled, coherently:
+   ;;   :clojure (default) = the Phase-1/2 plain coding harness — engine-fns #{:FINAL
+   ;;             :inspect}, the Phase-1 prompt. Byte-for-byte Phase-1/2 behavior.
+   ;;   :rlm     = the rlm-native recursive harness — the six fns injected (gated by the
+   ;;             capability profile's :engine-fns) + the v24 recursion doctrine prompt.
+   ;; Switching is CONFIG-ONLY (zero code edits). Default :clojure keeps Phase-1/2 default.
+   :harness          :clojure
+   ;; Phase 3 · leaf/child model + provider resolution (defaults to the root model/provider).
+   :leaf-model       nil           ; nil ⇒ the root :model
+   :leaf-provider    nil           ; nil ⇒ the resolved root provider
+   :child-model      nil           ; nil ⇒ the root :model
+   :child-provider   nil           ; nil ⇒ the resolved root provider
+   :max-fanout       50            ; the ≤50 fan-out cap (map-lm/map-rlm); over ⇒ chunk
+   :fanout-pool      16            ; max worker threads per fan-out call (bounded pool)
+   :leaf-concurrency 8             ; the GLOBAL leaf semaphore size (avoids rate-limit storms)
    :max-steps        25
    :max-turns        nil
    :call-timeout-ms  120000
@@ -44,6 +64,9 @@
                       {:error/type :config/missing-responder})))
     (when (nil? (:model cfg))
       (throw (ex-info ":model is required" {:error/type :config/missing-model})))
+    (when-not (#{:clojure :rlm} (:harness cfg))
+      (throw (ex-info "invalid :harness (only :clojure or :rlm)"
+                      {:error/type :config/invalid-harness :harness (:harness cfg)})))
     (when-not (#{:memory :sqlite} (:store cfg))
       (throw (ex-info "invalid :store (only :memory or :sqlite)"
                       {:error/type :config/invalid-store :store (:store cfg)})))
@@ -55,4 +78,9 @@
       (assoc cfg
              :capability      profile
              :capability/name (:capability/name profile)
-             :context-window  window))))
+             :context-window  window
+             ;; resolve leaf/child model defaults up front so recursion never has to
+             ;; re-derive them (provider defaults stay nil here — resolved at spawn time
+             ;; against the root provider, since :fake/sdk resolution differs).
+             :leaf-model      (or (:leaf-model cfg) (:model cfg))
+             :child-model     (or (:child-model cfg) (:model cfg))))))

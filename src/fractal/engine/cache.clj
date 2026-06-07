@@ -22,9 +22,19 @@
     (str "fr:" (name purpose) ":" (subs hex 0 32))))
 
 (defn build-cache-opts
-  "The opaque passthrough attached to every adapter request (05 §4). Phase 1
-   scopes to the root :agent purpose."
+  "The opaque passthrough attached to every adapter request (05 §4). The root
+   agent loop scopes to the :agent purpose."
   [view cfg]
   {:enabled? true
    :ttl      (:cache-ttl cfg)
    :scope-id (scope-id (cache-id (:session view)) :agent)})
+
+(defn build-leaf-cache-opts
+  "The opaque passthrough for a LEAF provider call (Phase 3, 08 §4). Scopes to
+   the :leaf purpose under the CALLER session's cache-id (leaves run inside the
+   caller's session state) — kept for symmetry; leaf prompts usually sit below
+   the provider's cache minimum, so it is near a no-op."
+  [caller-cache-id cfg]
+  {:enabled? true
+   :ttl      (:cache-ttl cfg)
+   :scope-id (scope-id caller-cache-id :leaf)})

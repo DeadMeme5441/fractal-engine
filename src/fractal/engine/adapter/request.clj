@@ -12,7 +12,7 @@
   "Base doctrine ++ cfg :system-overlay ++ session :session/system-overlay
    (05 §4, GD32) — the overlays specialize behavior, never add functions."
   [view cfg]
-  (let [text (->> [(prompt/system-prompt)
+  (let [text (->> [(prompt/system-prompt (:harness cfg))   ; the harness mode selects the base doctrine
                    (:system-overlay cfg)
                    (:session/system-overlay (:session view))]
                   (remove str/blank?)
