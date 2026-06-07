@@ -122,19 +122,21 @@
   (blob-value root (:head/state-ref head)))
 
 (deftest prompt-contract
-  (is (= 22 prompt/prompt-version))
+  (is (= 23 prompt/prompt-version))
   (doseq [phrase ["You are the active RLM in fractal-engine"
                   "complete the task fully -- do not gold-plate, but do not leave it half-done"
                   "The caller may be a human, a CLI/API host, or another RLM session."
                   "Be an operator, not a commentator."
-                  "Your strengths:"
+                  "Default to the direct path:"
+                  "Three kinds of processing, and when to reach for each:"
+                  "When in doubt, collapse to the cheaper kind."
                   "map-lm and map-rlm are capped at 50 parallel inputs per call."
                   "For more than 50 items, sequence batches of 40-50 with partition-all, run each chunk as its own map-lm or map-rlm, reduce each chunk locally, then reduce those partials globally."
                   "The host will return a recoverable fanout error for a single oversized fan-out; retry by chunking, not by raising the cap."
                   "Successful map-lm slots hold leaf values; successful map-rlm slots hold RLM envelopes, with the child FINAL at :rlm/value."
                   "rlm/map-rlm return envelopes, not bare child FINAL values."
                   "FINAL is your return value. It is not a progress note, not a message to a human, and not a place to display raw material."
-                  "Default cadence for non-trivial work:"
+                  "Working method -- pick what the task needs, do not run a fixed script:"
                   "attach-rlm handle task"]]
     (is (str/includes? prompt/system-prompt phrase)))
   (doseq [p [prompt/system-prompt prompt/child-prompt prompt/leaf-prompt]]

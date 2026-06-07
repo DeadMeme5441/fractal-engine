@@ -124,11 +124,75 @@
            :eval/ended-at (time/now-str)
            :eval/elapsed-ms (quot (- (System/nanoTime) started-ns) 1000000)})))))
 
+;; ── intuitive rendering of projected values (what the model reads) ────────────
+;; `artifacts/project-value` produces a compact EDN structure where bulky values
+;; become wrapper maps (`{:value/type :string ...}`, `:seq`, `:set`, `:object`).
+;; Rendered raw, a truncated string nested in a map looks like a literal map and
+;; the model mis-reads its own data. `render-node` turns those wrappers into
+;; self-describing «inspector» annotations so the kind/size of every value is
+;; unambiguous, while ordinary maps/vectors still read as ordinary EDN.
+
+(declare render-node)
+
+(defn- string-wrapper? [m]
+  (and (= :string (:value/type m)) (contains? m :value/preview)))
+(defn- set-wrapper? [m]
+  (and (= :set (:value/type m)) (contains? m :value/items)))
+(defn- seq-wrapper? [m]
+  (and (= :seq (:value/type m)) (contains? m :value/items)))
+(defn- object-wrapper? [m]
+  (and (= :object (:value/type m)) (contains? m :class)))
+
+(defn- render-entry [[k v]]
+  (str (render-node k) " " (render-node v)))
+
+(defn- render-node [v]
+  (cond
+    (nil? v) "nil"
+    (string? v) (pr-str v)
+    (map? v)
+    (cond
+      (string-wrapper? v) (str (pr-str (:value/preview v))
+                               " «string, " (:value/count v) " chars»")
+      (set-wrapper? v) (str "#{" (str/join " " (map render-node (:value/items v))) "}"
+                            " «set, " (:value/count v) " items»")
+      (seq-wrapper? v) (str "(" (str/join " " (map render-node (:value/items v))) ")"
+                            " «seq, " (count (:value/items v)) " shown»")
+      (object-wrapper? v) (str "«" (:class v) ": " (:preview v) "»")
+      (:truncated? v) (str "«…truncated"
+                           (cond (:reason v) (str " (" (name (:reason v)) ")")
+                                 (:remaining v) (str " +" (:remaining v) " more")
+                                 :else "") "»")
+      :else (str "{" (str/join ", " (map render-entry v)) "}"))
+    (vector? v)
+    (let [trunc (when (and (map? (peek v)) (:truncated? (peek v))) (peek v))
+          items (if trunc (pop v) v)]
+      (str "[" (str/join " " (map render-node items)) "]"
+           (when trunc (str " «+" (:remaining trunc) " more items»"))))
+    :else (pr-str v)))
+
+(defn- top-tag
+  "A trailing kind/size annotation for the whole value. Skipped for values that
+  already self-describe (string/seq/set/object wrappers) or are plain scalars."
+  [v]
+  (cond
+    (vector? v) (let [trunc (when (and (map? (peek v)) (:truncated? (peek v))) (peek v))
+                      n (if trunc (dec (count v)) (count v))]
+                  ;; remainder, if any, is shown inline by render-node; don't repeat it here
+                  (str "vector, " n " items" (when trunc " shown")))
+    (and (map? v)
+         (not (string-wrapper? v)) (not (set-wrapper? v))
+         (not (seq-wrapper? v)) (not (object-wrapper? v)) (not (:truncated? v)))
+    (str "map, " (count v) " entries")
+    :else nil))
+
 (defn- pretty-value [value]
   (binding [*print-length* 80
             *print-level* 8
             *print-namespace-maps* false]
-    (pr-str value)))
+    (let [body (render-node value)
+          tag  (top-tag value)]
+      (if tag (str body "  «" tag "»") body))))
 
 (defn- observation-header [idx row]
   (str "(eval " (inc idx)
@@ -154,7 +218,7 @@
        (conj lines (str "=> " (pretty-value (select-keys row [:eval/status :eval/error]))))))))
 
 (defn observation [rows]
-  (str "Evaluation observation. Values shown here are compact projections; full live values remain in REPL vars you defined.\n\n"
+  (str "Evaluation observation. Values shown here are compact projections; full live values remain in your REPL vars. «...» notes annotate a value's kind and size -- e.g. \"text...\" «string, N chars» is one whole string truncated for display, not a map.\n\n"
        (str/join "\n\n" (map-indexed observation-row-text rows))
        (when (and (seq rows)
                   (not-any? #(= :final (:eval/status %)) rows))
