@@ -85,6 +85,22 @@
       (update :events conj ev)
       (bump-counters ev)))
 
+(defn kept-messages
+  "The messages surviving compaction (a PURE view derivation, shared by
+   request-assembly and compaction — 05 §4, 07 §4): the `:message` of every
+   message-bearing event (`:message/appended` | `:session/compacted`) in
+   `(:events view)` whose `:event/id` >= `:compact-from-event-id` (nil ⇒ all).
+   ⛔ Pruned over the LOG, not over `:messages` — message entities carry no
+   `:event/id`, and the compact frame's own event-id == the boundary, so it and
+   everything after survive."
+  [view]
+  (let [boundary (:compact-from-event-id view)]
+    (->> (:events view)
+         (filter (fn [{:keys [event/type]}]
+                   (or (= :message/appended type) (= :session/compacted type))))
+         (filter (fn [ev] (or (nil? boundary) (>= (:event/id ev) boundary))))
+         (mapv :message))))
+
 ;; ---------------------------------------------------------------------------
 ;; The SessionStore protocol (02 §4)
 ;; ---------------------------------------------------------------------------
