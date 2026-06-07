@@ -23,13 +23,23 @@
   cheshire/cheshire {:mvn/version "5.13.0"}}
 
  :aliases
- {:test
+ {;; Default-safe: excludes ^:live so `clojure -M:test` never makes a paid API
+  ;; call, even with keys in the environment. All of Phase 1 validates offline.
+  :test
   {:extra-paths ["test"]
    :extra-deps {io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-   :main-opts ["-m" "cognitect.test-runner"]}
+   :main-opts ["-m" "cognitect.test-runner" "--exclude" ":live"]}
 
-  ;; A REPL for development.
+  ;; Opt-in live smoke runner: requires ^:live metadata + a real provider key.
+  ;; Exercises SdkAdapter end-to-end; never on the default path (10 §4).
+  :live-test
+  {:extra-paths ["test"]
+   :extra-deps {io.github.cognitect-labs/test-runner
+                {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+   :main-opts ["-m" "cognitect.test-runner" "--include" ":live"]}
+
+  ;; A REPL for development (adds the dev/ RUNS-SEES harness to the path).
   :dev
   {:extra-paths ["dev"]}}}
 

@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   test:
-    name: test, evals, and jars
+    name: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -51,17 +51,9 @@ jobs:
       - name: Check whitespace
         run: git diff --check
 
+      # Phase 1: the whole engine validates offline (no API keys). This run
+      # includes the pinned SCI 0.8.43 sandbox regression test (spec/04 §7), the
+      # snapshot/restore round-trip, and the namespace-graph acyclicity test
+      # (spec/01) — all CI-blocking. Re-run on every org.babashka/sci bump.
       - name: Run engine tests
         run: clojure -M:test
-
-      - name: Run eval harness tests
-        run: clojure -M:evals-test
-
-      - name: Build library jar
-        run: clojure -T:build jar
-
-      - name: Build CLI uberjar
-        run: clojure -T:build uber
-
-      - name: Smoke-test CLI jar
-        run: java -jar target/fractal.jar help
