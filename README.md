@@ -7,16 +7,19 @@ calls `(FINAL value)`. Some of the functions the model can call are *themselves*
 language models — so a problem can be decomposed into sub-problems, each solved by a
 fresh recursion of the same loop.
 
-> **Phases 1 & 2 are built.** The complete non-recursive session core — the uniform
+> **Phases 1, 2 & 3 are built.** The complete non-recursive session core — the uniform
 > step loop, the SCI eval kernel, the capability sandbox, the event-sourced state
 > port, the adapter (sdk + fake), the public API, config, live-query, and compaction
 > — is implemented from **[`spec/`](spec/)** under the `fractal.engine.*` namespace
 > root, plus **Phase 2 durable storage**: a SQLite `SessionStore` + a file-based,
 > content-addressed blob store slotted under the *same* port (zero loop changes), and
-> durable `resume-session!` (reopen a persisted session by folding its event log and
-> restoring its REPL vars). `clojure -M:test` is green offline (no API keys). The
-> recursive layer (`lm`/`map-lm`/`rlm`/`map-rlm`, Phases 3/4) is out of scope and only
-> has clean seams reserved.
+> durable `resume-session!`. **Phase 3 adds the RLM recursion layer**: the four
+> model-calling host fns (`lm`/`map-lm` leaves, `rlm`/`map-rlm` children) and a
+> **hot-swap** between a plain coding harness and the recursive harness *by config
+> alone*. `clojure -M:test` is green offline (no API keys; 148 tests / 566 assertions),
+> and a live codex-OAuth suite drives real recursion end to end (`clojure -M:live-test`).
+> Phase 4 (the durable recursion data model — invocation/lineage edges, immutable
+> heads, `attach-rlm`) is out of scope and only has clean, additive seams reserved.
 >
 > The spec in `spec/` (`00`–`12`) is the source of truth and is deliberately
 > complete on its own. (A v1 reference implementation lives in the sibling
@@ -63,12 +66,48 @@ before the restart:
 (:turn/final-value (fe/run-turn! s2 "use it")) ;=> 42  (x survived the reopen)
 ```
 
+### The recursion layer + the hot-swap (Phase 3)
+
+Two harnesses live in one repo, **selected by config alone** (`:harness`, default
+`:clojure`):
+
+- **`:clojure`** — the plain coding harness. The REPL exposes only `FINAL`/`inspect`
+  and the Phase-1 prompt. Byte-for-byte the Phase-1/2 behaviour.
+- **`:rlm`** — the recursive harness. The REPL *also* exposes four model-calling host
+  fns and the model gets the recursion doctrine:
+  - `(lm input query [mode])` / `(map-lm inputs query [mode])` — **leaves**: one bounded
+    model call (no session, no loop); `map-lm` fans out over ≤50 inputs, order-preserved.
+  - `(rlm task)` / `(map-rlm tasks [shared])` — **children**: a fresh recursion (its own
+    SCI ctx + session, capability inherited-and-clamped) running the whole loop to
+    `FINAL`; returns an envelope `{:rlm/value … :rlm/session … :rlm/meta …}`.
+
+Switching is zero code edits — it drives both the system prompt and the injected fns.
+The capability profile still gates egress: **`:locked-down` drops `lm`/`rlm`**.
+
+```clojure
+;; codex via OAuth (creds read from ~/.codex/auth.json); :provider is explicit because
+;; codex model ids resolve to :openai in the catalog.
+(def cfg (fe/make-config {:adapter :sdk :provider :codex-backend :model "gpt-5.5"
+                          :harness :rlm :capability :default}))
+(def s (fe/start-session! cfg))
+;; the model decomposes via map-rlm / map-lm and aggregates in Clojure
+(fe/run-turn! s "Sum each of these 8 CSV blobs' amount column …")
+```
+
+`:turn/usage`/`:turn/cost` stay **self-only** at the root; each child's cost rides its
+envelope's `:rlm/meta`. Partial fan-out never throws — a failed slot is a
+`{:fractal/failed true …}` sentinel. Children are ordinary sessions in the same store,
+so Phase-2 durability + `resume-session!` work in `:rlm` mode too.
+
 ## Develop
 
 - `clojure -M:test` — the full offline suite (incl. the pinned SCI sandbox test,
-  the snapshot/restore round-trip, and the namespace-graph acyclicity test).
-- `clojure -M:live-test` — the optional live smoke test (needs a provider key in
-  the env; never on the default/CI path).
+  the snapshot/restore round-trip, the recursion suite — leaves/children/nested/
+  fan-out/partial-failure/clamp/hot-swap/resume — and the namespace-graph acyclicity
+  test). No API keys; never a paid call.
+- `clojure -M:live-test` — the optional live suite. The codex-OAuth recursion proofs
+  run from `~/.codex/auth.json` (no env key needed); the deepseek smoke test runs only
+  if `DEEPSEEK_API_KEY` is set. Never on the default/CI path; makes paid calls.
 - `clojure -M:dev -e "(require 'seeing) (seeing/demo)"` — the RUNS/SEES dev harness:
   prints the model's code beside the engine's fit-or-stub observations.
 
