@@ -111,10 +111,6 @@
   []
   (->MemoryStore (atom {}) (atom {})))
 
-(defn stop-dispatch!
-  "Stop a session's live dispatcher thread (idempotent; daemon threads are
-   exit-safe regardless). Called from stop-session! to avoid idle-thread
-   accumulation."
-  [store sid]
-  (when-let [slot (get @(:sessions store) sid)]
-    (live/stop-dispatch (:dispatch slot))))
+;; The store-agnostic dispatcher-stop used by stop-session! lives in
+;; `fractal.engine.store.slots` (it works on MemoryStore and SqliteStore alike,
+;; since both key per-session `:dispatch` slots under a `:sessions` atom).

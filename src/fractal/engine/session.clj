@@ -14,6 +14,8 @@
             [fractal.engine.session-loop :as sloop]
             [fractal.engine.store :as store]
             [fractal.engine.store.memory :as mem]
+            [fractal.engine.store.slots :as slots]
+            [fractal.engine.store.sqlite :as sqlite]
             [fractal.engine.time :as time]))
 
 ;; ---------------------------------------------------------------------------
@@ -28,38 +30,102 @@
       (capability/resolve-override base ov)    ; per-session override, clamped + loosening-rejected
       base)))
 
+(defn- resolve-provider
+  "The session's provider: `:fake` for the fake adapter, else the catalog-resolved
+   provider for cfg's model (throws on an unknown model)."
+  [cfg]
+  (if (= :fake (:adapter cfg))
+    :fake
+    (let [p (:provider (catalog/provider-from-model-id (:model cfg)))]
+      (when-not p
+        (throw (ex-info (str "could not resolve a provider for model: " (:model cfg))
+                        {:error/type :config/unknown-model :model (:model cfg)})))
+      p)))
+
+(defn- build-adapter [cfg provider]
+  (if (= :fake (:adapter cfg))
+    (fake/fake-adapter (:fake/respond cfg))
+    (sdk/sdk-adapter provider (:provider/config cfg))))
+
+(defn- build-store
+  "Pick + construct the SessionStore off cfg :store (GD5 — the composition root,
+   not a loop change). :memory (default) is the in-memory store; :sqlite is the
+   durable store rooted at cfg :store/dir (events.db + blobs/). Both slot under the
+   same port (02 §4)."
+  [cfg]
+  (case (:store cfg)
+    :sqlite (sqlite/sqlite-store {:dir (:store/dir cfg)
+                                  :live-opts {:bound (:live/queue-bound cfg)
+                                              :drop  (:live/drop cfg)}})
+    (mem/memory-store)))
+
+(defn- close-store-quietly!
+  "Release a store opened by build-store when composition fails before a handle is
+   returned — otherwise the sqlite JDBC connection would leak (the caller never got
+   a handle to close). No-op for the in-memory store (GC reclaims it)."
+  [store]
+  (when (instance? fractal.engine.store.sqlite.SqliteStore store)
+    (try (sqlite/close! store) (catch Throwable _ nil))))
+
 (defn start-session!
   ([cfg] (start-session! cfg {}))
   ([cfg opts]
-   (let [sid     (or (:id opts) (gen-id))
-         store   (mem/memory-store)
-         profile (resolve-profile-for-session cfg opts)
-         provider (if (= :fake (:adapter cfg))
-                    :fake
-                    (let [p (:provider (catalog/provider-from-model-id (:model cfg)))]
-                      (when-not p
-                        (throw (ex-info (str "could not resolve a provider for model: " (:model cfg))
-                                        {:error/type :config/unknown-model :model (:model cfg)})))
-                      p))
-         session-map (with-meta
-                       {:session/id             sid
-                        :session/status         :running
-                        :session/created-at     (time/now-str)
-                        :session/provider       provider
-                        :session/model          (:model cfg)
-                        :session/capability     (:capability/name profile)
-                        :session/cache-id       sid
-                        :session/system-overlay (:system-overlay opts)}
-                       {:fractal.engine.store.memory/live
-                        {:bound (:live/queue-bound cfg) :drop (:live/drop cfg)}})
-         handle0 (store/create-session! store session-map)
-         adapter (if (= :fake (:adapter cfg))
-                   (fake/fake-adapter (:fake/respond cfg))
-                   (sdk/sdk-adapter provider (:provider/config cfg)))
-         handle  (assoc handle0 :cfg cfg :adapter adapter)]
-     (reset! (:sci-ctx handle) (kernel/new-ctx sid profile (kernel/engine-fn-impls)))
-     (store/append-event! store sid {:event/type :session/started :session session-map})
-     handle)))
+   (let [store (build-store cfg)]
+     (try
+       (let [sid      (or (:id opts) (gen-id))
+             profile  (resolve-profile-for-session cfg opts)
+             provider (resolve-provider cfg)
+             session-map (with-meta
+                           {:session/id             sid
+                            :session/status         :running
+                            :session/created-at     (time/now-str)
+                            :session/provider       provider
+                            :session/model          (:model cfg)
+                            :session/capability     (:capability/name profile)
+                            :session/cache-id       sid
+                            :session/system-overlay (:system-overlay opts)}
+                           {:fractal.engine.store.memory/live
+                            {:bound (:live/queue-bound cfg) :drop (:live/drop cfg)}})
+             handle0 (store/create-session! store session-map)
+             handle  (assoc handle0 :cfg cfg :adapter (build-adapter cfg provider))]
+         (reset! (:sci-ctx handle) (kernel/new-ctx sid profile (kernel/engine-fn-impls)))
+         (store/append-event! store sid {:event/type :session/started :session session-map})
+         handle)
+       (catch Throwable e
+         (close-store-quietly! store)
+         (throw e))))))
+
+(defn resume-session!
+  "^:alpha (06 §2) — durably REOPEN a persisted session (`:store :sqlite` only) —
+   the cross-process payoff of persistence. Builds the store on cfg's :store/dir,
+   FOLDS the durable event log to rebuild the view cache (create-session!'s recovery
+   path — deterministic re-fold reproduces the same ids, 02 §9), rebuilds the SCI
+   ctx via kernel/new-ctx, and RESTORES the live REPL vars from the latest :vars-ref
+   (kernel/restore-vars!) so a new turn can use a var def'd before the reopen. Does
+   NOT append :session/started — the session already exists."
+  ([cfg sid] (resume-session! cfg sid {}))
+  ([cfg sid opts]
+   (when-not (= :sqlite (:store cfg))
+     (throw (ex-info "resume-session! requires :store :sqlite"
+                     {:error/type :config/unsupported-store :store (:store cfg)})))
+   (let [store (build-store cfg)]
+     (try
+       (let [profile  (resolve-profile-for-session cfg opts)
+             provider (resolve-provider cfg)
+             handle0  (store/create-session! store {:session/id sid})   ; folds the durable log
+             handle   (assoc handle0 :cfg cfg :adapter (build-adapter cfg provider))
+             view     (store/current-view store sid)]
+         (when-not (:session view)
+           (throw (ex-info (str "no persisted session to resume: " sid)
+                           {:error/type :fractal/unknown-session :session/id sid})))
+         (reset! (:sci-ctx handle) (kernel/new-ctx sid profile (kernel/engine-fn-impls)))
+         (let [snap (payload-io/read-payload store (:vars-ref view))]   ; the head proxy (02 §9)
+           (when (and (map? snap) (:vars snap))
+             (kernel/restore-vars! @(:sci-ctx handle) sid snap)))
+         handle)
+       (catch Throwable e
+         (close-store-quietly! store)
+         (throw e))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Turn gates + lifecycle
@@ -189,8 +255,20 @@
      ;; the terminal :session/stopped it appends at the next step boundary). An
      ;; in-flight-no-wait stop leaves the daemon running (JVM-exit-safe).
      (when (or wait? (not @(:busy handle)))
-       (mem/stop-dispatch! store sid))
+       (slots/stop-dispatch! store sid))
      handle)))
+
+(defn close-session!
+  "Release a handle's store resources: stop its live dispatch and, for the sqlite
+   store, CLOSE the JDBC connection — so the session can later be durably reopened
+   with resume-session! (as a process restart would). Memory: just stops the
+   dispatch. Safe from a finally/shutdown hook."
+  [handle]
+  (let [store (:store handle) sid (:session-id handle)]
+    (if (instance? fractal.engine.store.sqlite.SqliteStore store)
+      (sqlite/close! store)
+      (slots/stop-dispatch! store sid)))
+  handle)
 
 (defn compact-session!
   "Force compaction now: CAS the turn-lock (throw :fractal/turn-in-flight if a

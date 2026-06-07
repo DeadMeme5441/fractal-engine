@@ -20,7 +20,15 @@
 
   ;; JSON for the CLI's eventual --json/--jsonl; arrives transitively via the SDK,
   ;; pinned so it is deterministic.
-  cheshire/cheshire {:mvn/version "5.13.0"}}
+  cheshire/cheshire {:mvn/version "5.13.0"}
+
+  ;; Phase 2 · the canonical durable event log + sessions table for the SQLite
+  ;; SessionStore impl (fractal.engine.store.sqlite). Slots under the SAME
+  ;; SessionStore port as MemoryStore — zero loop/kernel/adapter/api changes.
+  ;; Payloads do NOT live here: they go to a file-based, content-addressed blob
+  ;; store (fractal.engine.store.blobstore — no extra dependency). Driven through
+  ;; raw JDBC (no wrapper dep). PINNED for determinism.
+  org.xerial/sqlite-jdbc {:mvn/version "3.46.1.3"}}
 
  :aliases
  {;; Default-safe: excludes ^:live so `clojure -M:test` never makes a paid API
@@ -44,10 +52,13 @@
   {:extra-paths ["dev"]}}}
 
 ;; ---------------------------------------------------------------------------
-;; PHASE-2 will add (NOT phase 1 — the state port is in-memory until then):
-;;   org.xerial/sqlite-jdbc {:mvn/version "..."}   ; canonical fact store
-;;   (a content-addressed blob store — file-based, no extra dep)
-;; Datahike is an OPEN keep/drop decision for phase 2 (see spec/11-build-plan.md).
+;; PHASE 2 (BUILT): org.xerial/sqlite-jdbc above backs fractal.engine.store.sqlite
+;; (the canonical durable event log + sessions); payloads go to the file-based,
+;; content-addressed blob store (fractal.engine.store.blobstore, no extra dep).
+;; Both slot under the existing SessionStore port. DATAHIKE: DROPPED — the
+;; event-sourced log + the pure apply-event fold are the query mechanism, and no
+;; concrete query need has materialized (spec/11 "lean: drop"); add a derived
+;; index only if a real need appears.
 ;; Native-image (GraalVM) is a possible LATER distribution option that SCI unlocks
 ;; (the model-code eval no longer needs the Clojure compiler) — see spec/00.
 ;; ---------------------------------------------------------------------------

@@ -23,9 +23,22 @@
 (defn run-turn!       [handle msg] (session/run-turn! handle msg))
 (defn run-turn-async! [handle msg] (session/run-turn-async! handle msg))
 
+(defn ^:alpha resume-session!
+  "^:alpha / Phase 2 (06 §2) — durably reopen a persisted `:store :sqlite` session by
+   folding its event log + restoring its REPL vars; returns a fresh handle. Throws if
+   cfg's store is not :sqlite or the session id is unknown."
+  ([cfg sid]      (session/resume-session! cfg sid))
+  ([cfg sid opts] (session/resume-session! cfg sid opts)))
+
 (defn stop-session!
   ([handle]      (session/stop-session! handle))
   ([handle opts] (session/stop-session! handle opts)))
+
+(defn close-session!
+  "Release a handle's store resources (stop live dispatch; close the sqlite
+   connection). A sqlite session can afterwards be reopened with resume-session!."
+  [handle]
+  (session/close-session! handle))
 
 (defn compact-session! [handle] (session/compact-session! handle))
 

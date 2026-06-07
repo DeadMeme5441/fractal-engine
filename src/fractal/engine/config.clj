@@ -18,7 +18,8 @@
    :retry            true
    :stream?          false
    :cache-ttl        "1h"
-   :store            :memory
+   :store            :memory       ; :memory (default/Phase 1) | :sqlite (Phase 2, durable)
+   :store/dir        nil           ; REQUIRED when :store :sqlite — the dir holding events.db + blobs/
    :live/queue-bound 1024
    :live/drop        :drop-transient
    :context          {:compact-at 0.80 :hard-at 0.95 :unknown-window-chars 400000}
@@ -43,6 +44,12 @@
                       {:error/type :config/missing-responder})))
     (when (nil? (:model cfg))
       (throw (ex-info ":model is required" {:error/type :config/missing-model})))
+    (when-not (#{:memory :sqlite} (:store cfg))
+      (throw (ex-info "invalid :store (only :memory or :sqlite)"
+                      {:error/type :config/invalid-store :store (:store cfg)})))
+    (when (and (= :sqlite (:store cfg)) (nil? (:store/dir cfg)))
+      (throw (ex-info ":store :sqlite requires :store/dir (the durable storage directory)"
+                      {:error/type :config/missing-store-dir})))
     (let [profile (capability/validate-profile! (capability/resolve-profile (:capability cfg)))
           window  (or (catalog/context-window (:model cfg)) :unknown)]
       (assoc cfg
