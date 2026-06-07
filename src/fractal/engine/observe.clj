@@ -52,9 +52,24 @@
     (char? v)    "char"    (boolean? v) "boolean"
     :else (.getSimpleName (class v))))
 
+(def ^:private seq-probe-cap
+  "Upper bound on elements counted when sizing a (possibly lazy/infinite) seq —
+   so a stub never fully realizes an unbounded value (the infinite-seq hang)."
+  100000)
+
+(defn- seq-size-label
+  "`N items` for a finite seq, `≥CAP items` when realization is clipped at the
+   probe cap (an unbounded/infinite seq)."
+  [v kind]
+  (let [n (bounded-count (inc seq-probe-cap) v)]
+    (if (> n seq-probe-cap)
+      (str "«" kind ", ≥" seq-probe-cap " items»")
+      (str "«" kind ", " n " items»"))))
+
 (defn value-stub
   "The one-line `«type, size»` stub (kind + size only, no contents). Pinned
-   labels (GD36); nil is never a stub."
+   labels (GD36); nil is never a stub. Seq sizing is BOUNDED (never realizes an
+   unbounded seq)."
   [v]
   (cond
     (nil? v)     "nil"
@@ -62,9 +77,9 @@
     (set? v)     (str "«set, " (count v) " items»")
     (map? v)     (str "«map, " (count v) " entries»")
     (string? v)  (str "«string, " (count v) " chars»")
-    (instance? clojure.lang.LazySeq v) (str "«lazy-seq, " (count v) " items»")
+    (instance? clojure.lang.LazySeq v) (seq-size-label v "lazy-seq")
     (list? v)    (str "«list, " (count v) " items»")
-    (seq? v)     (str "«list, " (count v) " items»")
+    (seq? v)     (seq-size-label v "list")
     :else        (str "«" (stub-type-name v) "»")))
 
 (defn value-display

@@ -232,14 +232,28 @@
 
 (defn- ns-var-values
   "{\"name\" → host-value …} for the session ns, via a SCI eval over `*ns*`
-   (avoids the denied find-ns; sci/ns is bound to the session ns)."
+   (avoids the denied find-ns; sci/ns is bound to the session ns). ⛔ Every core
+   symbol is FULLY-QUALIFIED so a model `(def name …)`/`(def into …)` in the
+   session ns cannot shadow it and corrupt/crash the snapshot — the model cannot
+   def a namespaced symbol into clojure.core (verified)."
   [ctx session-id]
   (sci/binding [sci/ns (the-session-ns ctx session-id)]
     (sci/eval-string* ctx
-      "(into {} (for [[s v] (ns-interns *ns*)] [(name s) (deref v)]))")))
+      (str "(clojure.core/into {} (clojure.core/for "
+           "[[s v] (clojure.core/ns-interns clojure.core/*ns*)] "
+           "[(clojure.core/name s) (clojure.core/deref v)]))"))))
+
+(def ^:private restore-print-length
+  "Cap on elements printed in the restorable? round-trip — so an unbounded/
+   infinite lazy seq is bounded (and correctly marked :unrestorable) instead of
+   hanging pr-str (the snapshot infinite-seq sink)."
+  100000)
 
 (defn- restorable? [v]
-  (try (= v (binding [*read-eval* false] (read-string (pr-str v))))
+  (try (= v (binding [*read-eval* false
+                      *print-length* restore-print-length
+                      *print-level* 200]
+              (read-string (pr-str v))))
        (catch Throwable _ false)))
 
 (defn- unrestorable-reason [v]
@@ -264,7 +278,10 @@
 
 (defn- clear-ns-vars! [ctx session-id]
   (sci/binding [sci/ns (the-session-ns ctx session-id)]
-    (sci/eval-string* ctx "(doseq [s (keys (ns-interns *ns*))] (ns-unmap *ns* s))")))
+    (sci/eval-string* ctx
+      (str "(clojure.core/doseq [s (clojure.core/keys "
+           "(clojure.core/ns-interns clojure.core/*ns*))] "
+           "(clojure.core/ns-unmap clojure.core/*ns* s))"))))
 
 (defn restore-vars!
   "Phase 2/4 ONLY (resume/fork). Clear the session ns, then sci/intern each

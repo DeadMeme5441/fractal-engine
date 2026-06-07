@@ -66,18 +66,20 @@
 
 (defn- take-batch!
   "Block until there is work (or the dispatch is stopped); return
-   `{:items [...] :gap? bool}` and atomically clear the queue + gap flag."
+   `{:items [...] :gap? bool}` and atomically clear the queue + gap flag.
+   ⛔ DRAINS pending work BEFORE honoring a stop, so a durable event enqueued
+   just before stop-dispatch (e.g. the terminal :session/stopped) is still
+   delivered — never silently dropped (09 §4)."
   [{:keys [state lock alive]}]
   (locking lock
     (loop []
       (let [{:keys [q gap?] :as st} @state]
         (cond
-          (not @alive) nil
-          (and (empty? q) (not gap?))
-          (do (.wait ^Object lock 1000) (recur))
-          :else
+          (or (seq q) gap?)
           (do (reset! state (assoc st :q (PersistentQueue/EMPTY) :gap? false))
-              {:items (vec q) :gap? gap?}))))))
+              {:items (vec q) :gap? gap?})
+          (not @alive) nil
+          :else (do (.wait ^Object lock 1000) (recur)))))))
 
 (defn- dispatch-loop
   [d]

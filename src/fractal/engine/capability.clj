@@ -105,22 +105,11 @@
 ;; 2. Path + network gates (04 §2)
 ;; ===========================================================================
 
-(def ^:private network-schemes #{"http" "https" "ftp" "jar"})
-
-(defn- network-ref?
-  "True iff the arg is a URL with a network scheme, or a `file://host` form
-   (a bare path or `file:///local` is local). Closes slurp-of-URL exfil."
-  [arg]
-  (let [s (str arg)]
-    (if-let [scheme (second (re-find #"^([a-zA-Z][a-zA-Z0-9+.-]*)://" s))]
-      (or (contains? network-schemes (str/lower-case scheme))
-          (boolean (re-find #"^file://[^/]" s)))   ; file://host…
-      (boolean (re-find #"^(jar):" s)))))          ; jar: scheme without //
-
 (defn- within?
   "Canonical path-boundary check (never string-prefix): admit iff the requested
    path equals an allowed prefix or sits beneath it (`/work` must not admit
-   `/work-secret`)."
+   `/work-secret`). Canonicalization resolves symlinks, so a symlink escaping
+   the boundary is denied."
   [allowed-prefixes requested]
   (let [req (canonical-path requested)]
     (boolean
@@ -133,27 +122,61 @@
 (defn- cap-error [cap arg msg]
   (ex-info msg {:error/type :capability/denied :cap cap :arg (str arg)}))
 
+;; ⛔ The gate must resolve a read/write target EXACTLY as clojure.java.io will,
+;; or it becomes a confused deputy (a `file:` URL string, an uppercase scheme,
+;; or a File arg slips past a string-only/case-sensitive/string-typed check
+;; while io still opens the real target). `classify` mirrors io's resolution:
+;; try URL first (like the IOFactory String path), else it is a file path.
+
+(defn- classify-url [^java.net.URL u]
+  (let [proto (str/lower-case (or (.getProtocol u) ""))
+        host  (.getHost u)]
+    (if (and (= "file" proto) (str/blank? host))
+      {:kind :file :path (.getPath u)}    ; file:/abs or file:///abs → a local path
+      {:kind :network :scheme proto})))   ; http/https/ftp/jar/file://host/other → network
+
+(defn- url-of [^String s]
+  (try (java.net.URL. s) (catch Throwable _ nil)))
+
+(defn- classify
+  "Resolve a read/write target the way clojure.java.io resolves it. Returns
+   {:kind :network :scheme s} | {:kind :file :path p} | {:kind :other} (a
+   stream/reader/byte[] — no locator to gate)."
+  [arg]
+  (cond
+    (instance? File arg)         {:kind :file :path (.getPath ^File arg)}
+    (instance? java.net.URL arg) (classify-url arg)
+    (string? arg)                (if-let [u (url-of arg)]
+                                   (classify-url u)
+                                   {:kind :file :path arg})
+    :else                        {:kind :other}))
+
 (defn- check-read!
-  "Apply the fs-read + network gates for a read of `arg`."
+  "Apply the fs-read + network gates for a read of `arg`, gating the RESOLVED
+   target (not the raw string)."
   [fs-read network arg]
-  (if (network-ref? arg)
-    (when-not (= :allow network)
-      (throw (cap-error :network arg (str "network read denied: " arg))))
-    (cond
-      (= :deny fs-read)  (throw (cap-error :fs-read arg (str "fs-read denied: " arg)))
-      (= :allow fs-read) nil
-      (map? fs-read)     (when-not (within? (:paths fs-read) arg)
-                           (throw (cap-error :fs-read arg (str "fs-read path denied: " arg)))))))
+  (let [t (classify arg)]
+    (case (:kind t)
+      :network (when-not (= :allow network)
+                 (throw (cap-error :network arg (str "network read denied: " arg))))
+      :file    (cond
+                 (= :deny fs-read)  (throw (cap-error :fs-read arg (str "fs-read denied: " arg)))
+                 (= :allow fs-read) nil
+                 (map? fs-read)     (when-not (within? (:paths fs-read) (:path t))
+                                      (throw (cap-error :fs-read arg (str "fs-read path denied: " arg)))))
+      :other   nil)))
 
 (defn- check-write!
   [fs-write arg]
-  (when (network-ref? arg)
-    (throw (cap-error :network arg (str "network write denied: " arg))))
-  (cond
-    (= :deny fs-write)  (throw (cap-error :fs-write arg (str "fs-write denied: " arg)))
-    (= :allow fs-write) nil
-    (map? fs-write)     (when-not (within? (:paths fs-write) arg)
-                          (throw (cap-error :fs-write arg (str "fs-write path denied: " arg))))))
+  (let [t (classify arg)]
+    (case (:kind t)
+      :network (throw (cap-error :network arg (str "network write denied: " arg)))
+      :file    (cond
+                 (= :deny fs-write)  (throw (cap-error :fs-write arg (str "fs-write denied: " arg)))
+                 (= :allow fs-write) nil
+                 (map? fs-write)     (when-not (within? (:paths fs-write) (:path t))
+                                       (throw (cap-error :fs-write arg (str "fs-write path denied: " arg)))))
+      :other   nil)))
 
 ;; ===========================================================================
 ;; 3. Gated host-fn builders (04 §2)
@@ -187,8 +210,13 @@
 
 (defn- gated-copy [{:keys [cap/fs-read cap/fs-write cap/network]}]
   (fn [input output & opts]
-    (when (string? input) (check-read! fs-read network input))
-    (when (string? output) (check-write! fs-write output))
+    ;; io/copy reads a File/URL input (a String input is literal char DATA, not
+    ;; a path — so it is NOT read-gated); it writes a File/URL output. Gating the
+    ;; resolved File/URL closes the File-arg bypass.
+    (when (or (instance? File input) (instance? java.net.URL input))
+      (check-read! fs-read network input))
+    (when (or (instance? File output) (instance? java.net.URL output))
+      (check-write! fs-write output))
     (apply jio/copy input output opts)))
 
 (defn- gated-sh [{:keys [cap/shell]}]
@@ -222,6 +250,11 @@
         unsafe? (:capability/unsafe profile)]
     (when-not (map? classes)
       (throw (ex-info "capability :cap/java-classes must be an explicit finite map (never :all)"
+                      {:error/type :capability/invalid :cap/java-classes classes})))
+    ;; ⛔ every key must be a class-name SYMBOL — reject the SCI `{:allow :all}`
+    ;; directive (and any non-class key), which would defeat the interop sandbox.
+    (when-not (every? symbol? (keys classes))
+      (throw (ex-info "capability :cap/java-classes must be keyed by class-name symbols (never :all / a directive)"
                       {:error/type :capability/invalid :cap/java-classes classes})))
     (when (and (seq (filter dangerous-class? (keys classes))) (not unsafe?))
       (throw (ex-info "capability whitelists a dangerous java class without :capability/unsafe"

@@ -184,7 +184,12 @@
      (when (and (not @(:busy handle))
                 (not= :stopped (session-status handle)))
        (store/append-event! store sid {:event/type :session/stopped}))
-     (mem/stop-dispatch! store sid)
+     ;; Only stop the dispatcher once the session is actually idle — stopping it
+     ;; mid-turn would drop the loop's still-pending durable deliveries (incl.
+     ;; the terminal :session/stopped it appends at the next step boundary). An
+     ;; in-flight-no-wait stop leaves the daemon running (JVM-exit-safe).
+     (when (or wait? (not @(:busy handle)))
+       (mem/stop-dispatch! store sid))
      handle)))
 
 (defn compact-session!

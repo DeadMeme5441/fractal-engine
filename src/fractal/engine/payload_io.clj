@@ -3,8 +3,7 @@
    `intern-payload!`/`read-payload*` with the inline/hydrate policy. Built after
    `store`; the PURE `payload` ns stays store-free so `store` itself depends
    only on it (no cycle)."
-  (:require [clojure.walk :as walk]
-            [fractal.engine.payload :as payload]
+  (:require [fractal.engine.payload :as payload]
             [fractal.engine.store :as store]))
 
 (def ^:const inline-limit
@@ -18,20 +17,40 @@
   (or (nil? x) (number? x) (string? x) (keyword? x) (symbol? x)
       (boolean? x) (char? x) (inst? x) (uuid? x)))
 
+(def ^:const max-seq-elems
+  "Cap on realized elements per (possibly lazy/infinite) seq during coercion, so
+   interning a value containing an unbounded seq is BOUNDED, not a hang."
+  100000)
+
+(def ^:const max-depth 500)
+
+(defn- edn-safe*
+  [x depth]
+  (cond
+    (> depth max-depth)  {:fractal/truncated :depth}
+    (map? x)             (persistent!
+                           (reduce-kv (fn [m k v]
+                                        (assoc! m (edn-safe* k (inc depth)) (edn-safe* v (inc depth))))
+                                      (transient {}) x))
+    (vector? x)          (mapv #(edn-safe* % (inc depth)) x)
+    (set? x)             (into #{} (map #(edn-safe* % (inc depth))) x)
+    (seq? x)             (let [head  (take max-seq-elems x)
+                               more? (seq (drop max-seq-elems x))]   ; bounded: realizes cap+1
+                           (cond-> (mapv #(edn-safe* % (inc depth)) head)
+                             more? (conj {:fractal/truncated :length})))
+    (coll? x)            (mapv #(edn-safe* % (inc depth)) (seq x))
+    (restorable-leaf? x) x
+    :else (let [s (pr-str x)]
+            {:fractal/unrestorable (subs s 0 (min 200 (count s)))})))
+
 (defn edn-safe
   "Recursively replace members that would not survive a canonical round-trip
-   (fns, atoms/derefables, host objects) with an opaque marker — so every
-   stored or inlined value is EDN-safe, canonical, and hashable. Pure data is
-   returned unchanged (02 §1, the :eval-result/:final snapshot)."
+   (fns, atoms/derefables, host objects) with an opaque marker, and BOUND any
+   (possibly infinite) lazy seq — so every stored or inlined value is EDN-safe,
+   canonical, hashable, and finite. Pure finite data is returned unchanged
+   (02 §1, the :eval-result/:final snapshot)."
   [v]
-  (walk/postwalk
-    (fn [x]
-      (cond
-        (coll? x)            x
-        (restorable-leaf? x) x
-        :else (let [s (pr-str x)]
-                {:fractal/unrestorable (subs s 0 (min 200 (count s)))})))
-    v))
+  (edn-safe* v 0))
 
 (defn- inline?
   "Small enough to embed directly in an event (no content-addressing)."
