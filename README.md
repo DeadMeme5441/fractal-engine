@@ -7,13 +7,16 @@ calls `(FINAL value)`. Some of the functions the model can call are *themselves*
 language models — so a problem can be decomposed into sub-problems, each solved by a
 fresh recursion of the same loop.
 
-> **Phase 1 is built.** The complete non-recursive session core — the uniform step
-> loop, the SCI eval kernel, the capability sandbox, the event-sourced in-memory
-> state port, the adapter (sdk + fake), the public API, config, live-query, and
-> compaction — is implemented from **[`spec/`](spec/)** under the `fractal.engine.*`
-> namespace root. `clojure -M:test` is green offline (no API keys). The recursive
-> layer (`lm`/`map-lm`/`rlm`/`map-rlm`, Phases 3/4) and persistent storage (Phase 2)
-> are out of scope and only have clean seams reserved.
+> **Phases 1 & 2 are built.** The complete non-recursive session core — the uniform
+> step loop, the SCI eval kernel, the capability sandbox, the event-sourced state
+> port, the adapter (sdk + fake), the public API, config, live-query, and compaction
+> — is implemented from **[`spec/`](spec/)** under the `fractal.engine.*` namespace
+> root, plus **Phase 2 durable storage**: a SQLite `SessionStore` + a file-based,
+> content-addressed blob store slotted under the *same* port (zero loop changes), and
+> durable `resume-session!` (reopen a persisted session by folding its event log and
+> restoring its REPL vars). `clojure -M:test` is green offline (no API keys). The
+> recursive layer (`lm`/`map-lm`/`rlm`/`map-rlm`, Phases 3/4) is out of scope and only
+> has clean seams reserved.
 >
 > The spec in `spec/` (`00`–`12`) is the source of truth and is deliberately
 > complete on its own. (A v1 reference implementation lives in the sibling
@@ -38,6 +41,27 @@ fresh recursion of the same loop.
 
 The session stays live across turns; `def`'d REPL vars persist; each `run-turn!`
 returns when the model calls `FINAL`.
+
+### Durable sessions (Phase 2)
+
+Add `:store :sqlite :store/dir "..."` and the event log + content-addressed blobs
+persist to disk. Close the handle, then `resume-session!` reopens it — folding the
+durable log and restoring the live REPL vars — so a new turn can use state from
+before the restart:
+
+```clojure
+(def cfg (fe/make-config {:adapter :fake :model "fake-model" :capability :default
+                          :store :sqlite :store/dir "/tmp/fe-demo"
+                          :fake/respond (fe/responder
+                                          [["define" "```clojure (def x 7) (FINAL :ok)```"]
+                                           ["use"    "```clojure (FINAL (* x 6))```"]])}))
+(def s (fe/start-session! cfg {:id "demo"}))
+(fe/run-turn! s "define the value")     ;=> {:status :final :turn/final-value :ok}
+(fe/close-session! s)                   ; releases the connection (e.g. process exit)
+
+(def s2 (fe/resume-session! cfg "demo")) ; fresh process: fold the log + restore vars
+(:turn/final-value (fe/run-turn! s2 "use it")) ;=> 42  (x survived the reopen)
+```
 
 ## Develop
 
