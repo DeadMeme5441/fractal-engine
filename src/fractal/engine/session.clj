@@ -379,14 +379,26 @@
                        parent-prof)
         child-sid    (gen-id)
         child-model  (or (:child-model parent-cfg) (:model parent-cfg))
-        child-prov   (or (:child-provider parent-cfg) (resolve-provider parent-cfg))
+        ;; Resolve the child provider AGAINST THE CHILD MODEL, not the parent's: an
+        ;; explicit :child-provider wins; else inherit the parent's explicit :provider
+        ;; ONLY when the child model is the parent's (the codex case — same model, same
+        ;; provider); otherwise catalog-resolve from the child model.
+        child-prov   (or (:child-provider parent-cfg)
+                         (resolve-provider
+                           (assoc parent-cfg
+                                  :model    child-model
+                                  :provider (when (= child-model (:model parent-cfg))
+                                              (:provider parent-cfg)))))
         child-cfg    (assoc parent-cfg
                             :model          child-model
                             :provider       child-prov
                             :context-window (or (catalog/context-window child-model) :unknown)
                             :harness        :rlm
-                            ;; leaf model/provider re-resolve against the child's model
-                            :leaf-model     (or (:leaf-model parent-cfg) child-model))
+                            ;; leaf model/provider re-resolve against THIS child (not the
+                            ;; parent's leaf overrides) — children's leaves default to the
+                            ;; child's own model/provider (build-leaf below).
+                            :leaf-model     child-model
+                            :leaf-provider  nil)
         child-adpt   (build-adapter child-cfg child-prov)
         session-map  (with-meta
                        {:session/id             child-sid

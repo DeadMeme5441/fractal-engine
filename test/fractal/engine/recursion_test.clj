@@ -115,10 +115,12 @@
           "exactly 50 inputs is admitted")
       (is (= 3 (count (recursion/bounded-fanout-inputs :leaf cfg (range 3))))
           "fewer than the cap passes through unchanged")
-      (let [ex (try (recursion/bounded-fanout-inputs :leaf cfg (range 51)) nil
-                    (catch clojure.lang.ExceptionInfo e e))]
-        (is (= :fractal/fanout-exceeded (:error/type (ex-data ex))))
-        (is (true? (:error/retryable? (ex-data ex))) "the cap error is recoverable (chunk + retry)")))))
+      (doseq [kind [:leaf :child]]                        ; the cap applies to map-lm AND map-rlm
+        (let [ex (try (recursion/bounded-fanout-inputs kind cfg (range 51)) nil
+                      (catch clojure.lang.ExceptionInfo e e))]
+          (is (= :fractal/fanout-exceeded (:error/type (ex-data ex))) (str kind " cap throws"))
+          (is (= kind (:fanout/kind (ex-data ex))))
+          (is (true? (:error/retryable? (ex-data ex))) "the cap error is recoverable (chunk + retry)"))))))
 
 (deftest assemble-batch-results-folds-sentinels
   (is (= [:a {:fractal/failed true :index 1 :error {:error/type :x}} :c]
@@ -177,6 +179,49 @@
         "the root's child itself recurses — independent SCI ctxs to depth 2")
     (is (= 3 (count @(:sessions (:store s)))) "root + child + grandchild")
     (fe/stop-session! s)))
+
+(deftest nested-child-fans-out-with-map-lm
+  (testing "a child can itself fan out leaves (map-lm) inside its own loop"
+    (let [resp (fn [req]
+                 (cond (leaf-req? req) (leaf-double req)
+                       (child-req? req) "```clojure\n(FINAL (mapv :double (map-lm [{:n 2 :v \"NUM=2\"} {:n 3 :v \"NUM=3\"}] \"double\" :edn)))\n```"
+                       :else "```clojure\n(FINAL (:rlm/value (rlm \"sum doubles\")))\n```"))
+          s (session-with :rlm :default resp)]
+      (is (= [4 6] (:turn/final-value (fe/run-turn! s "go")))
+          "the child's own map-lm fan-out ran and returned to the root")
+      (fe/stop-session! s))))
+
+;; ===========================================================================
+;; ACCOUNTING — :turn/usage/:turn/cost stay SELF-ONLY at the root (06 §6)
+;; ===========================================================================
+
+(defn- known-rec
+  "A FakeAdapter call-record with KNOWN usage/cost so accounting is assertable."
+  [text in-tokens]
+  {:text text :finish-reason :stop
+   :usage {:usage/status :known :usage/input-tokens in-tokens :usage/output-tokens 1
+           :usage/cached-input-tokens 0 :usage/cache-write-tokens 0}
+   :cost  {:cost/status :known :cost/usd (double (* in-tokens 0.001))}
+   :cache {:cache/status :miss :cache/cached-tokens 0 :cache/cache-write-tokens 0}
+   :model "fake-model" :provider :fake})
+
+(deftest root-turn-accounting-is-self-only
+  (testing "the root :turn/usage/:turn/cost count ONLY the root's own steps; the child's
+            cost rides the envelope :rlm/meta (06 §6)"
+    (let [resp (fn [req]
+                 (if (child-req? req)
+                   (known-rec "```clojure\n(FINAL {:n 5})\n```" 7)        ; child step: 7 tokens
+                   (known-rec "```clojure\n(FINAL (rlm \"child\"))\n```" 100))) ; root step: 100 tokens
+          s (session-with :rlm :default resp)
+          res (fe/run-turn! s "T")
+          env (:turn/final-value res)]
+      (is (= 100 (get-in res [:turn/usage :usage/input-tokens]))
+          "root usage = 100 (its single step), NOT 107 — the child's 7 is excluded")
+      (is (= 0.1 (get-in res [:turn/cost :cost/usd])) "root cost is self-only (100 * 0.001)")
+      (is (= 7 (get-in env [:rlm/meta :usage :usage/input-tokens]))
+          "the child's own usage is carried on the envelope :rlm/meta")
+      (is (= 0.007 (get-in env [:rlm/meta :cost :cost/usd])) "the child's cost lives in the meta")
+      (fe/stop-session! s))))
 
 ;; ===========================================================================
 ;; CHILD — map-rlm (independent lanes, order, partial failure)
@@ -283,6 +328,9 @@
       (is (false? (resolves-ok? s "map-lm")))
       (is (false? (resolves-ok? s "rlm")))
       (is (false? (resolves-ok? s "map-rlm")))
+      (testing "and CALLING lm at execution time is an unresolved-symbol error (not just unbound)"
+        (is (false? (resolves-ok? s "(lm {} \"q\")")))
+        (is (false? (resolves-ok? s "(rlm \"t\")"))))
       (fe/stop-session! s))))
 
 ;; ===========================================================================

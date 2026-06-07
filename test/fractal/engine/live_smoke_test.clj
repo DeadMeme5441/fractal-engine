@@ -10,6 +10,8 @@
 
 (deftest ^:live sdk-adapter-drives-a-real-repl-to-final
   (testing "a live model writes Clojure, the host evals it, and it returns via FINAL"
+    (if-not (System/getenv "DEEPSEEK_API_KEY")
+      (println "live deepseek smoke => [skip] no DEEPSEEK_API_KEY (codex OAuth lives in live-recursion-test)")
     (let [cfg (fe/make-config {:adapter :sdk
                                :model   model
                                :capability :default
@@ -24,4 +26,4 @@
       (is (= :deepseek (get-in (fe/view s) [:session :session/provider])))
       (testing "honest cost accounting came back from the provider"
         (is (#{:known :unknown} (:cost/status (:turn/cost res)))))
-      (fe/stop-session! s))))
+      (fe/stop-session! s)))))

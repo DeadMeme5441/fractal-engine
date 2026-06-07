@@ -39,3 +39,13 @@
     (is (= true (:enabled? opts)))
     (is (= "1h" (:ttl opts)))
     (is (str/starts-with? (:scope-id opts) "fr:agent:"))))
+
+(deftest build-leaf-cache-opts-uses-leaf-scope
+  (testing "a leaf call scopes to the :leaf purpose under the caller's cache-id (08 §4)"
+    (let [opts (cache/build-leaf-cache-opts "s-1" {:cache-ttl "5m"})]
+      (is (= true (:enabled? opts)))
+      (is (= "5m" (:ttl opts)))
+      (is (str/starts-with? (:scope-id opts) "fr:leaf:") "leaf scope, not :agent")
+      (is (= (cache/scope-id "s-1" :leaf) (:scope-id opts)))
+      (is (not= (:scope-id opts) (cache/scope-id "s-1" :agent))
+          "the :leaf scope is distinct from the root :agent scope for the same cache-id"))))

@@ -8,7 +8,7 @@
    daemon pool, dynvar propagation via `bound-fn`, partial-failure-tolerant) +
    a `semaphore`/`with-permit` pair (the GLOBAL leaf governor). The recursion ns
    composes these; the engine semantics live there, not here."
-  (:import [java.util.concurrent Callable Executors Semaphore ThreadFactory TimeUnit]))
+  (:import [java.util.concurrent Callable Executors Semaphore ThreadFactory]))
 
 (defn with-deadline*
   "Run `thunk` on a daemon thread under a `timeout-ms` wall-clock budget.
@@ -85,10 +85,12 @@
                                                                  (select-keys (ex-data t) [:error/type]))}))))))
                             (range) items)]
             (mapv #(.get ^java.util.concurrent.Future %) tasks))
-          (finally
-            (.shutdown pool)
-            (.awaitTermination pool 1 TimeUnit/SECONDS)
-            (.shutdownNow pool)))))))
+          ;; Every task has been collected via .get (each Callable catches its own
+          ;; Throwable, so .get never throws an ExecutionException) — so by here all
+          ;; work is done and shutdownNow only reclaims the now-idle threads. A bare
+          ;; shutdownNow (no awaitTermination) cannot be skipped by an
+          ;; InterruptedException and never leaks the pool.
+          (finally (.shutdownNow pool)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Semaphore governor (the GLOBAL leaf permit pool)
