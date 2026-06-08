@@ -437,16 +437,16 @@ counter. (Counters live in the view's `:counters`; the fold only maxes them, §6
 
 ## 9. Merkle-DAG alignment (forward compatibility — MANDATORY)
 
-The persistence design that lands in Phase 2/4 is a **Merkle DAG** (git-like): a graph
-of content-addressed, immutable nodes. **Phase 1's data model and REPL-state model
-must be 100% compatible with it** — that is the point of the choices above. Concretely:
+The persistence design is a **Merkle DAG** (git-like): a graph of content-addressed,
+immutable nodes. Phase 1's data model and REPL-state model were built to be compatible
+with it; Phase 4 publishes heads and lineage edges through the same store port.
 
 **The two node kinds.**
 - **Blobs** = content-addressed leaves (`sha256:<hex>` over `canonical-bytes`). *Every*
   large value already becomes one: message content, eval results, the FINAL value, the
   interned request, and — critically — the **REPL var snapshot** (`:vars-ref`). These
   are Merkle leaves for free, today.
-- **Heads** *(Phase 2/4)* = content-addressed inner nodes. A head is:
+- **Heads** = content-addressed inner nodes. A head is:
   ```clojure
   {:head/id         "sha256:<hex>"      ; = fingerprint over the head's canonical content
    :head/session    "s-<uuid>"
@@ -457,9 +457,8 @@ must be 100% compatible with it** — that is the point of the choices above. Co
    :head/kind       :turn-final | :compaction}
   ```
   The **DAG** = heads linked by `:head/basis` (per session) plus **cross-session
-  edges** added in Phase 4: an *invocation* edge (parent head → child head, for
-  `rlm`/`map-rlm`) and a *derivation* edge (source head → target head, for
-  resume/fork/`attach-rlm`).
+  edges**: an *invocation* edge (parent head → child head, for `rlm`/`map-rlm`) and a
+  *derivation* edge (source head → target head, for `attach-rlm`).
 
 **Why Phase 1 is already aligned (do not break this):**
 1. Blobs are content-addressed in *every* impl — so a head can pin any value by its
@@ -467,8 +466,8 @@ must be 100% compatible with it** — that is the point of the choices above. Co
 2. The turn-completion path already produces **every input a head needs**: a
    content-addressed `:vars-ref` (REPL snapshot), a content-addressed `:turn/final-ref`,
    an **event range** (the monotonic `:event/id` counter gives `[from to]`), and the
-   *basis* (the previous head — a Phase-2 lookup). Publishing a head later is purely
-   *additive*: it pins these by hash and computes a fingerprint.
+   *basis* (the previous head). Publishing a head is additive: it pins these by hash
+   and computes a fingerprint.
 3. **Determinism.** Entity ids are reproducible counters (a re-fold yields the same
    ids), and `canonical-bytes` gives stable hashes — so a fingerprint over a head's
    canonical content is reproducible and tamper-evident.
@@ -484,9 +483,9 @@ must be 100% compatible with it** — that is the point of the choices above. Co
 - A turn boundary and a compaction are the two points where a head would be published;
   Phase 1 already emits the snapshot there.
 
-**The seam (no rework later):** heads attach by adding *new* top-level view keys
-(`:heads`, `:current-head`) and **one new store op** `publish-head!` (optimistic CAS on
-the per-session current-head ref, atomic with pinning an `:event/id`) — *without*
-touching any field defined above. `:vars-ref` is the Phase-1 proxy for
-`:head/vars-ref`; when heads arrive, resume prefers `:head/vars-ref`, else `:vars-ref`,
-so no existing read site changes. **CAS stays out of Phase 1.**
+**Implemented Phase-4 extension:** heads add top-level view keys (`:heads`,
+`:current-head`) and store op `publish-head!` (optimistic CAS on the per-session
+current-head ref, atomic with pinning an `:event/id`) without touching the original
+session/turn/step/eval/message fields. `:vars-ref` remains the projection fallback;
+resume prefers `:head/vars-ref` from the current head when present, else `:vars-ref`.
+Lineage edges live in top-level `:edges` via `:lineage/edge-added`.

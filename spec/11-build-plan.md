@@ -1,8 +1,8 @@
 # 11 · Build Plan
 
-The roadmap, then the **ordered Phase-1 task list to execute**. Build bottom-up; each
-step is testable offline with the `FakeAdapter` (10) before the next. **Build Phase 1
-only.**
+The roadmap, then the historical **ordered Phase-1 task list**. Build bottom-up; each
+step is testable offline with the `FakeAdapter` (10) before the next. Phases 1-4 are
+now implemented; the task list remains as the construction record and layering guide.
 
 ---
 
@@ -10,10 +10,10 @@ only.**
 
 | Phase | Deliverable | Status |
 |-------|-------------|--------|
-| **1** | The session core (this spec) — one non-recursive session, in-memory, sandboxed SCI REPL, the public API. | **BUILD NOW** |
-| 2 | Persistent `SessionStore` (SQLite + content-addressed blob store) under the same port. *Datahike keep/drop is open.* | later |
-| 3 | The four model-calling host fns (`lm`/`map-lm`/`rlm`/`map-rlm`) + leaf-vs-child + fan-out. | later |
-| 4 | Recursion data model + the **Merkle DAG**: immutable heads (`publish-head!` + CAS), basis chains, invocation/derivation edges, `attach-rlm`. | later |
+| **1** | The session core — one non-recursive session, in-memory, sandboxed SCI REPL, the public API. | built |
+| 2 | Persistent `SessionStore` (SQLite + content-addressed blob store) under the same port. Datahike dropped until a real query need appears. | built |
+| 3 | The four model-calling host fns (`lm`/`map-lm`/`rlm`/`map-rlm`) + leaf-vs-child + fan-out. | built |
+| 4 | Recursion data model + the **Merkle DAG**: immutable heads (`publish-head!` + CAS), basis chains, invocation/derivation edges, `attach-rlm`. | built |
 
 Phase 1 is designed so each later phase is **additive** (02 §9, 06 §6): heads attach
 without restructuring; the rlm fns inject into the same SCI ctx; the public API surface
@@ -201,13 +201,13 @@ of done.
 
 ## Open decisions deferred past Phase 1
 
-- **Storage (P2):** SQLite schema + the content-addressed blob store impl (same
-  `SessionStore` + `intern-payload!`/`read-payload*` contract); **Datahike: keep as a
-  derived query index, or drop?** (lean: drop unless a query need proves it).
-- **The Merkle DAG (P4):** `publish-head!` (optimistic CAS), head fingerprints,
-  basis chains, invocation/derivation edges. Phase 1 already produces the inputs (02 §9).
-- **Recursion (P3):** the four host fns; leaf-vs-child storage; fan-out concurrency +
-  `bound-fn` propagation; the full v24 recursion system prompt (12).
+- **Storage (P2):** built: SQLite event log + file BlobStore under the same
+  `SessionStore` + `intern-payload!`/`read-payload*` contract. Datahike is dropped until
+  a concrete query need proves a derived index is worth adding.
+- **The Merkle DAG (P4):** built: `publish-head!` (optimistic CAS), head fingerprints,
+  basis chains, invocation/derivation edges, and `attach-rlm`.
+- **Recursion (P3):** built: the four host fns; leaf-vs-child storage; fan-out
+  concurrency + `bound-fn` propagation; the full recursion system prompt (12).
 - **Keep/drop:** provenance/claim-checking (lean keep), codebrain (lean: external
   consumer, like evals), the evals harness (external), a clean CLI. None decided.
 - **Distribution:** GraalVM native-image (SCI unlocks it) — gated on verifying the P2

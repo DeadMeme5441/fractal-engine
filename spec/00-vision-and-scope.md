@@ -31,11 +31,11 @@ just `message[0]`; an observation is just `message[n]`. **`FINAL` is the model's
 to the user** — it ends a turn and hands control back; the next user message starts
 the next turn on the same live session.
 
-## The model-facing surface — the six functions
+## The model-facing surface
 
 Inside a session's REPL the model has ordinary Clojure (a curated, sandboxed subset —
-see `04`) plus a small set of host-injected functions. The full set is six; **Phase 1
-ships only the first two.**
+see `04`) plus a small set of host-injected functions. The plain Clojure harness exposes
+only `FINAL` and `inspect`; the recursive harness adds the model-calling and reuse fns.
 
 | Fn | Kind | Phase | Meaning |
 |----|------|-------|---------|
@@ -45,7 +45,7 @@ ships only the first two.**
 | `(map-lm inputs query [mode])` | leaf | 3 | `lm` mapped over ≤50 bounded inputs in one parallel fan-out, order preserved. |
 | `(rlm task)` | child | 3 | Hand one sub-problem to a fresh RLM session running this whole loop. Returns an *envelope*, not a bare value. |
 | `(map-rlm tasks [shared])` | child | 3 | Recursion mapped over ≤50 independent sub-problems. |
-| `(attach-rlm handle task [opts])` | reuse | 4 | Reuse a prior session — continue its current head, or branch from an immutable head. |
+| `(attach-rlm handle task [opts])` | reuse | 4 | Restore a prior session/head into a fresh derived child and run `task`; records a derivation edge without advancing the source session. |
 
 > Phase 1's REPL therefore exposes **plain Clojure + `FINAL` + `inspect`**, nothing
 > else. The four model-calling functions are added in Phase 3 as host fns injected
@@ -106,9 +106,9 @@ the adapter boundary. See `05` and `08`.
 | Phase | Deliverable |
 |-------|-------------|
 | **1** | **The session core ("clojure harness").** One non-recursive session: the REPL loop (plain Clojure + `FINAL`/`inspect`), the SCI eval kernel, the capability sandbox, the in-memory state port, the adapter (sdk + fake), the public API surface, config, live-query, and compaction. **This spec's primary target.** |
-| 2 | Storage: a persistent `SessionStore` impl (SQLite + content-addressed blobs) under the same port. *Datahike keep/drop is an open decision.* |
+| 2 | Storage: a persistent `SessionStore` impl (SQLite + content-addressed blobs) under the same port. Datahike is dropped until a concrete query need appears. |
 | 3 | The RLM layer: the four model-calling host fns (`lm`/`map-lm`/`rlm`/`map-rlm`), leaf-vs-child distinction, fan-out concurrency. |
-| 4 | The recursion data model: invocations/edges/lineage/envelopes; immutable heads; `attach-rlm`. |
+| 4 | The recursion data model: invocation/derivation lineage edges; immutable heads; `attach-rlm`. |
 | — (parallel) | The public API *is* the SDK; the "rlm harness" extends the same surface as Phases 3–4 land. |
 
 ## Phase-1 scope — IN / OUT
@@ -132,11 +132,15 @@ the adapter boundary. See `05` and `08`.
   fold it to one continuation frame — the concrete mechanism in `07` §4.
 - Offline testing via `FakeAdapter` + a RUNS/SEES dev harness (`10`).
 
-**OUT (do not build in Phase 1):**
-- The four model-calling fns (`lm`/`map-lm`/`rlm`/`map-rlm`) and `attach-rlm`.
-- Any persistent storage (SQLite/blobs/Datahike) — Phase 2.
-- Immutable heads + cross-session lineage + invocation edges — Phase 4.
-- Cross-process resume/fork (an in-process resume may be exposed `^:alpha`; see `06`).
+**Built after Phase 1:**
+- Phase 2 added persistent storage (SQLite event log + file BlobStore) under the same
+  `SessionStore` port.
+- Phase 3 added the four model-calling fns (`lm`/`map-lm`/`rlm`/`map-rlm`).
+- Phase 4 added immutable heads, invocation/derivation lineage edges, and `attach-rlm`.
+
+**Still out of scope here:**
+- Fork as a public lifecycle operation. Durable cross-process `resume-session!` is built
+  for SQLite sessions.
 - Provenance/claim-checking, codebrain, the evals harness, a full CLEAN CLI — later /
   open keep-drop decisions (`11`).
 - Native-image / babashka distribution — a *possible later* option SCI unlocks; not now.

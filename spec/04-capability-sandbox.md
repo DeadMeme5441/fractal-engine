@@ -24,7 +24,7 @@ language-layer capability control. `fractal.engine.capability`.
  :cap/network       :deny               ; :deny | :allow  (URL schemes in reads/sh)
  :ns/granted        #{clojure.string clojure.edn …}  ; a FILTER over the engine ns catalog
  :cap/java-classes  {}                  ; explicit class whitelist (NEVER {:allow :all})
- :engine-fns        #{:FINAL :inspect}} ; which host fns are injected (lm/rlm gated here)
+ :engine-fns        #{:FINAL :inspect}} ; which host fns are injected (lm/rlm/attach gated here)
 ```
 
 Gates are independent **dimensions**; a profile is their product. There is no single
@@ -40,7 +40,7 @@ Gates are independent **dimensions**; a profile is their product. There is no si
 
 ```clojure
 {:namespaces { 'fractal.session.<id>
-               (merge (select-keys engine-fn-impls (:engine-fns profile)) ; FINAL/inspect[/lm/rlm], gated by profile
+               (merge (select-keys engine-fn-impls (:engine-fns profile)) ; FINAL/inspect[/lm/rlm/attach], gated by profile
                       (gated-io-fns profile))                             ; capability's own slurp/spit/sh/file-seq
                'clojure.pprint …, 'clojure.data …, … }                   ; copy-ns'd catalog ns ∩ :ns/granted (string/edn/set/walk are SCI defaults — free)
  :classes    (build-class-map profile)                                   ; explicit whitelist; never :all
@@ -105,12 +105,12 @@ Key construction rules (each fixes a verified hole):
               ; shell :deny, network :deny, java-classes {}, engine-fns #{:FINAL :inspect}
 :default      ; the RLM workhorse: fs-read {:paths [workdir]}, fs-write :deny,
               ; shell {:commands <the safe set>}, network :deny, the :default ns grant,
-              ; engine-fns #{:FINAL :inspect :lm :map-lm :rlm :map-rlm}
+              ; engine-fns #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}
 :trusted      ; fs-read :allow, fs-write {:paths [workdir]}, shell :allow, network :allow,
               ; broader ns grant, engine-fns (all)
 ```
 
-**`:locked-down` ⇒ `:engine-fns #{:FINAL :inspect}` (no `lm`/`rlm`).** This is a
+**`:locked-down` ⇒ `:engine-fns #{:FINAL :inspect}` (no `lm`/`rlm`/`attach-rlm`).** This is a
 deliberate security boundary: `lm`/`map-lm`/`rlm`/`map-rlm` are **unfilterable egress to
 the provider** — the capability profile cannot constrain *what they send*. So the
 maximum-sandbox profile closes that channel by removing them. Consequence (accept it):

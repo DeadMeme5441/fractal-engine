@@ -1,11 +1,10 @@
 # 12 · System Prompt
 
-The behavioural core lives in `fractal.engine.prompt`. Phase 1 ships the **clojure-harness
-prompt** below (operator doctrine for a sandboxed REPL whose only host fns are `FINAL`
-and `inspect` — **no recursion / no model-calling fns yet**) and the **compaction
-prompt**. The full v24 *recursion* doctrine (the six-function surface, the leaf/child
-cheapness hierarchy, partial-fanout handling) is added in Phase 3 when `lm`/`rlm` are
-injected; do not include it in Phase 1.
+The behavioural core lives in `fractal.engine.prompt`. The **clojure-harness prompt**
+below is the operator doctrine for a sandboxed REPL whose only host fns are `FINAL` and
+`inspect`; the **recursive harness prompt** in code adds the leaf/child/attach doctrine
+when `:harness :rlm` injects `lm`/`map-lm`/`rlm`/`map-rlm`/`attach-rlm`. The compaction
+prompt remains shared.
 
 Stamp the prompt with name + version + a content hash (`{:prompt/name :prompt/version
 :prompt/hash}`) so runs are reproducible and the prompt is auditable.
@@ -136,11 +135,11 @@ returns plain prose — no code fences, no function calls — which becomes ONE 
 
 ---
 
-## 4. Phase-3 note (do not build now)
+## 4. Recursive-harness note
 
-When `lm`/`map-lm`/`rlm`/`map-rlm` are injected (Phase 3), the prompt gains the full
-recursion doctrine: the six-function surface; the three kinds of processing and the
-cheapness hierarchy (deterministic Clojure < a leaf < a child); envelopes for `rlm`
-results; partial-fanout handling (`:fractal/failed` sentinels); the `≤50` fan-out cap +
-chunking; and the smell tests (`(count (map-lm …))` = a model doing exact work). That
-doctrine is out of scope for Phase 1 — the Phase-1 prompt above is complete on its own.
+When the rlm harness is selected, the prompt gains the full recursion doctrine: the host
+function surface; the processing hierarchy (deterministic Clojure < a leaf < a child <
+attach/reuse); envelopes for `rlm`/`map-rlm`/`attach-rlm`; partial-fanout handling
+(`:fractal/failed` sentinels); the `≤50` fan-out cap + chunking; immutable head handles
+for `attach-rlm`; and the smell tests (`(count (map-lm …))` = a model doing exact work).
+The Phase-1 prompt above remains complete for the plain clojure harness.
