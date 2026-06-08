@@ -18,8 +18,8 @@
   ;; speaks HTTP. See spec/05-adapter.md and spec/08-cache.md.
   net.clojars.deadmeme5441/clojure-llm-sdk {:mvn/version "0.2.3"}
 
-  ;; JSON for the CLI's eventual --json/--jsonl; arrives transitively via the SDK,
-  ;; pinned so it is deterministic.
+  ;; JSON for the CLI's structured command output; arrives transitively via the
+  ;; SDK, pinned here because the CLI is a first-class runtime surface.
   cheshire/cheshire {:mvn/version "5.13.0"}
 
   ;; Phase 2 · the canonical durable event log + sessions table for the SQLite
@@ -46,6 +46,10 @@
    :extra-deps {io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
    :main-opts ["-m" "cognitect.test-runner" "--include" ":live"]}
+
+  ;; Agent-operable control plane over the public SDK API.
+  :cli
+  {:main-opts ["-m" "fractal.engine.cli"]}
 
   ;; A REPL for development (adds the dev/ RUNS-SEES harness to the path).
   :dev
