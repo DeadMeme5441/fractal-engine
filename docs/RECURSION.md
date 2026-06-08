@@ -41,6 +41,45 @@ flowchart TB
 Everything else is engine machinery. Model code should not depend on hidden context,
 ambient mutable session objects, or storage paths.
 
+## SDK Surfaces In Recursive Sessions
+
+Embedders can configure SDK surfaces that add qualified world/API calls beside
+the built-in recursive functions. These are not hidden tools or prompt-only
+affordances; they are real SCI namespace vars supplied by the host and gated by
+capability.
+
+```mermaid
+flowchart TB
+  Parent["Parent session"] --> ParentFns["Built-ins plus allowed surfaces"]
+  ParentFns --> SurfaceCall["(git/tracked-files {})"]
+  Parent --> Child["rlm child session"]
+  Child --> ChildClamp["Surface functions clamped by parent profile"]
+  ChildClamp --> ChildCall["(git/read-file path {})"]
+  Parent --> Leaf["lm leaf call"]
+  Leaf --> LeafPrompt["Leaf prompt may receive surface context"]
+  Leaf -. no host fns .-> NoCall["No direct surface calls inside leaf"]
+```
+
+The recursive rules are:
+
+- root and child sessions can call configured, capability-allowed surface
+  functions by qualified symbol;
+- child sessions receive the same surface descriptors and public stamps, then
+  clamp `:surface/fns` against the parent profile;
+- `lm` and `map-lm` leaves remain one provider call, not a REPL, so they cannot
+  call surface functions directly;
+- leaf calls may receive surface guidance through `:surface/prompts :leaf`, for
+  example how to classify snippets returned by the root or a child;
+- dynamic request prompts apply to root and child requests and are not appended
+  to durable message history;
+- resume requires the configured surface stamps to match the stamps stored on
+  the durable session.
+
+This is the intended way to make a fractal-shaped Git, issue-tracker, archive,
+or MCP-backed world without bloating the kernel. The host owns the world code
+and policy. The engine owns the recursive shape, prompt placement, and durable
+identity checks.
+
 ## Choose The Smallest Sufficient Kind
 
 Use deterministic Clojure for exact work:

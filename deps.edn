@@ -65,7 +65,7 @@
    :exec-args {:installer :remote
                :sign-releases? false
                :pom-file "target/classes/META-INF/maven/net.clojars.deadmeme5441/fractal-engine/pom.xml"
-               :artifact "target/fractal-engine-0.5.0-SNAPSHOT.jar"}}}}
+               :artifact "target/fractal-engine-0.5.1.jar"}}}}
 
 ;; ---------------------------------------------------------------------------
 ;; org.xerial/sqlite-jdbc backs fractal.engine.store.sqlite: the durable event

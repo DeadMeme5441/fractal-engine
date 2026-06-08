@@ -1,6 +1,6 @@
 # Storage and Heads
 
-This document describes fractal-engine-v1 storage authority, payload refs,
+This document describes fractal-engine storage authority, payload refs,
 folded views, heads, lineage, and failure semantics. It is written for public
 maintainers and contributors.
 

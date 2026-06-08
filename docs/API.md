@@ -114,7 +114,8 @@ Required or notable options:
  :context          {:compact-at 0.80
                     :hard-at 0.95
                     :unknown-window-chars 400000}
- :system-overlay   nil}
+ :system-overlay   nil
+ :surfaces         []}
 ```
 
 `make-config` throws `ex-info` for invalid config, including:
@@ -149,6 +150,17 @@ the recursive host-function surface described below.
 Custom profiles are validated before use. Per-session and child profiles are
 clamped against their parent profile; an override can narrow access but cannot
 widen it.
+
+Surface functions are a separate finite gate:
+
+```clojure
+:surface/fns '#{jira/search git/status git/diff}
+```
+
+The default is deny. A function appears in SCI only when its surface is
+configured and the resolved capability profile allows its qualified symbol.
+Child sessions inherit surface functions through set intersection, so a child
+cannot gain a world/API function its parent did not have.
 
 Runtime governor keys bound live and recursive work:
 
@@ -471,3 +483,115 @@ whole batch.
 
 Root turn usage and cost stay scoped to the root turn. Child accounting is
 reported in the child envelope metadata.
+
+## SDK Surfaces
+
+`:surfaces` is an SDK extension point for host-provided worlds such as Git,
+Jira, repository search, archives, or MCP-backed APIs. A descriptor supplies
+namespaced functions plus prompt metadata:
+
+```clojure
+{:surface/id :jira
+ :surface/version 1
+ :surface/prompt "Use jira/search when you do not know the issue key."
+ :surface/prompts
+ {:system "Stable Jira usage doctrine."
+  :request (fn [ctx] "Dynamic request-local Jira context.")
+  :leaf "Leaf calls classify Jira snippets only."}
+ :surface/namespaces
+ {'jira {'search {:doc "Search issues."
+                  :arglists '([query opts])
+                  :fn (fn [query opts] ...)}
+         'issue  {:doc "Fetch one issue."
+                  :arglists '([key opts])
+                  :factory (fn [ctx] (fn [key opts] ...))}}}}
+```
+
+Rules:
+
+- Functions are namespaced only: `(jira/search "auth" {:limit 10})`.
+- Reserved namespaces such as `clojure.*`, `java.*`, `sci.*`, and
+  `fractal.engine.*` are rejected.
+- Descriptor ids must be unique, and qualified function symbols must be unique
+  across all configured surfaces.
+- `:surface/fns` is deny-by-default and is clamped for children.
+- Stable `:surface/prompt` and `:surface/prompts :system` text renders into the
+  generated system surface card.
+- Dynamic `:surface/prompts :request` renders per root/child provider request
+  as transient prompt context; it is not appended to durable transcript state.
+- Dynamic request prompt text lowers system-and-tail cache breakpoints to one,
+  preserving the stable system cache point without caching dynamic tail text.
+- `:surface/prompts :leaf` renders into `lm` / `map-lm` leaf system prompts.
+- Public surface stamps are stored in session metadata. On durable resume,
+  configured surface stamps must match the persisted session stamps or
+  `resume-session!` throws `:surface/mismatch`.
+
+Surface functions are trusted embedder code. The engine owns injection, gating,
+prompt truth, cache placement, and surface identity; embedders own auth,
+side-effects, rate limits, audit, and domain correctness.
+
+This is an in-process SDK extension point, not a generic CLI plugin loader. A
+plain EDN CLI config file can reference normal data, but it cannot construct
+function objects by itself. Products that want CLI-accessible worlds should load
+their surfaces in process and then call the public API or provide their own thin
+CLI wrapper around that configured engine.
+
+### Function Entries
+
+Each function entry contains exactly one callable source:
+
+```clojure
+{:fn (fn [arg opts] ...)}
+
+{:factory (fn [ctx]
+            (fn [arg opts] ...))}
+```
+
+Factories are useful when a surface needs per-session state. Factory context
+contains:
+
+```clojure
+{:handle handle
+ :session/id "session-id"
+ :cfg cfg
+ :capability resolved-profile
+ :surface/id :jira
+ :surface/version 1
+ :surface/function 'jira/search}
+```
+
+Factories must return functions. Function objects are never included in public
+surface stamps or durable session metadata.
+
+### Prompt Phases
+
+`:surface/prompts` may contain `:system`, `:request`, and `:leaf`. Each value is
+either a string, a function returning nil/string, or nil.
+
+Prompt function context always includes:
+
+```clojure
+{:surface/id :jira
+ :surface/version 1
+ :surface/functions ['jira/search 'jira/issue]
+ :surface/prompt-phase :request}
+```
+
+Request prompt functions additionally receive the current `:handle`, `:cfg`,
+`:view`, `:session/id`, `:turn/id`, and `:step/id`. Leaf prompt functions
+receive `:handle`, `:cfg`, `:session/id`, `:input`, `:query`, and `:mode`.
+Only capability-exposed surfaces can contribute prompt text in any phase.
+
+Prompt order for root and child requests is:
+
+1. harness base doctrine;
+2. generated stable SDK surface card for exposed functions;
+3. config `:system-overlay`;
+4. session `:system-overlay`;
+5. dynamic request surface context as a transient user message before the latest
+   task or observation.
+
+Dynamic request context is deliberately outside durable message state. When it
+is present, request cache metadata includes `:breakpoints 1`, allowing providers
+with system-and-tail caching to keep the stable system prefix without treating
+the dynamic tail as a cache anchor.

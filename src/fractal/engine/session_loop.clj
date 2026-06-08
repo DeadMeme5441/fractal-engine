@@ -206,7 +206,7 @@
                               :step/started-at (time/now-str)}})
             step-id (get-in step-ev [:step :step/id])]
         (binding [kernel/*current-step-id* step-id]
-          (let [req (request/build-request store (store/current-view store sid) cfg)]
+          (let [req (request/build-request store (store/current-view store sid) cfg (:capability handle) handle)]
             (if (:hard? (compaction/assess req cfg))
               {:control :terminal
                :result (finalize-turn! handle turn-id :budget-exceeded

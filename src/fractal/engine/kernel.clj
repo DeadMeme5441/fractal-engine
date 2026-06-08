@@ -70,11 +70,14 @@
   "Build the session's SCI ctx from its capability profile + the host-fn impls.
    Creates & registers the session ns (so find-ns resolves it later); every eval
    then binds sci/ns to it."
-  [session-id capability-profile engine-fns]
-  (let [ctx (sci/init (capability/sci-opts (capability/validate-profile! capability-profile)
-                                           engine-fns))]
-    (sci/eval-string* ctx (str "(in-ns '" (session-ns-sym session-id) ")"))
-    ctx))
+  ([session-id capability-profile engine-fns]
+   (new-ctx session-id capability-profile engine-fns {}))
+  ([session-id capability-profile engine-fns surface-namespaces]
+   (let [ctx (sci/init (capability/sci-opts (capability/validate-profile! capability-profile)
+                                            engine-fns
+                                            surface-namespaces))]
+     (sci/eval-string* ctx (str "(in-ns '" (session-ns-sym session-id) ")"))
+     ctx)))
 
 ;; ---------------------------------------------------------------------------
 ;; Block extraction (03 §2)

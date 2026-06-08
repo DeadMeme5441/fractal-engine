@@ -23,6 +23,7 @@ ports and shared services
   fractal.engine.adapter
   fractal.engine.payload-io
   fractal.engine.capability
+  fractal.engine.surface
   fractal.engine.compaction
   fractal.engine.live
 
@@ -47,7 +48,7 @@ foundations
 - **`api`** is the supported SDK surface and nothing else.
 - **`session`** is the sole composition root: it chooses the store backend, builds
   adapters, resolves capability and model/provider defaults, creates or resumes
-  sessions, and assembles the host-fn surface.
+  sessions, and assembles built-in plus configured host-fn surfaces.
 - **`session-loop`** owns the step spine: open turn, build request, call adapter
   under deadline, finalize assistant output, run kernel eval, append observations,
   and commit or finalize the turn.
@@ -55,6 +56,9 @@ foundations
 - **`recursion`** implements leaf calls, child calls, attach calls, envelopes, and
   lineage-edge recording. It depends on closures injected by `session`, not on the
   `session` namespace itself.
+- **`surface`** validates embedder-provided SDK surface descriptors, produces
+  public stamps, renders stable and dynamic prompt fragments, and assembles
+  capability-filtered SCI namespaces.
 - **`store`** defines the event-sourced semantic contract. `store.memory` and
   `store.sqlite` implement it; `store.blobstore` is the physical payload backend
   used by SQLite durability.
@@ -93,7 +97,8 @@ supervision.
 | Term | Definition |
 |------|------------|
 | **session** | A durable unit of identity: message stream, session metadata, capability profile, SCI ctx, counters, and published heads. |
-| **harness** | The model-facing host-fn surface selected by config: `:clojure` or `:rlm`. |
+| **harness** | The built-in model-facing host-fn surface selected by config: `:clojure` or `:rlm`. |
+| **SDK surface** | An embedder-provided namespaced host-function world, gated by `:surface/fns`, rendered into prompt context, and stamped for durable resume compatibility. |
 | **turn** | One user message through zero or more steps until `FINAL` or a terminal error/timeout/budget outcome. |
 | **step** | One adapter-call iteration inside a turn: assistant output, eval batch, and one combined observation. |
 | **eval** | One fenced Clojure block evaluated by the kernel. |
@@ -118,8 +123,8 @@ This is the current control and data flow for a normal turn.
 
 3. **Assemble the request.** `adapter.request/build-request` reads the current view,
    prunes compacted history, hydrates payload refs, maps `:observation` messages to
-   adapter-facing `:user` messages, assembles the system text, and attaches cache
-   metadata.
+   adapter-facing `:user` messages, assembles the system text, inserts any transient
+   dynamic SDK surface request context, and attaches cache metadata.
 
 4. **Call the adapter under one deadline.** The step calls the adapter through the
    adapter port inside `with-deadline`. Streaming token deltas, when enabled, are
@@ -172,45 +177,50 @@ Children and attached children are new branches in the same durable state graph.
    fns. Host dynamic vars used for turn/step/eval bookkeeping are internal only and
    are not part of the model contract.
 
-3. **Small kernel.** The kernel owns SCI mechanics, not session composition,
+3. **Surfaces are declared, namespaced, and gated.** The built-in functions remain
+   the harness surface. SDK surfaces can add qualified host functions only when
+   configured by the embedder and granted by `:surface/fns`; they never create
+   hidden context vars or extend `clojure.core`.
+
+4. **Small kernel.** The kernel owns SCI mechanics, not session composition,
    storage, lineage, or provider policy.
 
-4. **Port-only orchestration.** The loop talks to the adapter and `SessionStore`
+5. **Port-only orchestration.** The loop talks to the adapter and `SessionStore`
    ports only. It never reaches into SQLite, BlobStore, or provider SDK details.
 
-5. **Canonical durability.** The canonical durable backend is SQLite for the event
+6. **Canonical durability.** The canonical durable backend is SQLite for the event
    log plus a global BlobStore for payload bytes. `MemoryStore` is the same semantic
    contract used for tests and minimal runs, not a different architecture.
 
-6. **Events carry results, never recipes.** Folding the durable event stream
+7. **Events carry results, never recipes.** Folding the durable event stream
    reconstructs the session view without re-running a provider call or eval.
 
-7. **Persist before fold.** The store stamps ids, durably persists the event, folds
+8. **Persist before fold.** The store stamps ids, durably persists the event, folds
    it into the in-process view cache only on success, then emits live notifications.
 
-8. **Current head is authoritative.** Finalizing a turn publishes a content-addressed
+9. **Current head is authoritative.** Finalizing a turn publishes a content-addressed
    immutable head and updates the session's current-head pointer. Resume and attach
    restore from published heads rather than reconstructing state from looser
    projections when a head exists.
 
-9. **Lineage is durable data.** Invocation and derivation edges are content-addressed
+10. **Lineage is durable data.** Invocation and derivation edges are content-addressed
    facts in the store, not inferred after the fact.
 
-10. **State-graph integrity matters over time.** Published heads, durable lineage
+11. **State-graph integrity matters over time.** Published heads, durable lineage
     edges, and head-based resume/attach semantics preserve auditable continuity
     across operator steering, branching, and restart.
 
-11. **Attach is additive, not mutating.** `attach-rlm` creates a fresh target
+12. **Attach is additive, not mutating.** `attach-rlm` creates a fresh target
     session and never advances the source session or source head.
 
-12. **Filesystem paths are backend details only.** The logical identity model is
+13. **Filesystem paths are backend details only.** The logical identity model is
     session ids, payload ids, head ids, and lineage-edge ids. On-disk directories
     are physical storage layout.
 
-13. **Single writer per session.** The store lock serializes appends; the turn lock
+14. **Single writer per session.** The store lock serializes appends; the turn lock
     serializes active turns. Live reads avoid both.
 
-14. **Honest accounting.** Usage, cost, and cache values stay `:unknown` when the
+15. **Honest accounting.** Usage, cost, and cache values stay `:unknown` when the
     provider did not report them.
 
 ## Namespace layout
@@ -221,6 +231,7 @@ Children and attached children are new branches in the same durable state graph.
 | `fractal.engine.session` | Sole composition root. Builds/resumes sessions, chooses store backend, builds adapters, resolves profiles/providers, assembles host fns, owns the turn lock, and spawns child or attached sessions. |
 | `fractal.engine.session-loop` | Turn and step execution spine, terminal turn commit/finalization, deadline ownership, assistant and observation appends, current-head publication. |
 | `fractal.engine.recursion` | `lm`, `map-lm`, `rlm`, `map-rlm`, `attach-rlm`, fan-out behavior, envelopes, and lineage-edge recording. |
+| `fractal.engine.surface` | SDK surface descriptor validation, public stamps, stable/dynamic prompt rendering, and namespaced SCI function assembly. |
 | `fractal.engine.kernel` | SCI ctx construction, block extraction, eval-batch semantics, `FINAL`, `inspect`, snapshot-vars, and restore-vars. |
 | `fractal.engine.observe` | Fit-or-stub rendering, `inspect` text, observation assembly, eval and final previews. |
 | `fractal.engine.store` | `SessionStore` protocol, session-view fold, event taxonomy, head helpers, lineage-edge helpers, ref auditing. |
@@ -250,7 +261,7 @@ The namespaces form a strict DAG.
 | Layer | Namespaces | Notes |
 |-------|------------|-------|
 | **L0** | `time`, `payload`, `concurrent`, `catalog` | Pure or engine-free foundations |
-| **L1** | `store`, `capability`, `prompt`, `cache`, `observe`, `live` | Core contracts and shared services |
+| **L1** | `store`, `capability`, `surface`, `prompt`, `cache`, `observe`, `live` | Core contracts and shared services |
 | **L1.5** | `payload-io`, `store.memory`, `store.blobstore`, `store.sqlite` | Store-coupled helpers and backends |
 | **L2** | `adapter`, `adapter.fake`, `adapter.sdk`, `kernel` | Execution primitives |
 | **L3** | `adapter.request`, `compaction`, `session-loop` | Request assembly and loop support |

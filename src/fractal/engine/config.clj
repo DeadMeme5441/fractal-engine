@@ -4,7 +4,8 @@
    catalog, and RECORDS the adapter choice keyword — it never constructs the
    adapter instance (start-session! is the sole composition root, GD5)."
   (:require [fractal.engine.capability :as capability]
-            [fractal.engine.catalog :as catalog]))
+            [fractal.engine.catalog :as catalog]
+            [fractal.engine.surface :as surface]))
 
 (def defaults
   {:adapter          :sdk
@@ -43,7 +44,8 @@
    :live/queue-bound 1024
    :live/drop        :drop-transient
    :context          {:compact-at 0.80 :hard-at 0.95 :unknown-window-chars 400000}
-   :system-overlay   nil})
+   :system-overlay   nil
+   :surfaces         []})
 
 (defn make-config
   "Normalize + validate engine config. Returns a cfg map with the capability
@@ -52,7 +54,8 @@
    as a keyword only."
   [opts]
   (let [cfg (-> (merge defaults opts)
-                (update :context #(merge (:context defaults) %)))]
+                (update :context #(merge (:context defaults) %))
+                (update :surfaces surface/normalize-surfaces))]
     (when-not (#{"5m" "1h"} (:cache-ttl cfg))
       (throw (ex-info "invalid :cache-ttl (only \"5m\" or \"1h\")"
                       {:error/type :config/invalid-cache-ttl :cache-ttl (:cache-ttl cfg)})))

@@ -55,7 +55,8 @@
    :cap/network      :deny
    :ns/granted       '#{clojure.core clojure.string clojure.edn clojure.set clojure.walk}
    :cap/java-classes {}
-   :engine-fns       #{:FINAL :inspect}})
+   :engine-fns       #{:FINAL :inspect}
+   :surface/fns      #{}})
 
 (defn default-profile
   "The RLM workhorse: reads the work area (the thesis needs easy file reads),
@@ -68,7 +69,8 @@
    :cap/network      :deny
    :ns/granted       default-ns-grant
    :cap/java-classes {}
-   :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}})
+   :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}
+   :surface/fns      #{}})
 
 (defn trusted
   "Broad: fs-read everywhere, writes to the work area, shell + network open."
@@ -80,7 +82,8 @@
    :cap/network      :allow
    :ns/granted       default-ns-grant
    :cap/java-classes {}
-   :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}})
+   :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}
+   :surface/fns      #{}})
 
 (defn named-profile [k]
   (case k
@@ -247,7 +250,8 @@
    :default/:locked-down, or a non-map class whitelist. Returns the profile."
   [profile]
   (let [classes (:cap/java-classes profile)
-        unsafe? (:capability/unsafe profile)]
+        unsafe? (:capability/unsafe profile)
+        surface-fns (or (:surface/fns profile) #{})]
     (when-not (map? classes)
       (throw (ex-info "capability :cap/java-classes must be an explicit finite map (never :all)"
                       {:error/type :capability/invalid :cap/java-classes classes})))
@@ -264,7 +268,20 @@
       (throw (ex-info "the :capability/unsafe marker is rejected on :default/:locked-down"
                       {:error/type :capability/unsafe-rejected
                        :capability/name (:capability/name profile)})))
-    profile))
+    (when-not (set? surface-fns)
+      (throw (ex-info "capability :surface/fns must be an explicit finite set"
+                      {:error/type :capability/invalid :surface/fns surface-fns})))
+    (when-not (every? #(and (symbol? %)
+                            (namespace %)
+                            (not (str/blank? (namespace %)))
+                            (not (str/blank? (name %))))
+                      surface-fns)
+      (throw (ex-info "capability :surface/fns must contain qualified symbols"
+                      {:error/type :capability/invalid :surface/fns surface-fns})))
+    (assoc profile :surface/fns surface-fns)))
+
+(defn- surface-fns [profile]
+  (or (:surface/fns profile) #{}))
 
 (defn- meet-mode
   "Meet of a :deny|:allow|{:paths}|{:commands} gate (04 §3): :deny annihilates,
@@ -295,7 +312,8 @@
    :cap/network      (meet-network (:cap/network a) (:cap/network b))
    :ns/granted       (set/intersection (:ns/granted a) (:ns/granted b))
    :cap/java-classes (select-keys (:cap/java-classes a) (keys (:cap/java-classes b)))
-   :engine-fns       (set/intersection (:engine-fns a) (:engine-fns b))})
+   :engine-fns       (set/intersection (:engine-fns a) (:engine-fns b))
+   :surface/fns      (set/intersection (surface-fns a) (surface-fns b))})
 
 (defn- gate<=? [a b kind]
   (cond
@@ -318,7 +336,8 @@
        (or (= :deny (:cap/network a)) (= :allow (:cap/network b)))
        (set/subset? (:ns/granted a) (:ns/granted b))
        (set/subset? (set (keys (:cap/java-classes a))) (set (keys (:cap/java-classes b))))
-       (set/subset? (:engine-fns a) (:engine-fns b))))
+       (set/subset? (:engine-fns a) (:engine-fns b))
+       (set/subset? (surface-fns a) (surface-fns b))))
 
 (defn resolve-override
   "Resolve a per-session capability override against the cfg base: REJECT it if
@@ -378,17 +397,35 @@
    'as-url       (gated-as-url profile)
    'copy         (gated-copy profile)})
 
+(defn- surface-ns-vars
+  "Filter SDK-supplied SCI namespaces through the capability's :surface/fns set."
+  [profile surface-namespaces]
+  (let [allowed (surface-fns profile)]
+    (into {}
+          (keep (fn [[ns-sym fns]]
+                  (let [exposed (into {}
+                                      (keep (fn [[fn-sym f]]
+                                              (let [q (symbol (name ns-sym) (name fn-sym))]
+                                                (when (contains? allowed q)
+                                                  [fn-sym f]))))
+                                      fns)]
+                    (when (seq exposed) [ns-sym exposed]))))
+          (or surface-namespaces {}))))
+
 (defn sci-opts
   "Map a validated profile + engine-fn impls onto the options passed to
    sci/init (03, 04 §2). Engine fns + gated IO live in clojure.core; the
    copy-ns'd catalog namespaces are emitted iff granted; classes are an explicit
    finite whitelist (never :all); the deny set + `*read-eval* false` close the
    remaining holes."
-  [profile engine-fn-impls]
-  {:namespaces (merge {'clojure.core      (merge (engine-fn-vars profile engine-fn-impls)
-                                                 (gated-io-vars profile))
-                       'clojure.java.io   (gated-io-ns profile)
-                       'clojure.java.shell {'sh (gated-sh profile)}}
-                      (select-keys copy-ns-catalog (:ns/granted profile)))
-   :classes    (:cap/java-classes profile)
-   :deny       deny-set})
+  ([profile engine-fn-impls]
+   (sci-opts profile engine-fn-impls {}))
+  ([profile engine-fn-impls surface-namespaces]
+   {:namespaces (merge {'clojure.core      (merge (engine-fn-vars profile engine-fn-impls)
+                                                  (gated-io-vars profile))
+                        'clojure.java.io   (gated-io-ns profile)
+                        'clojure.java.shell {'sh (gated-sh profile)}}
+                       (select-keys copy-ns-catalog (:ns/granted profile))
+                       (surface-ns-vars profile surface-namespaces))
+    :classes    (:cap/java-classes profile)
+    :deny       deny-set}))

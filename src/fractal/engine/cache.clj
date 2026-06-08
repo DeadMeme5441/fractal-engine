@@ -23,11 +23,17 @@
 
 (defn build-cache-opts
   "The opaque passthrough attached to every adapter request (05 §4). The root
-   agent loop scopes to the :agent purpose."
-  [view cfg]
-  {:enabled? true
-   :ttl      (:cache-ttl cfg)
-   :scope-id (scope-id (cache-id (:session view)) :agent)})
+   agent loop scopes to the :agent purpose. When a request carries dynamic
+   per-turn prompt material, cache only the stable system breakpoint on
+   system-and-tail providers; dynamic prompt text must not become a tail cache
+   anchor."
+  ([view cfg]
+   (build-cache-opts view cfg {}))
+  ([view cfg {:keys [dynamic-request?]}]
+   (cond-> {:enabled? true
+            :ttl      (:cache-ttl cfg)
+            :scope-id (scope-id (cache-id (:session view)) :agent)}
+     dynamic-request? (assoc :breakpoints 1))))
 
 (defn build-leaf-cache-opts
   "The opaque passthrough for a LEAF provider call (Phase 3, 08 §4). Scopes to

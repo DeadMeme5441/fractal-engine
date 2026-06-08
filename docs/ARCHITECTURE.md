@@ -1,6 +1,6 @@
-# fractal-engine-v1 Architecture
+# fractal-engine Architecture
 
-This document is a public maintainer and contributor map for the v1 runtime. It
+This document is a public maintainer and contributor map for the runtime. It
 describes the current engine architecture and the thin agent control plane
 around it.
 
@@ -33,6 +33,7 @@ flowchart TB
     STORE["fractal.engine.store"]
     ADAPTER["fractal.engine.adapter"]
     CAP["fractal.engine.capability"]
+    SURFACE["fractal.engine.surface"]
     COMPACT["fractal.engine.compaction"]
     LIVE["fractal.engine.live"]
     PIO["fractal.engine.payload-io"]
@@ -65,6 +66,7 @@ flowchart TB
   LOOP --> LIVE
   RECUR --> ADAPTER
   RECUR --> STORE
+  SESSION --> SURFACE
   STORE --> MEM
   STORE --> SQLITE
   SQLITE --> BLOB
@@ -72,6 +74,7 @@ flowchart TB
   ADAPTER --> SDK
   STORE --> PIO
   PIO --> PAYLOAD
+  SURFACE --> PAYLOAD
 ```
 
 The namespace graph is expected to remain acyclic. `test/fractal/engine/deps_acyclic_test.clj`
@@ -98,6 +101,7 @@ engine-free, and capability profiles take host function implementations as data.
 | `fractal.engine.adapter` | Provider adapter port and call-record shape. |
 | `fractal.engine.adapter.request` | Request assembly from the folded view, compaction boundary, system overlays, and cache metadata. |
 | `fractal.engine.capability` | Capability profile lattice, clamp/validation rules, and SCI options. |
+| `fractal.engine.surface` | SDK surface descriptor validation, public stamps, stable/dynamic prompt rendering, and namespaced SCI function assembly. |
 | `fractal.engine.compaction` | Context assessment and transcript compaction. |
 | `fractal.engine.live` | Per-session live dispatch, transient notifications, backlog recovery, and progress projection. |
 | `fractal.engine.concurrent` | Deadlines, bounded fan-out workers, dynamic-binding propagation, and the global leaf-call semaphore. |
@@ -121,6 +125,7 @@ folded view.
 | Head | Immutable content-addressed continuation boundary for a session. |
 | Current head | Mutable pointer to the session head that resume and attach should advance from. |
 | Lineage edge | Durable content-addressed relation between source/target sessions and heads. |
+| SDK surface | Embedder-provided namespaced host functions plus prompt metadata and public resume stamps. |
 
 Filesystem locations, including `:store/dir`, are physical backend locations.
 They are not logical session identity. Identity is carried by session ids, payload
@@ -160,8 +165,8 @@ sequenceDiagram
    observers can see in-flight progress.
 3. `adapter.request/build-request` reads the current folded view, selects kept
    messages after compaction, hydrates payload refs, maps observations to
-   adapter-facing user messages, prepends system text, and attaches cache
-   metadata.
+   adapter-facing user messages, assembles system text, inserts any transient
+   dynamic SDK surface request context, and attaches cache metadata.
 4. The adapter is called through the `LlmAdapter` port under one deadline.
    Streaming token fragments, when enabled, are transient live items only.
 5. The loop appends the assistant message and `:step/put`.
@@ -231,6 +236,11 @@ Profiles form a lattice. Child sessions and per-session overrides inherit throug
 gated IO functions into SCI, installs a finite namespace/class catalog, and keeps
 the deny set active for escape forms such as `eval`, `resolve`, `load-string`,
 and `load-file`.
+
+SDK surfaces add another finite gate: `:surface/fns`. Configured surface
+functions appear only as qualified namespace calls when their symbol is allowed.
+They are not injected into `clojure.core`, and child sessions inherit them by set
+intersection.
 
 The runtime governor is config-driven:
 
@@ -302,18 +312,21 @@ items are never persisted and are recoverable only through later durable state.
    the API unless a supported surface change is intentional.
 2. Keep the loop on ports. `session-loop` should not know SQLite, BlobStore, or a
    provider implementation.
-3. Keep `apply-event` pure. Views are projections from events.
-4. Persist payloads before appending events that reference them. Orphan payloads
+3. Keep SDK surfaces as declared host-function namespaces. The engine owns
+   injection, prompt truth, capability gating, cache placement, and stamps;
+   embedders own effects.
+4. Keep `apply-event` pure. Views are projections from events.
+5. Persist payloads before appending events that reference them. Orphan payloads
    are acceptable; dangling refs are not.
-5. Treat `current-head` as the only mutable continuation pointer.
-6. Publish a head after every successful `FINAL` turn and after compaction.
-7. Do not restore by replaying provider calls or evals. Restore from stored
+6. Treat `current-head` as the only mutable continuation pointer.
+7. Publish a head after every successful `FINAL` turn and after compaction.
+8. Do not restore by replaying provider calls or evals. Restore from stored
    snapshots referenced by heads.
-8. Keep attach additive. `attach-rlm` must create a fresh derived child and leave
+9. Keep attach additive. `attach-rlm` must create a fresh derived child and leave
    the selected source unchanged.
-9. Keep lineage durable and content-addressed. Do not infer invocation or
+10. Keep lineage durable and content-addressed. Do not infer invocation or
    derivation edges from naming conventions or backend paths.
-10. Treat filesystem paths as backend configuration only, never as session
+11. Treat filesystem paths as backend configuration only, never as session
     identity.
 
 ## Verification Pointers
@@ -331,4 +344,6 @@ The architecture above is covered by:
 - `test/fractal/engine/store_sqlite_test.clj`
 - `test/fractal/engine/session_test.clj`
 - `test/fractal/engine/recursion_test.clj`
+- `test/fractal/engine/surface_test.clj`
+- `test/fractal/engine/surface_session_test.clj`
 - `test/fractal/engine/deps_acyclic_test.clj`
