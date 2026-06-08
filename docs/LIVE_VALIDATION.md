@@ -185,6 +185,37 @@ The assertions should prove more than command exit status:
 - `payload` hydrates a content-addressed value from a ref returned by `turns`;
 - `stop`, `close`, and `resume` work through durable reopen.
 
+## SDK Surface Live Smoke
+
+When changing `fractal.engine.surface`, capability gating, request assembly, or
+leaf prompt wiring, run the focused surface live test instead of relying only on
+generic recursion tests:
+
+```sh
+clojure -M:live-test -n fractal.engine.live-surface-test
+```
+
+The checked-in surface smoke uses a temporary Git-like repository surface and a
+bounded task that asks the root model to:
+
+- call the injected surface to enumerate files;
+- call the injected surface to read bounded file contents;
+- use a leaf call for one semantic classification;
+- spawn a child that also uses the injected surface;
+- return an EDN final value that exposes the root, leaf, and child results.
+
+Useful assertions for manual or extended surface smokes:
+
+- final status is `:final`;
+- returned values contain data that could only come from the injected surface;
+- at least one child invocation edge is recorded when the task asks for a child;
+- leaf results reflect the configured leaf model path and leaf prompt context;
+- denied surface functions are absent rather than prompt-discouraged;
+- durable session metadata contains public surface stamps only;
+- resume with the same descriptors succeeds, while missing or changed stamps fail
+  with `:surface/mismatch`;
+- any instrumented host-call counters prove that real surface functions executed.
+
 ## What To Record
 
 A useful live validation note should include:

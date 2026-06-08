@@ -110,11 +110,12 @@ what symbols are reachable once execution is in that session.
 
 :default
 ;; reads only the current workdir, denies writes and network, allows the safe shell set,
-;; grants the default namespace catalog, :engine-fns includes FINAL/inspect/lm/map-lm/rlm/map-rlm/attach-rlm
+;; grants the default namespace catalog, :engine-fns includes FINAL/inspect/lm/map-lm/rlm/map-rlm/attach-rlm,
+;; :surface/fns #{}
 
 :trusted
 ;; fs-read :allow, fs-write {:paths [workdir]}, shell :allow, network :allow,
-;; same namespace catalog as :default, same :engine-fns as :default
+;; same namespace catalog as :default, same :engine-fns as :default, :surface/fns #{}
 ```
 
 Important composition truth:
@@ -129,6 +130,12 @@ Harness mode and capability compose cleanly:
 - `:harness :rlm` assembles the recursion fns too, then `:engine-fns` filters them.
 - Therefore a `:locked-down` session running in `:harness :rlm` still exposes only
   `FINAL` and `inspect`.
+- SDK surface functions are gated separately by `:surface/fns`, a finite set of
+  qualified symbols. Default deny means configured surfaces do not appear in SCI
+  until the capability profile allows individual functions.
+- `clamp` intersects `:surface/fns`, and override validation rejects any child
+  or per-session override that tries to gain a surface function the parent did
+  not have.
 
 ---
 

@@ -17,6 +17,17 @@ Every ordinary root/child step request carries:
  :scope-id "fr:agent:<32-hex>"}
 ```
 
+When the request includes dynamic SDK surface request context, the same map also
+contains:
+
+```clojure
+{:breakpoints 1}
+```
+
+That flag is still provider-agnostic. It means "cache the stable system
+breakpoint only" for providers that support system-and-tail prompt caching. It
+keeps request-local surface context from becoming a reusable cache anchor.
+
 Every leaf (`lm` / `map-lm`) request carries the same shape, but with a `:leaf` scope:
 
 ```clojure
@@ -79,10 +90,12 @@ It is always emitted as `fr:<purpose>:<32 hex>`.
 `build-cache-opts` uses the current session's `cache-id` and the `:agent` purpose:
 
 ```clojure
-(defn build-cache-opts [view cfg]
-  {:enabled? true
-   :ttl      (:cache-ttl cfg)
-   :scope-id (scope-id (cache-id (:session view)) :agent)})
+(defn build-cache-opts [view cfg opts]
+  (cond-> {:enabled? true
+           :ttl      (:cache-ttl cfg)
+           :scope-id (scope-id (cache-id (:session view)) :agent)}
+    (:dynamic-request? opts)
+    (assoc :breakpoints 1)))
 ```
 
 That means:
@@ -92,6 +105,8 @@ That means:
 - each child session has its own agent scope because it has a fresh `cache-id`;
 - an attached child also has its own fresh agent scope; the source session/head cache is
   not reused or advanced by attach.
+- dynamic SDK request prompt text does not change the `scope-id`; it only narrows
+  cache breakpoints for that one provider request.
 
 ### Leaf request
 

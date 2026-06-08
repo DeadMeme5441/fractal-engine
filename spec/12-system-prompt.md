@@ -113,6 +113,22 @@ And it teaches the intended semantics:
   one new task there;
 - `FINAL` is the only thing that returns a value to the caller.
 
+SDK surfaces add prompt material from the same descriptor that drives SCI
+injection. Root and child request assembly uses this order:
+
+1. harness base doctrine;
+2. generated stable SDK surface card for capability-exposed functions only;
+3. config `:system-overlay`;
+4. session `:system-overlay`;
+5. dynamic per-request SDK surface context as a transient user message before
+   the latest task/observation.
+
+Dynamic request context is not appended to durable transcript state. When it is
+present, request cache metadata limits system-and-tail providers to one
+breakpoint so the stable system prompt can cache while dynamic tail text does
+not become a cache anchor. Leaf calls get `:surface/prompts :leaf` inside the
+leaf system prompt.
+
 ### Long-horizon state and branching
 
 This prompt is explicitly about state that lives over time:

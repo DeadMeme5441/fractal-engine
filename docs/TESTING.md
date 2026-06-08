@@ -1,6 +1,6 @@
 # Testing
 
-This document is the maintainer testing guide for `fractal-engine-v1`. The
+This document is the maintainer testing guide for `fractal-engine`. The
 default rule is offline-first: routine validation must not require credentials,
 network access, or paid provider calls.
 
@@ -39,6 +39,10 @@ run without provider credentials. It covers the deterministic engine path:
   durable payload hydration through the command surface;
 - recursive host functions, fan-out behavior, partial failure sentinels, resume,
   attach, and lineage invariants;
+- SDK surfaces: descriptor validation, capability gates, SCI namespace
+  injection, prompt cards, dynamic request/leaf prompt placement, child
+  inheritance, durable resume stamp matching, and concrete Git-like recursion
+  with leaves and children;
 - namespace layering through the acyclicity test.
 
 Run the patch hygiene check for every documentation or source change:
@@ -79,6 +83,17 @@ For CLI/control-plane changes, also run a live command matrix through
 complete matrix should exercise usage commands, inspection commands, recursive
 tree readback, trace readback, compaction, stop/close/reopen behavior, and
 payload hydration from a stored ref.
+
+For SDK surface changes, the focused live path is:
+
+```sh
+clojure -M:live-test -n fractal.engine.live-surface-test
+```
+
+That test uses a real provider, a real configured Git-like surface, a root
+session, a child session, and a leaf call. It proves that injected host
+functions can be selected by the model and that surface prompt context reaches
+the relevant request paths.
 
 ## Runtime Governor For Live Runs
 

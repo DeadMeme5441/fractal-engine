@@ -39,19 +39,23 @@ flowchart TB
   LOOP --> REPL["Persistent SCI Clojure REPL"]
   LOOP --> ADAPTER["Fake or SDK adapter"]
   REPL --> HOST["FINAL / lm / rlm host functions"]
+  REPL --> SURFACE["Configured SDK surfaces"]
   LOOP --> STORE["SessionStore port"]
   STORE --> MEM["MemoryStore"]
   STORE --> SQL["SQLite events"]
   SQL --> BLOB["Content-addressed BlobStore"]
   SQL --> VIEWS["Views, heads, lineage, reports"]
   BLOB --> VIEWS
+  SURFACE --> PROMPT["Surface prompt cards"]
+  PROMPT --> LOOP
 ```
 
 | Capability | Built surface |
 | --- | --- |
 | Session core | Persistent SCI-backed Clojure REPL, step loop, capability sandbox, fake/provider adapter seam, public API, live readback, and compaction. |
 | Durable sessions | SQLite event store, content-addressed BlobStore payloads, and `resume-session!` over the same `SessionStore` port. |
-| Recursive harness | Model-facing `lm`, `map-lm`, `rlm`, and `map-rlm` with fan-out, child sessions, capability inheritance, and config-only harness switching. |
+| Recursive harness | Model-facing `FINAL`, `inspect`, `lm`, `map-lm`, `rlm`, `map-rlm`, and `attach-rlm` with fan-out, child sessions, capability inheritance, and config-only harness switching. |
+| SDK surfaces | Embedder-provided namespaced host functions with capability gates, prompt cards, dynamic request/leaf prompt context, and durable resume stamps. |
 | Durable state graph | Immutable content-addressed heads, current-head publication, invocation and derivation lineage edges, and `attach-rlm` for deriving a fresh child from a prior head. |
 | Runtime governance | SCI capability profiles plus step, turn, deadline, fan-out, leaf-concurrency, and context-window limits with explicit terminal statuses. |
 | Agent control plane | Non-interactive CLI usage and inspection commands, config files, JSON/EDN output, payload hydration, trace readback, store checks, and compact reports. |

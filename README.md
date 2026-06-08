@@ -184,6 +184,52 @@ Use the smallest sufficient kind:
 - `attach-rlm` to derive a fresh child from a selected prior head without
   advancing the source session.
 
+## SDK Surfaces
+
+Embedders can inject named world/API surfaces into the session REPL:
+
+```clojure
+(def issues-surface
+  {:surface/id :issues
+   :surface/version 1
+   :surface/prompt "Use issues/search before guessing issue ids."
+   :surface/prompts
+   {:request (fn [_ctx] "Current issue index is fresh as of this request.")
+    :leaf "Classify issue snippets by severity only."}
+   :surface/namespaces
+   {'issues {'search {:doc "Search issue records."
+                      :arglists '([query opts])
+                      :fn (fn [query opts] {:query query :limit (:limit opts)})}}}})
+
+(def issues-profile
+  {:capability/name :issues-demo
+   :cap/fs-read :deny
+   :cap/fs-write :deny
+   :cap/shell :deny
+   :cap/network :deny
+   :ns/granted '#{clojure.core clojure.string clojure.edn clojure.set clojure.walk}
+   :cap/java-classes {}
+   :engine-fns #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}
+   :surface/fns '#{issues/search}})
+
+(def cfg
+  (fe/make-config
+    {:adapter :fake
+     :model "fake-model"
+     :harness :rlm
+     :surfaces [issues-surface]
+     :capability issues-profile
+     :fake/respond (fe/responder
+                     [[:default "```clojure\n(FINAL (issues/search \"auth\" {:limit 3}))\n```"]])}))
+```
+
+Surface functions are injected as namespaced calls only, for example
+`(issues/search "auth" {:limit 3})`. They are deny-by-default through
+`:surface/fns`, and child sessions inherit them by set intersection. Stable
+surface cards are part of the system prompt; dynamic `:request` prompt fragments
+are added per provider request outside persisted transcript state, and reduce
+tail-cache breakpoints so dynamic text does not become a cache anchor.
+
 ## CLI Surface
 
 Run:
@@ -317,7 +363,7 @@ The release version is derived from the tag name without the leading `v`.
 After a release is published, depend on the Clojars coordinate:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.5.0"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.5.1"}}}
 ```
 
 Then use the public facade:

@@ -1,6 +1,6 @@
 # Operations
 
-This is the maintainer operations guide for `fractal-engine-v1`. The repo is a
+This is the maintainer operations guide for `fractal-engine`. The repo is a
 library/runtime codebase; operational work means validating changes, managing
 ignored artifacts, keeping tracked content public-safe, and recording enough
 evidence for another maintainer to reproduce a result.

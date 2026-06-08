@@ -64,9 +64,10 @@ The kernel itself provides the base host functions:
 - `:rlm` harness: those plus `lm`, `map-lm`, `rlm`, `map-rlm`, `attach-rlm`
 
 The capability profile can still withhold recursive functions even in
-`:harness :rlm`. The model-facing six-function surface is:
+`:harness :rlm`. The built-in recursive surface is:
 
 - `FINAL`
+- `inspect`
 - `lm`
 - `map-lm`
 - `rlm`
@@ -75,6 +76,11 @@ The capability profile can still withhold recursive functions even in
 
 They are bound inside the session SCI namespace, not exported as top-level API
 functions.
+
+SDK embedders may additionally configure namespaced surface functions such as
+`jira/search` or `git/read-file`. Those functions are injected only when their
+surface is configured and the resolved capability profile grants the qualified
+symbol in `:surface/fns`. They never live in `clojure.core`.
 
 ### `FINAL`
 

@@ -89,6 +89,8 @@ proposal.
 The contract is intentionally narrow:
 
 - the model gets ordinary Clojure plus these host fns
+- embedders may configure additional namespaced SDK surface functions, gated by
+  explicit `:surface/fns` capabilities
 - there is no magic context object, hidden mutable session map, or ambient handle
 - host-internal dynamic vars used for bookkeeping stay internal to the engine
 

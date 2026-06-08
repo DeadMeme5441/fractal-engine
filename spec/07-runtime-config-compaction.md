@@ -57,7 +57,8 @@ The normalized config shape currently includes:
                     :hard-at    0.95
                     :unknown-window-chars 400000}
 
- :system-overlay   nil | "..."}
+ :system-overlay   nil | "..."
+ :surfaces         [] | [<surface-descriptor> ...]}
 ```
 
 ### Validation and normalization
@@ -71,6 +72,7 @@ The normalized config shape currently includes:
 - `:store` must be `:memory` or `:sqlite`
 - `:store/dir` is required when `:store :sqlite`
 - `:cache-ttl` must be `"5m"` or `"1h"`
+- `:surfaces` must be a vector/list of valid SDK surface descriptors
 
 It also:
 
@@ -78,6 +80,8 @@ It also:
 - stamps `:capability/name`
 - resolves `:context-window` from the model catalog, or `:unknown`
 - defaults `:leaf-model` and `:child-model` to the root model
+- normalizes SDK surfaces, rejecting malformed descriptors, reserved
+  namespaces, duplicate ids, and duplicate qualified function symbols
 
 It does **not** construct adapters or stores. That happens at session start or
 resume time.
@@ -95,14 +99,16 @@ resume time.
 3. constructs the adapter
 4. constructs leaf adapter/model state
 5. creates the session slot
-6. builds and installs the SCI context
-7. appends `:session/started`
+6. builds capability-filtered SCI namespaces for configured SDK surfaces
+7. builds and installs the SCI context
+8. appends `:session/started` with public surface stamps when surfaces exist
 
 ### `resume-session!`
 
 `resume-session!` is the durable reopen path for `:store :sqlite`. It rebuilds
-the folded view from durable events, then restores REPL state from the current
-head's vars snapshot.
+the folded view from durable events, checks that configured SDK surface stamps
+match the session's persisted surface stamps, then restores REPL state from the
+current head's vars snapshot.
 
 ### Child session spawners
 
@@ -191,7 +197,8 @@ at the turn id the store will assign.
 1. if the session is `:stop-requested`, append `:session/stopped` and finalize
    the turn as `:error`
 2. append `:step/started`
-3. build the request from the folded view
+3. build the request from the folded view, including any dynamic SDK surface
+   request context
 4. assess context size
 5. call the adapter under `with-deadline`
 6. append the assistant message and `:step/put`
@@ -255,6 +262,16 @@ Terminal mappings:
 - step cap => `:budget-exceeded` / `:fractal/max-steps`
 
 The deadline wraps the whole adapter call path for that step, including retries.
+
+### Dynamic surface prompt boundary
+
+When an exposed SDK surface supplies `:surface/prompts :request`, the rendered
+text is inserted into the provider request as a transient user message before
+the latest task or observation. It is not appended to the durable message stream
+and is therefore not part of session replay, transcript compaction, or event
+history. If that transient context is present, request cache metadata includes
+`:breakpoints 1` so provider-side system-and-tail caching can keep the stable
+system prefix without anchoring the dynamic tail.
 
 ---
 

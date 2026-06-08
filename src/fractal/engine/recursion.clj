@@ -36,7 +36,8 @@
             [fractal.engine.kernel :as kernel]
             [fractal.engine.payload :as payload]
             [fractal.engine.prompt :as prompt]
-            [fractal.engine.store :as store]))
+            [fractal.engine.store :as store]
+            [fractal.engine.surface :as surface]))
 
 ;; ---------------------------------------------------------------------------
 ;; The GLOBAL leaf semaphore (a process-wide rate-limit guard). Sized once from
@@ -125,15 +126,32 @@
     :edn     (edn/read-string (strip-edn-fence text))
     text))
 
-(defn- leaf-request [leaf-model input query mode caller-cache-id cfg]
-  {:model    leaf-model
-   :messages [{:role :system :content (prompt/leaf-prompt)}
-              {:role :user
-               :content (str "Input EDN:\n" (pr-str input)
-                             "\n\nQuery:\n" query
-                             (when (= :edn mode)
-                               "\n\nReturn ONLY one schema-shaped EDN value: no prose, no Markdown, no code fence."))}]
-   :cache    (cache/build-leaf-cache-opts caller-cache-id cfg)})
+(defn- leaf-system-prompt [handle input query mode]
+  (let [cfg (:cfg handle)
+        profile (:capability handle)]
+    (->> [(prompt/leaf-prompt)
+          (surface/leaf-prompt-card
+            (:surfaces cfg)
+            profile
+            {:handle handle
+             :session/id (:session-id handle)
+             :cfg cfg
+             :input input
+             :query query
+             :mode mode})]
+         (remove str/blank?)
+         (str/join "\n\n"))))
+
+(defn- leaf-request [handle input query mode]
+  (let [cfg (:cfg handle)]
+    {:model    (:leaf-model handle)
+     :messages [{:role :system :content (leaf-system-prompt handle input query mode)}
+                {:role :user
+                 :content (str "Input EDN:\n" (pr-str input)
+                               "\n\nQuery:\n" query
+                               (when (= :edn mode)
+                                 "\n\nReturn ONLY one schema-shaped EDN value: no prose, no Markdown, no code fence."))}]
+     :cache    (cache/build-leaf-cache-opts (:cache-id handle) cfg)}))
 
 (defn- leaf-call
   "ONE bounded provider call with the leaf prompt, under the call deadline and
@@ -143,9 +161,7 @@
   [handle input query mode]
   (let [cfg        (:cfg handle)
         adpt       (:leaf-adapter handle)
-        leaf-model (:leaf-model handle)
-        cache-id   (:cache-id handle)
-        req        (leaf-request leaf-model input query mode cache-id cfg)
+        req        (leaf-request handle input query mode)
         rec        (concurrent/with-permit (leaf-sem (:leaf-concurrency cfg))
                      (fn []
                        (concurrent/with-deadline (:call-timeout-ms cfg)

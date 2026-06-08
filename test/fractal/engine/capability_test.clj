@@ -7,14 +7,19 @@
   {:FINAL   (fn [v] (throw (ex-info "FINAL" {:fractal/final v})))
    :inspect (fn [x] x)
    :lm      (fn [& _] :lm) :map-lm (fn [& _] :map-lm)
-   :rlm     (fn [& _] :rlm) :map-rlm (fn [& _] :map-rlm)})
+   :rlm     (fn [& _] :rlm) :map-rlm (fn [& _] :map-rlm)
+   :attach-rlm (fn [& _] :attach-rlm)})
 
-(defn- ctx-for [profile] (sci/init (cap/sci-opts profile engine-fns)))
+(defn- ctx-for
+  ([profile] (ctx-for profile {}))
+  ([profile surface-namespaces]
+   (sci/init (cap/sci-opts profile engine-fns surface-namespaces))))
 
 (defn- run [ctx code]
   (try {:val (sci/eval-string* ctx code)}
        (catch Throwable e
-         {:err (some #(:error/type (ex-data %))
+         {:thrown? true
+          :err (some #(:error/type (ex-data %))
                      (take-while some? (iterate #(some-> ^Throwable % .getCause) e)))})))
 
 ;; ---------------------------------------------------------------------------
@@ -27,7 +32,8 @@
       (is (= :deny (:cap/fs-read c)))
       (is (= :deny (:cap/shell c)))
       (is (= :deny (:cap/network c)))
-      (is (= #{:FINAL :inspect} (:engine-fns c)))))
+      (is (= #{:FINAL :inspect} (:engine-fns c)))
+      (is (= #{} (:surface/fns c)))))
   (testing "clamp(trusted, default) tightens trusted down to default's gates"
     (let [c (cap/clamp (cap/trusted) (cap/default-profile))]
       (is (map? (:cap/fs-read c)) ":allow ∧ {:paths} = {:paths}")
@@ -36,7 +42,8 @@
       (is (= (:commands (:cap/shell (cap/default-profile))) (:commands (:cap/shell c))))))
   (testing "path meet keeps only the mutually-contained prefix"
     (let [a {:capability/name :a :cap/fs-read {:paths ["/work"]} :cap/fs-write :deny
-             :cap/shell :deny :cap/network :deny :ns/granted #{} :cap/java-classes {} :engine-fns #{}}
+             :cap/shell :deny :cap/network :deny :ns/granted #{} :cap/java-classes {}
+             :engine-fns #{} :surface/fns '#{jira/search}}
           b (assoc a :cap/fs-read {:paths ["/work/sub"]})
           c (cap/clamp a b)]
       (is (= ["/work/sub"] (:paths (:cap/fs-read c))) "the narrower prefix /work/sub wins")
@@ -54,6 +61,25 @@
     (let [c (cap/resolve-override (cap/default-profile) :locked-down)]
       (is (= :deny (:cap/fs-read c)))
       (is (cap/profile<=? c (cap/default-profile))))))
+
+(deftest surface-function-capabilities-are-finite-and-inherited
+  (testing ":surface/fns must be a finite set of qualified symbols"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"finite set"
+          (cap/validate-profile! (assoc (cap/default-profile) :surface/fns :all))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"qualified symbols"
+          (cap/validate-profile! (assoc (cap/default-profile) :surface/fns '#{search})))))
+  (testing "child clamps intersect surface function grants"
+    (let [parent (assoc (cap/default-profile) :surface/fns '#{jira/search jira/issue})
+          child  (assoc (cap/default-profile) :surface/fns '#{jira/search git/status})
+          c (cap/clamp parent child)]
+      (is (= '#{jira/search} (:surface/fns c)))))
+  (testing "override loosening is rejected"
+    (let [base (assoc (cap/default-profile) :surface/fns '#{jira/search})]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"loosens"
+            (cap/resolve-override base
+                                  (assoc (cap/default-profile)
+                                         :capability/name :surface-widen
+                                         :surface/fns '#{jira/search jira/issue})))))))
 
 (deftest profile-ordering
   (is (cap/profile<=? (cap/locked-down) (cap/default-profile)))
@@ -97,4 +123,12 @@
   (let [ctx (ctx-for (cap/locked-down))]
     (is (= :capability/denied (:err (run ctx "(slurp \"deps.edn\")"))))
     (is (= :capability/denied (:err (run ctx "(spit \"x.txt\" \"y\")"))))
-    (is (= :capability/denied (:err (run ctx "(sh \"echo\" \"hi\")"))))))
+      (is (= :capability/denied (:err (run ctx "(sh \"echo\" \"hi\")"))))))
+
+(deftest surface-functions-are-denied-by-default-and-capability-gated
+  (let [surface-ns {'jira {'search (fn [q] {:query q})}}
+        denied (ctx-for (cap/default-profile) surface-ns)
+        allowed (ctx-for (assoc (cap/default-profile) :surface/fns '#{jira/search})
+                         surface-ns)]
+    (is (:thrown? (run denied "(jira/search \"auth\")")))
+    (is (= {:query "auth"} (:val (run allowed "(jira/search \"auth\")"))))))

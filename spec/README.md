@@ -16,7 +16,7 @@ record plus the remaining open decisions.
 
 | # | Doc | What it pins down |
 |---|-----|-------------------|
-| — | [`00-vision-and-scope.md`](00-vision-and-scope.md) | What the engine is now, the RLM thesis, the fixed model-facing surface, the durable-storage and lineage doctrine, the shipped v1 scope |
+| — | [`00-vision-and-scope.md`](00-vision-and-scope.md) | What the engine is now, the RLM thesis, the built-in model-facing surface plus SDK surface extension seam, the durable-storage and lineage doctrine, and the shipped v1 scope |
 | — | [`01-architecture.md`](01-architecture.md) | The current layered architecture, ontology, turn and recursion flow, namespace responsibilities, and the dependency DAG |
 | — | [`02-state-port.md`](02-state-port.md) | The session view, event taxonomy, payload refs, the `SessionStore` protocol, and the storage invariants that both memory and SQLite implementations obey |
 | — | [`03-eval-kernel.md`](03-eval-kernel.md) | The SCI eval kernel: ctx-per-session, host-fn injection, extract/eval/batch semantics, `FINAL`, observation rendering, snapshot/restore |
@@ -41,8 +41,9 @@ record plus the remaining open decisions.
 2. **The model-facing surface is fixed and explicit.** The model sees ordinary
    Clojure plus injected host fns. In `:clojure` harness that is `FINAL` and
    `inspect`. In `:rlm` harness it is `FINAL`, `inspect`, `lm`, `map-lm`, `rlm`,
-   `map-rlm`, and `attach-rlm`. There is no magic context var or hidden session
-   object in the model contract.
+   `map-rlm`, and `attach-rlm`. SDK surfaces may add explicitly configured
+   namespaced functions gated by `:surface/fns`. There is no magic context var
+   or hidden session object in the model contract.
 
 3. **The compute kernel stays small.** The kernel owns SCI ctx setup, block
    extraction, eval batching, `FINAL`, `inspect`, and snapshot/restore. Session

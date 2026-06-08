@@ -17,6 +17,7 @@
             [fractal.engine.store.memory :as mem]
             [fractal.engine.store.slots :as slots]
             [fractal.engine.store.sqlite :as sqlite]
+            [fractal.engine.surface :as surface]
             [fractal.engine.time :as time]))
 
 ;; Forward declarations: the rlm host fns spawn child sessions + run their loop,
@@ -100,14 +101,23 @@
       (merge base (recursion/engine-fns handle (recursion-env)))
       base)))
 
+(defn- surface-stamps [cfg]
+  (surface/stamps (:surfaces cfg)))
+
+(defn- assoc-surface-stamps [session-map cfg]
+  (let [stamps (surface-stamps cfg)]
+    (cond-> session-map
+      (seq stamps) (assoc :session/surface-stamps stamps))))
+
 (defn- init-session-ctx!
   "Build + install the session SCI ctx from its resolved profile + the
    harness-selected host fns, AFTER the handle (cfg/adapter/capability/cache-id)
    exists. The rlm fns close over the handle and read cfg/adapter/store at CALL
    time, so the :sci-ctx atom may still be nil here (the wiring chicken-and-egg)."
   [handle profile]
-  (reset! (:sci-ctx handle)
-          (kernel/new-ctx (:session-id handle) profile (assemble-engine-fns handle))))
+  (let [surface-ns (surface/sci-namespaces handle (:surfaces (:cfg handle)) profile)]
+    (reset! (:sci-ctx handle)
+            (kernel/new-ctx (:session-id handle) profile (assemble-engine-fns handle) surface-ns))))
 
 (defn- build-store
   "Pick + construct the SessionStore off cfg :store (GD5 — the composition root,
@@ -139,14 +149,16 @@
              provider (resolve-provider cfg)
              adapter  (build-adapter cfg provider)
              session-map (with-meta
-                           {:session/id             sid
-                            :session/status         :running
-                            :session/created-at     (time/now-str)
-                            :session/provider       provider
-                            :session/model          (:model cfg)
-                            :session/capability     (:capability/name profile)
-                            :session/cache-id       sid
-                            :session/system-overlay (:system-overlay opts)}
+                           (assoc-surface-stamps
+                             {:session/id             sid
+                              :session/status         :running
+                              :session/created-at     (time/now-str)
+                              :session/provider       provider
+                              :session/model          (:model cfg)
+                              :session/capability     (:capability/name profile)
+                              :session/cache-id       sid
+                              :session/system-overlay (:system-overlay opts)}
+                             cfg)
                            (live-meta cfg))
              handle0 (store/create-session! store session-map)
              handle  (merge handle0
@@ -186,6 +198,8 @@
          (when-not (:session view)
            (throw (ex-info (str "no persisted session to resume: " sid)
                            {:error/type :fractal/unknown-session :session/id sid})))
+         (surface/assert-compatible! (get-in view [:session :session/surface-stamps])
+                                     (:surfaces cfg))
          (init-session-ctx! handle profile)
          (let [head (store/current-head view)
                snap (payload-io/read-payload store (or (:head/vars-ref head) (:vars-ref view)))]
@@ -403,15 +417,17 @@
                             :leaf-provider  nil)
         child-adpt   (build-adapter child-cfg child-prov)
         session-map  (with-meta
-                       {:session/id             child-sid
-                        :session/status         :running
-                        :session/created-at     (time/now-str)
-                        :session/provider       child-prov
-                        :session/model          child-model
-                        :session/capability     (:capability/name child-prof)
-                        :session/cache-id       child-sid
-                        :session/kind           :child
-                        :session/system-overlay (:system-overlay child-opts)}
+                       (assoc-surface-stamps
+                         {:session/id             child-sid
+                          :session/status         :running
+                          :session/created-at     (time/now-str)
+                          :session/provider       child-prov
+                          :session/model          child-model
+                          :session/capability     (:capability/name child-prof)
+                          :session/cache-id       child-sid
+                          :session/kind           :child
+                          :session/system-overlay (:system-overlay child-opts)}
+                         child-cfg)
                        (live-meta child-cfg))
         handle0      (store/create-session! store session-map)
         child        (merge handle0
@@ -510,17 +526,19 @@
           child-adpt  (build-adapter child-cfg child-prov)
           source-head (:head source)
           session-map (with-meta
-                        {:session/id             child-sid
-                         :session/status         :running
-                         :session/created-at     (time/now-str)
-                         :session/provider       child-prov
-                         :session/model          child-model
-                         :session/capability     (:capability/name child-prof)
-                         :session/cache-id       child-sid
-                         :session/kind           :attached-child
-                         :session/source-session (:session/id source)
-                         :session/source-head-id (:head/id source-head)
-                         :session/system-overlay (:system-overlay child-opts)}
+                        (assoc-surface-stamps
+                          {:session/id             child-sid
+                           :session/status         :running
+                           :session/created-at     (time/now-str)
+                           :session/provider       child-prov
+                           :session/model          child-model
+                           :session/capability     (:capability/name child-prof)
+                           :session/cache-id       child-sid
+                           :session/kind           :attached-child
+                           :session/source-session (:session/id source)
+                           :session/source-head-id (:head/id source-head)
+                           :session/system-overlay (:system-overlay child-opts)}
+                          child-cfg)
                         (live-meta child-cfg))
           handle0     (store/create-session! store session-map)
           child       (merge handle0

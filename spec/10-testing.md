@@ -24,7 +24,8 @@ This doc distinguishes three things:
 |---|---|---|---|
 | Offline suite | `clojure -M:test` | The implemented Phase 1-4 engine is correct under deterministic, no-spend conditions, including persistent state, recursion, resume, and Phase-4 graph integrity. `^:live` tests are excluded. | yes |
 | Hygiene check | `git diff --check` | No whitespace / patch-format damage in the current change set. | recommended on every branch |
-| Opt-in live suite | `clojure -M:live-test` | The real `SdkAdapter`, real provider auth, real recursion host fns, and real cost/cache/usage paths work end to end. Paid and slow. | no |
+| Opt-in live suite | `clojure -M:live-test` | The real `SdkAdapter`, real provider auth, real recursion host fns, SDK surfaces, and real cost/cache/usage paths work end to end. Paid and slow. | no |
+| Focused live surface smoke | `clojure -M:live-test -n fractal.engine.live-surface-test` | A real provider can use an injected Git-like surface across root, child, and leaf request paths. | no |
 | Second-provider smoke | manual live smoke on a second provider stack | The runtime is not accidentally coupled to one provider family. | no |
 
 **Current implementation evidence.** The present Phase 1-4 line has already been
@@ -54,6 +55,8 @@ deterministic and order-independent even after recursion and parallel lanes arri
 - `payload_io_test` — inline-vs-ref payload decisions, hydration, EDN-safe coercion.
 - `catalog_test` — model-catalog lookup and unknown-model tolerance.
 - `prompt_cache_test` — prompt stamping, stable cache id / scope id / TTL shape.
+- `surface_test` — SDK surface descriptor validation, public stamps, prompt-card
+  rendering, dynamic prompt functions, and resume compatibility errors.
 - `observe_test` — fit-or-stub rendering, bounded inspect text, observation format.
 - `concurrent_test` — deadline wrapper, bounded fan-out, pool bounds, dynamic-binding
   propagation.
@@ -89,6 +92,10 @@ deterministic and order-independent even after recursion and parallel lanes arri
   policy, reentrancy rejection, pure progress projection.
 - `api_test` — the public API end-to-end example, progress, payload hydration,
   event tailing.
+- `surface_session_test` — root SCI injection, denied function absence, system
+  prompt ordering, dynamic request prompt transience and cache breakpoint shape,
+  leaf prompt wiring, child inheritance, durable resume stamp matching, and a
+  concrete Git-like surface through recursion and leaves.
 
 ### Recursion and Phase 4
 
@@ -167,6 +174,11 @@ This suite currently has two shapes:
   style, proving that a real model can drive the REPL to `FINAL` through the real
   `SdkAdapter`.
 
+- `live_surface_test` — a real-provider smoke over an injected Git-like SDK
+  surface. It proves that the model can call configured surface functions, that
+  child sessions inherit the surface, and that leaf prompt context participates
+  in a live run.
+
 Two important truths about the current live suite:
 
 1. it is **real-provider / real-engine** testing, with paid calls and real auth;
@@ -226,9 +238,9 @@ recursive continuity program.
   for observation-surface tuning, and its core hydration path is covered by CLI
   tests, but pretty rendering is not the proof of runtime correctness.
 
-- **Prompt quality is only partly pinned.** Cache ids and prompt stamping are tested,
-  but real-provider behavior quality still depends on live scenario choice and manual
-  judgment.
+- **Prompt quality is only partly pinned.** Cache ids, prompt stamping, and SDK
+  surface prompt placement are tested, but real-provider behavior quality still
+  depends on live scenario choice and manual judgment.
 
 ---
 

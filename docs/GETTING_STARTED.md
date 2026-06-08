@@ -235,7 +235,97 @@ usage and cost remain self-only.
 The same harness can be driven through the CLI by setting `:harness :rlm` in the
 selected config profile and running `clojure -M:cli run` or `turn`.
 
-## 6. Move Toward Provider-Backed Runs
+## 6. Add A Custom SDK Surface
+
+SDK surfaces let an embedder expose a real world/API to the model as namespaced
+Clojure functions. The functions are ordinary trusted host code. The engine owns
+validation, SCI injection, prompt truth, capability gating, cache placement, and
+durable resume stamps.
+
+```mermaid
+flowchart LR
+  Host["Embedder code"] --> Desc["Surface descriptor"]
+  Desc --> Gate[":surface/fns gate"]
+  Gate --> Repl["Session SCI namespace"]
+  Gate --> Prompt["Generated prompt cards"]
+  Repl --> Call["(repo/list-files {})"]
+  Prompt --> Model["Root and child model requests"]
+  Desc --> Stamp["Public surface stamp"]
+  Stamp --> Resume["Resume compatibility check"]
+```
+
+A minimal fake-backed example:
+
+```clojure
+(def repo-surface
+  {:surface/id :repo
+   :surface/version 1
+   :surface/prompt "Use repo/list-files before guessing available files."
+   :surface/prompts
+   {:request (fn [_ctx]
+               "The current task is allowed to inspect only repo/list-files and repo/read-file.")
+    :leaf "Leaf calls may classify bounded snippets returned by repo/read-file."}
+   :surface/namespaces
+   {'repo {'list-files {:doc "Return known file names."
+                        :arglists '([opts])
+                        :fn (fn [_opts] ["README.md" "src/core.clj"])}
+           'read-file  {:doc "Return bounded file text."
+                        :arglists '([path opts])
+                        :fn (fn [path _opts]
+                              (case path
+                                "README.md" "# Demo\n"
+                                "src/core.clj" "(ns demo.core)\n"))}}}})
+
+(def surface-profile
+  {:capability/name :repo-demo
+   :cap/fs-read :deny
+   :cap/fs-write :deny
+   :cap/shell :deny
+   :cap/network :deny
+   :ns/granted '#{clojure.core clojure.string clojure.edn
+                  clojure.set clojure.walk}
+   :cap/java-classes {}
+   :engine-fns #{:FINAL :inspect}
+   :surface/fns '#{repo/list-files repo/read-file}})
+
+(def cfg
+  (fe/make-config
+   {:adapter :fake
+    :model "fake-model"
+    :capability surface-profile
+    :surfaces [repo-surface]
+    :fake/respond
+    (fe/responder
+     [[:default
+       "```clojure\n(FINAL {:files (repo/list-files {})\n        :readme (repo/read-file \"README.md\" {})})\n```"]])}))
+
+(def h (fe/start-session! cfg))
+
+(:turn/final-value (fe/run-turn! h "inspect the repo surface"))
+;; => {:files ["README.md" "src/core.clj"], :readme "# Demo\n"}
+
+(fe/stop-session! h)
+```
+
+Surface calls must be qualified, for example `(repo/read-file "README.md" {})`.
+Configured functions that are not listed in `:surface/fns` do not exist in SCI.
+Children inherit the same configured surfaces, but their capability profile is
+clamped by set intersection, so a child cannot gain a function the parent lacked.
+
+Because a surface descriptor contains functions, this is an in-process SDK
+extension point. A plain EDN CLI config file cannot manufacture `:fn` or
+`:factory` values; embedding products should load surfaces in code and call the
+API, or provide their own CLI wrapper around that configured engine.
+
+Stable surface prompt text is rendered after the harness doctrine and before
+overlays. Dynamic `:request` prompt text is rendered as transient request context;
+it is not stored in the durable transcript, and cache metadata is adjusted so the
+dynamic tail is not treated as a stable cache anchor. Dynamic `:leaf` prompt text
+is appended to leaf system prompts. Durable sessions persist only public surface
+stamps, never function objects; `resume-session!` fails with `:surface/mismatch`
+when configured stamps differ from the stored session stamps.
+
+## 7. Move Toward Provider-Backed Runs
 
 Provider-backed runs use the same API with `:adapter :sdk`, a model id, and
 provider configuration appropriate for the adapter. Keep fake-adapter tests as
@@ -254,7 +344,7 @@ a config profile with the engine's runtime governor configured explicitly:
 Those controls bound execution. Provider usage/cost records, when available, are
 for observability and reporting.
 
-## 7. Read Deeper
+## 8. Read Deeper
 
 - [Overview](README.md): public-facing orientation and repo map.
 - [Agent Control Plane](AGENT_CONTROL_PLANE.md): CLI commands, config files,

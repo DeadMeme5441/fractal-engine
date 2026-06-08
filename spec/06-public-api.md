@@ -14,6 +14,12 @@ That is why the surface stays small, explicit, JSON-friendly, resumable, and
 readback-oriented. The CLI is not framed as an end-user interactive product
 surface here; it is a durable control-plane seam over this API.
 
+The public config map also exposes SDK surfaces via `:surfaces`. Surfaces are
+embedder-provided descriptors for namespaced host functions, prompt metadata,
+and public resume stamps. The engine validates descriptors, gates functions with
+`:surface/fns`, renders prompt cards/context, and refuses durable resume when
+configured surface stamps differ from the persisted session stamps.
+
 ---
 
 ## 1. Exported functions
@@ -331,6 +337,12 @@ Those are host functions injected into the session SCI context:
 
 This keeps the outer control plane small while preserving the model-facing
 language surface inside the session runtime.
+
+SDK surface functions follow the same rule. A configured surface can expose
+qualified calls such as `jira/search` inside the session SCI runtime when the
+capability profile grants the symbol in `:surface/fns`, but those functions are
+not exported from `fractal.engine.api`. The API owns the descriptor input,
+session lifecycle, and readback; the embedder owns the function implementation.
 
 ---
 
