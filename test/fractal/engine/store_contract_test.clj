@@ -134,6 +134,37 @@
           (is (= 1 (count (:steps v))))
           (is (= 1 (count (:evals v)))))))))
 
+(defn- check-phase4-heads-and-edges [new-store]
+  (let [s (new-store) sid "c-phase4"]
+    (seed! s sid)
+    (let [head (store/publish-head! s sid
+                                    {:head/kind :turn-final
+                                     :head/to-event-id 1
+                                     :head/turn-id 1
+                                     :head/vars-ref {:vars/version 1 :vars {}}
+                                     :head/final-ref :ok})
+          v (store/current-view s sid)]
+      (testing "publish-head! creates a content-addressed immutable current head"
+        (is (= (:head/id head) (:current-head v)))
+        (is (= [1 1] (:head/event-range head)))
+        (is (= 1 (count (:heads v))))
+        (is (.startsWith ^String (:head/id head) "sha256:")))
+      (testing "publish-head! rejects a stale expected basis"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"current head changed"
+              (store/publish-head! s sid
+                                   {:head/kind :turn-final
+                                    :head/to-event-id (get-in v [:counters :event])
+                                    :head/expected-basis "sha256:not-current"}))))
+      (let [edge-ev (store/append-lineage-edge! s sid
+                                                {:edge/type :invocation
+                                                 :edge/from-session sid
+                                                 :edge/to-session "child"
+                                                 :edge/from-head (:head/id head)
+                                                 :edge/to-head "sha256:child"})]
+        (testing "append-lineage-edge! content-addresses and folds the edge"
+          (is (.startsWith ^String (get-in edge-ev [:edge :edge/id]) "sha256:"))
+          (is (= (:edge edge-ev) (first (:edges (store/current-view s sid))))))))))
+
 (def ^:private invariants
   [["store-assigns-all-ids"    check-store-assigns-all-ids]
    ["fold-reproduces-view"     check-fold-reproduces-view]
@@ -143,7 +174,8 @@
    ["events-since"             check-events-since]
    ["peek-next-id"             check-peek-next-id]
    ["verify-no-dangling-refs"  check-verify-no-dangling-refs]
-   ["append-events-batch"      check-append-events-batch]])
+   ["append-events-batch"      check-append-events-batch]
+   ["phase4-heads-and-edges"   check-phase4-heads-and-edges]])
 
 ;; ---------------------------------------------------------------------------
 ;; Run the SAME invariants against each impl

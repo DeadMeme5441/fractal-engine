@@ -297,6 +297,7 @@
     (is (true? (resolves-ok? s "inspect")))
     (is (false? (resolves-ok? s "lm"))  ":clojure harness does not bind lm")
     (is (false? (resolves-ok? s "rlm")) ":clojure harness does not bind rlm")
+    (is (false? (resolves-ok? s "attach-rlm")) ":clojure harness does not bind attach-rlm")
     (is (str/includes? (sys-prompt-of s) "operator with a live Clojure REPL"))
     (is (not (str/includes? (sys-prompt-of s) "active RLM in fractal-engine")))
     (fe/stop-session! s)))
@@ -304,7 +305,7 @@
 (deftest hot-swap-rlm-is-recursive
   (let [s (start :rlm :default)]
     (is (true? (resolves-ok? s "FINAL")))
-    (doseq [f ["lm" "map-lm" "rlm" "map-rlm"]]
+    (doseq [f ["lm" "map-lm" "rlm" "map-rlm" "attach-rlm"]]
       (is (true? (resolves-ok? s f)) (str f " is bound in :rlm harness")))
     (is (str/includes? (sys-prompt-of s) "active RLM in fractal-engine"))
     (fe/stop-session! s)))
@@ -328,9 +329,11 @@
       (is (false? (resolves-ok? s "map-lm")))
       (is (false? (resolves-ok? s "rlm")))
       (is (false? (resolves-ok? s "map-rlm")))
+      (is (false? (resolves-ok? s "attach-rlm")))
       (testing "and CALLING lm at execution time is an unresolved-symbol error (not just unbound)"
         (is (false? (resolves-ok? s "(lm {} \"q\")")))
-        (is (false? (resolves-ok? s "(rlm \"t\")"))))
+        (is (false? (resolves-ok? s "(rlm \"t\")")))
+        (is (false? (resolves-ok? s "(attach-rlm {} \"t\")"))))
       (fe/stop-session! s))))
 
 ;; ===========================================================================
@@ -368,6 +371,9 @@
         (let [h2 (fe/resume-session! cfg sid)]
           (is (= sid (:session-id h2)))
           (is (true? (resolves-ok? h2 "rlm")) "the resumed session is still rlm-native")
+          (is (:current-head (fe/view h2)) "the root current head survived the durable reopen")
+          (is (some #(= :invocation (:edge/type %)) (:edges (fe/view h2)))
+              "the parent invocation edge survived the durable reopen")
           (let [r2 (fe/run-turn! h2 "again")]
             (is (= :final (:status r2)))
             (is (= 42 (:turn/final-value r2)) "a root var def'd before the reopen survived"))
@@ -376,5 +382,6 @@
         (let [hc (fe/resume-session! cfg (first @child-sids))]
           (is (seq (:events (fe/view hc))) "the child's durable event log survived")
           (is (= :child (get-in (fe/view hc) [:session :session/kind])))
+          (is (:current-head (fe/view hc)) "the child's immutable current head survived")
           (fe/close-session! hc)))
       (finally (rm-rf! dir)))))
