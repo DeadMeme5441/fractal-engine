@@ -82,7 +82,7 @@ supervision.
 
 - `fractal.engine.api` is the core programmatic surface.
 - A CLI or readback layer, when present, sits above the API as a durable,
-  scriptable control plane: JSON-first, non-interactive, resumable, leashed, and
+  scriptable control plane: JSON-first, non-interactive, resumable, governed, and
   inspectable.
 - Human-readable summaries are secondary readbacks for operator steering.
 - The engine itself therefore owns state and execution semantics, not an end-user
@@ -271,5 +271,6 @@ Two edges matter most:
   through published heads and child sessions.
 - No secondary graph database or query index beyond the event log plus
   content-addressed payload store.
-- No total-call or spend governor as a core architectural component.
+- No provider billing or accounting policy as a core architectural component;
+  the governor controls execution, not accounting.
 - No provider-specific logic above the adapter seam.

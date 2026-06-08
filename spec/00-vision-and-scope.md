@@ -54,7 +54,7 @@ operator.
 
 - The **API** is the core programmatic surface.
 - A **CLI/readback seam**, when present, is a durable control plane over that API:
-  JSON-first, non-interactive, resumable, leashed, inspectable, and scriptable.
+  JSON-first, non-interactive, resumable, governed, inspectable, and scriptable.
 - Human-readable summaries, chronicles, and reports are secondary readbacks for
   operator steering; they do not replace machine-readable audit and control data.
 - The engine itself is therefore a stateful compute substrate, not a
@@ -131,8 +131,9 @@ v1 is a long-horizon working-state engine, not just a transient recursive loop:
   engine object or context var.
 - **Not a filesystem-shaped API.** Paths are storage implementation details, not the
   logical state model.
-- **Not a total-call or spend governor in v1.** The built controls are per-turn
-  limits, per-call deadlines, fan-out caps, compaction, and honest accounting.
+- **Not a billing/accounting subsystem.** The built governor controls execution:
+  per-turn limits, per-call deadlines, fan-out caps, compaction boundaries, leaf
+  concurrency, and honest usage/cost observability when providers report it.
 - **Not an alternate graph database design in v1.** The durable truth is the
   SQLite event log plus content-addressed payloads unless a concrete future query
   need justifies more.
@@ -180,6 +181,6 @@ integrity. Provider calls and physical storage backends stay below stable ports.
 ## Still outside this high-level spec
 
 - A separate public fork-session lifecycle API
-- A total spend or total-call governor
+- Provider billing or accounting policy as a core runtime concern
 - Secondary indexes or alternate durable stores beyond the SQLite-plus-blob model
 - Packaging and deployment hardening choices beyond the core engine contract

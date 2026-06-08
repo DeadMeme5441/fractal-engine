@@ -222,7 +222,7 @@ Provider-backed runs use `:adapter :sdk`, a provider id, model ids, and provider
 configuration supplied by your runtime environment or local secret manager. Keep
 credentials out of tracked files.
 
-For live recursion, set explicit leashes:
+For live recursion, configure the runtime governor explicitly:
 
 ```edn
 {:adapter :sdk
@@ -244,6 +244,40 @@ For live recursion, set explicit leashes:
 
 Live validation is opt-in and may spend money. See
 [`docs/LIVE_VALIDATION.md`](docs/LIVE_VALIDATION.md).
+
+## Sandbox And Runtime Governance
+
+Model-written Clojure runs inside a capability-clamped SCI context. The built-in
+profiles are:
+
+- `:locked-down`: no filesystem, shell, network, interop, or recursive model
+  egress beyond `FINAL` / `inspect`;
+- `:default`: read-only access to the work area, a small read-only shell command
+  allowlist, no writes, no network, no Java interop, and the recursive host
+  functions when `:harness :rlm` is enabled;
+- `:trusted`: broader local-use profile for callers that intentionally allow
+  work-area writes, shell, and network.
+
+Capability overrides are clamped so a child or per-session override cannot widen
+the parent profile. The sandbox also gates `slurp`, `spit`, `file-seq`,
+`clojure.java.io` readers/streams/copy, `clojure.java.shell/sh`, namespace
+access, reader eval, dangerous classes, and known escape symbols.
+
+The runtime governor is also built. Configure it through:
+
+- `:max-steps` for per-turn loop depth;
+- `:max-turns` for session turn count;
+- `:call-timeout-ms` for the wall-clock deadline around each adapter call and
+  retry loop;
+- `:max-fanout` for accepted `map-lm` / `map-rlm` width;
+- `:fanout-pool` for bounded fan-out workers;
+- `:leaf-concurrency` for the global leaf-call semaphore;
+- `:context {:hard-at ...}` for hard context-window stops.
+
+These controls produce explicit terminal outcomes such as `:timeout` and
+`:budget-exceeded`. Provider usage/cost records, when available, are
+observability metadata. The governor's job is to bound execution, not to become
+a billing or accounting subsystem.
 
 ## Build And Release
 
@@ -334,8 +368,11 @@ Recommended docs:
 
 ## Scope And Limitations
 
-- No engine-level spend governor yet. Leash live runs with config.
-- No true in-process security sandbox. The runtime is for trusted local use.
+- The in-process SCI capability sandbox is built and covered by regression
+  tests, but it is not an OS/container isolation boundary for hostile code.
+- The runtime governor bounds steps, turns, adapter deadlines, fan-out, leaf
+  concurrency, and context-window exhaustion. Provider usage/cost accounting is
+  observability metadata for audit and reporting.
 - No vector retrieval or long-term memory layer.
 - No S3/AWS storage backend.
 - Live verification quality depends on the configured model.

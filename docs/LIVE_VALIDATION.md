@@ -26,8 +26,8 @@ Before starting a live run:
 flowchart LR
   Offline["clojure -M:test"] --> Models["Choose provider and models"]
   Models --> Env["Export credentials into JVM shell"]
-  Env --> Leashes["Set max steps, turns, timeout, fanout"]
-  Leashes --> Run["Run API or CLI specimen"]
+  Env --> Governor["Set runtime governor"]
+  Governor --> Run["Run API or CLI specimen"]
   Run --> Inspect["Inspect report, events, heads, trace"]
   Inspect --> Sanitize["Record public-safe summary"]
 ```
@@ -49,8 +49,9 @@ flowchart LR
 4. Use an ignored artifact directory for durable stores and reports. Relative
    paths under `.fractal/` or `runs/` are ignored by this repo.
 
-5. Set explicit leashes: `:max-steps`, `:max-turns`, `:call-timeout-ms`,
-   `:max-fanout`, and `:fanout-pool`.
+5. Set the runtime governor explicitly: `:max-steps`, `:max-turns`,
+   `:call-timeout-ms`, `:max-fanout`, `:fanout-pool`,
+   `:leaf-concurrency`, and the hard context-window threshold.
 
 ## Running The Checked-In Suite
 
@@ -191,7 +192,7 @@ A useful live validation note should include:
 - command or REPL shape used;
 - provider family and model roles, stated generically when the report will be
   public;
-- explicit leash values;
+- explicit runtime governor values;
 - whether credentials were visible to the JVM;
 - pass, fail, or skip counts;
 - final status and error type for failures;
@@ -211,16 +212,21 @@ Treat every live recursion run as potentially multiplicative. A root turn may
 make additional provider calls through leaves, children, nested children, or
 fan-out lanes.
 
-Use these controls deliberately:
+Use the engine runtime governor deliberately:
 
 - lower `:max-fanout` and `:fanout-pool` before raising model quality;
 - set `:max-turns` for live sessions unless the scenario specifically tests
   multi-turn continuity;
 - set `:max-steps` per turn and raise it only when a scenario requires
   multi-step REPL work;
+- lower `:leaf-concurrency` when a provider or account is rate-limit sensitive;
 - use `:call-timeout-ms` to bound provider stalls and retry loops;
+- set a hard context-window threshold through `:context`;
 - prefer small deterministic tasks for smoke tests;
 - stop the session and close durable resources at the end of the run.
 
 If a live scenario needs high fan-out, deep recursion, or multiple turns, record
 the expected upper bound before starting the run.
+
+The engine records usage and cost when providers report them, but those records
+are observability metadata. The governor remains the execution controls above.

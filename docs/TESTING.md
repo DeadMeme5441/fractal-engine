@@ -80,7 +80,7 @@ complete matrix should exercise usage commands, inspection commands, recursive
 tree readback, trace readback, compaction, stop/close/reopen behavior, and
 payload hydration from a stored ref.
 
-## Live Leashes
+## Runtime Governor For Live Runs
 
 Every live run should be bounded in config. The relevant runtime keys are:
 
@@ -89,10 +89,16 @@ Every live run should be bounded in config. The relevant runtime keys are:
 - `:call-timeout-ms` for the wall-clock deadline around each adapter call;
 - `:max-fanout` for maximum `map-lm` / `map-rlm` lanes accepted by one call;
 - `:fanout-pool` for bounded fan-out worker threads.
+- `:leaf-concurrency` for the process-wide leaf-call semaphore;
+- `:context` hard threshold for context-window exhaustion.
 
 For paid validation, start with small values and raise only for the specific
 scenario under test. A live proof that needs high limits should say why those
 limits are necessary and what signal would indicate a runaway run.
+
+These controls bound execution and produce explicit terminal statuses. Provider
+usage/cost records, when available, are observability metadata for audit and
+reporting.
 
 ## Environment Handling
 

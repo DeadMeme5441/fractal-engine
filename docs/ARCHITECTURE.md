@@ -100,6 +100,7 @@ engine-free, and capability profiles take host function implementations as data.
 | `fractal.engine.capability` | Capability profile lattice, clamp/validation rules, and SCI options. |
 | `fractal.engine.compaction` | Context assessment and transcript compaction. |
 | `fractal.engine.live` | Per-session live dispatch, transient notifications, backlog recovery, and progress projection. |
+| `fractal.engine.concurrent` | Deadlines, bounded fan-out workers, dynamic-binding propagation, and the global leaf-call semaphore. |
 
 No namespace outside the store should invent a durable write path. Runtime code
 appends facts through the `SessionStore` port and reads runtime state through the
@@ -210,6 +211,42 @@ flowchart LR
 
 Recursive children are ordinary sessions. Storage, resume, live query, heads, and
 payload refs use the same mechanisms as root sessions.
+
+## Capability Sandbox And Runtime Governor
+
+The engine has an in-process SCI capability sandbox. A session starts from a
+validated capability profile:
+
+- `:locked-down` denies filesystem, shell, network, Java interop, and recursive
+  model egress; only `FINAL` and `inspect` are injected.
+- `:default` allows read-only access inside the work area plus a small read-only
+  shell command allowlist; writes, network, Java interop, and dangerous classes
+  remain denied.
+- `:trusted` is for intentional local trusted use where the caller allows
+  work-area writes, shell, and network.
+
+Profiles form a lattice. Child sessions and per-session overrides inherit through
+`capability/clamp`, so an override can narrow a parent but cannot widen it.
+`fractal.engine.capability/sci-opts` injects the permitted engine functions and
+gated IO functions into SCI, installs a finite namespace/class catalog, and keeps
+the deny set active for escape forms such as `eval`, `resolve`, `load-string`,
+and `load-file`.
+
+The runtime governor is config-driven:
+
+- `:max-steps` bounds the number of provider/eval iterations in one turn.
+- `:max-turns` bounds how many turns a session can open.
+- `:call-timeout-ms` wraps each adapter call, including SDK retry/backoff.
+- `:max-fanout` rejects over-wide `map-lm` / `map-rlm` inputs.
+- `:fanout-pool` bounds worker threads for one fan-out.
+- `:leaf-concurrency` is a process-wide semaphore for leaf calls.
+- `:context {:hard-at ...}` stops turns before exceeding the hard context
+  window.
+
+When these controls fire, the runtime returns typed outcomes (`:timeout`,
+`:budget-exceeded`, or `:error`) and persists the terminal turn fact when a turn
+has opened. Cost and usage are recorded when the provider reports them, but those
+records are observability metadata. The governor is the execution-control layer.
 
 ## Storage Authority
 

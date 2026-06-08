@@ -94,11 +94,18 @@ Required or notable options:
  :fake/respond     respond-fn          ; required when :adapter is :fake
  :capability       :locked-down | :default | :trusted | profile-map
  :harness          :clojure | :rlm
+ :leaf-model       "model-id" | nil     ; defaults to root :model
+ :leaf-provider    :provider-id | nil   ; defaults to resolved root provider
+ :child-model      "model-id" | nil     ; defaults to root :model
+ :child-provider   :provider-id | nil   ; defaults to resolved root provider
  :store            :memory | :sqlite
  :store/dir        "relative-or-configured-dir"
  :max-steps        25
  :max-turns        nil
  :call-timeout-ms  120000
+ :max-fanout       50
+ :fanout-pool      16
+ :leaf-concurrency 8
  :retry            true
  :stream?          false
  :cache-ttl        "1h"                ; "5m" or "1h"
@@ -126,6 +133,39 @@ Required or notable options:
 
 The default harness is `:clojure`. Use `:rlm` only when the model should receive
 the recursive host-function surface described below.
+
+## Capability Sandbox And Runtime Governor
+
+`:capability` selects the SCI profile used for model-written Clojure:
+
+- `:locked-down` injects only `FINAL` / `inspect` and denies filesystem, shell,
+  network, Java interop, and recursive model egress.
+- `:default` allows read-only access inside the work area and a small read-only
+  shell command allowlist; writes, network, Java interop, and dangerous classes
+  remain denied.
+- `:trusted` is a local trusted-use profile that intentionally opens work-area
+  writes, shell, and network.
+
+Custom profiles are validated before use. Per-session and child profiles are
+clamped against their parent profile; an override can narrow access but cannot
+widen it.
+
+Runtime governor keys bound live and recursive work:
+
+- `:max-steps` produces `:budget-exceeded` when one turn consumes too many loop
+  iterations.
+- `:max-turns` throws `:fractal/session-turn-limit` before opening another turn.
+- `:call-timeout-ms` produces `:timeout` when an adapter call and its retry loop
+  exceed the wall-clock deadline.
+- `:max-fanout` rejects over-wide `map-lm` / `map-rlm` inputs.
+- `:fanout-pool` bounds worker threads for one fan-out.
+- `:leaf-concurrency` bounds concurrent leaf calls across the process.
+- `:context {:hard-at ...}` produces `:budget-exceeded` before hard context
+  exhaustion.
+
+These are execution controls. `TurnResult` includes provider usage/cost/cache
+records when known, and those records are observability metadata for audit and
+reporting.
 
 ## Fake Adapter Example
 

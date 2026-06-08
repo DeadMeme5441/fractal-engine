@@ -26,7 +26,7 @@ clojure -M:live-test
 ```
 
 Run live validation only with credentials that are intentionally available to the
-JVM and with explicit leashes.
+JVM and with the runtime governor configured explicitly.
 
 For CLI/control-plane changes, validate through the shipped command seam:
 
@@ -153,7 +153,7 @@ For ordinary branches or pull-request notes, report:
 - package build command and result when packaging changed;
 - optional live suite command and result, including skips;
 - CLI command matrix result when the control plane changed;
-- leash values for paid runs;
+- runtime governor values for paid runs;
 - artifact cleanup status;
 - public-safety scan result;
 - final `git status --short`.
