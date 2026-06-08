@@ -8,6 +8,7 @@
   (:require [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.pprint :as pprint]
             [clojure.string :as str]
             [fractal.engine.api :as fe]
             [fractal.engine.kernel :as kernel]
@@ -196,6 +197,15 @@
 ;; Output
 ;; ---------------------------------------------------------------------------
 
+(defn format-edn
+  "Pretty-print a complete EDN value for CLI output or generated config files."
+  [value]
+  (with-out-str
+    (binding [*print-namespace-maps* false
+              *print-length* nil
+              *print-level* nil]
+      (pprint/pprint value))))
+
 (defn- json-key [k]
   (cond
     (keyword? k) (if-let [n (namespace k)] (str n "/" (name k)) (name k))
@@ -216,11 +226,9 @@
 (defn emit! [opts value]
   (let [fmt (or (:output opts) :json)]
     (case fmt
-      :edn (binding [*print-namespace-maps* false
-                     *print-length* nil
-                     *print-level* nil]
-             (println (pr-str value)))
-      (println (json/generate-string (json-value value) {:pretty (:pretty opts)})))))
+      :edn (print (format-edn value))
+      (println (json/generate-string (json-value value) {:pretty (:pretty opts)})))
+    (flush)))
 
 (defn- err-map [e]
   (let [data (ex-data e)]
@@ -397,19 +405,16 @@ Config files are EDN. They may be flat engine config maps or {:default-profile k
                       {:error/type :cli/config-exists :config path})))
     (when-let [parent (.getParentFile f)] (.mkdirs parent))
     (.mkdirs (io/file store-dir))
-    (spit f
-          (with-out-str
-            (binding [*print-namespace-maps* false]
-              (prn {:default-profile :fake
-                    :profiles
-                    {:fake
-                     {:adapter :fake
-                      :model "fake-model"
-                      :harness :rlm
-                      :capability :default
-                      :store :sqlite
-                      :store/dir store-dir
-                      :fake/respond [[:default "```clojure\n(FINAL {:ok true})\n```"]]}}}))))
+    (spit f (format-edn {:default-profile :fake
+                         :profiles
+                         {:fake
+                          {:adapter :fake
+                           :model "fake-model"
+                           :harness :rlm
+                           :capability :default
+                           :store :sqlite
+                           :store/dir store-dir
+                           :fake/respond [[:default "```clojure\n(FINAL {:ok true})\n```"]]}}}))
     {:ok true :command :init :config path :store/dir store-dir :session/id sid}))
 
 (defn- command-init [opts _args]

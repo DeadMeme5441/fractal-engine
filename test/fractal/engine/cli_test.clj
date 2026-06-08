@@ -16,7 +16,7 @@
 
 (defn- write-config! [dir content]
   (let [f (io/file dir "fractal.edn")]
-    (spit f (pr-str content))
+    (spit f (cli/format-edn content))
     (.getPath f)))
 
 (defn- cli-edn [args]
@@ -38,7 +38,10 @@
         (is (zero? (:code res)))
         (is (= :init (get-in res [:out :command])))
         (is (.exists (io/file config-path)))
-        (is (.isDirectory (io/file store-dir))))
+        (is (.isDirectory (io/file store-dir)))
+        (let [config-text (slurp config-path)]
+          (is (str/includes? config-text "\n"))
+          (is (= :fake (:default-profile (edn/read-string config-text))))))
       (let [res (cli-edn ["config" "--config" config-path])]
         (is (zero? (:code res)))
         (is (= :configured (get-in res [:out :config :fake/respond])))
