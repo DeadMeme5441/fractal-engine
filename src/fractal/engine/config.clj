@@ -20,7 +20,7 @@
    ;; which engine host fns are assembled, coherently:
    ;;   :clojure (default) = the Phase-1/2 plain coding harness — engine-fns #{:FINAL
    ;;             :inspect}, the Phase-1 prompt. Byte-for-byte Phase-1/2 behavior.
-   ;;   :rlm     = the rlm-native recursive harness — the six fns injected (gated by the
+   ;;   :rlm     = the rlm-native recursive harness — recursive fns injected (gated by the
    ;;             capability profile's :engine-fns) + the v24 recursion doctrine prompt.
    ;; Switching is CONFIG-ONLY (zero code edits). Default :clojure keeps Phase-1/2 default.
    :harness          :clojure

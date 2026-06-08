@@ -23,7 +23,7 @@
 ;; but they are injected DURING start-session!/spawn-child!, before those fns are
 ;; textually defined. recursion never requires session (no cycle); session
 ;; injects these as an env of closures (dependency inversion, 03/Phase-3 gotcha).
-(declare run-turn! spawn-child!)
+(declare run-turn! spawn-child! spawn-attached!)
 
 ;; ---------------------------------------------------------------------------
 ;; start-session! (the composition root)
@@ -85,6 +85,7 @@
    live dispatch is stopped on return."
   []
   {:spawn-child! spawn-child!
+   :spawn-attached! spawn-attached!
    :run-turn!    run-turn!
    :stop-child!  (fn [child] (slots/stop-dispatch! (:store child) (:session-id child)))})
 
@@ -186,7 +187,8 @@
            (throw (ex-info (str "no persisted session to resume: " sid)
                            {:error/type :fractal/unknown-session :session/id sid})))
          (init-session-ctx! handle profile)
-         (let [snap (payload-io/read-payload store (:vars-ref view))]   ; the head proxy (02 §9)
+         (let [head (store/current-head view)
+               snap (payload-io/read-payload store (or (:head/vars-ref head) (:vars-ref view)))]
            (when (and (map? snap) (:vars snap))
              (kernel/restore-vars! @(:sci-ctx handle) sid snap)))
          handle)
@@ -419,3 +421,117 @@
     (init-session-ctx! child child-prof)
     (store/append-event! store child-sid {:event/type :session/started :session session-map})
     child))
+
+(defn- kw-capability [x]
+  (cond
+    (keyword? x) x
+    (string? x)  (keyword x)
+    :else        x))
+
+(defn- source-session-id [handle opts]
+  (or (:session/id opts)
+      (:session/id handle)
+      (:head/session handle)
+      (:session-id handle)
+      (when (string? handle) handle)))
+
+(defn- source-head-id [view handle opts]
+  (or (:head/id opts)
+      (:head/id handle)
+      (:current-head view)))
+
+(defn- resolve-attach-source
+  "Resolve an attach handle to a loaded source session view + immutable source
+   head. A session handle/map means 'use its current head'; a head map or
+   opts :head/id selects that immutable head."
+  [store handle opts]
+  (let [sid (source-session-id handle opts)]
+    (when-not sid
+      (throw (ex-info "attach-rlm requires a session/head handle"
+                      {:error/type :fractal/attach-source-missing})))
+    ;; SqliteStore: folds the durable source log into an in-process slot when
+    ;; needed. MemoryStore: returns an existing slot or an empty unknown session.
+    (store/create-session! store {:session/id sid})
+    (let [view (store/current-view store sid)
+          hid  (source-head-id view handle opts)
+          head (store/head-by-id view hid)]
+      (when-not (:session view)
+        (throw (ex-info (str "unknown attach source session: " sid)
+                        {:error/type :fractal/unknown-session :session/id sid})))
+      (when-not head
+        (throw (ex-info "attach source has no selected head"
+                        {:error/type :fractal/unknown-head
+                         :session/id sid :head/id hid})))
+      {:session/id sid :view view :head head})))
+
+(defn- source-profile [source]
+  (capability/validate-profile!
+    (capability/resolve-profile
+      (kw-capability (get-in source [:view :session :session/capability])))))
+
+(defn spawn-attached!
+  "Phase 4 attach composition root. Materializes a FRESH derived child from a
+   selected immutable source head (the source session is never advanced). The
+   child's SCI ctx is restored from the source head's vars snapshot before its
+   task turn runs. Capability is clamped by both caller and source; a caller may
+   not drive a more-privileged source session."
+  [parent-handle source-handle child-opts]
+  (let [store        (:store parent-handle)
+        parent-cfg   (:cfg parent-handle)
+        parent-prof  (:capability parent-handle)
+        source       (resolve-attach-source store source-handle child-opts)
+        source-prof  (source-profile source)]
+    (when-not (capability/profile<=? source-prof parent-prof)
+      (throw (ex-info "attach source is more privileged than caller"
+                      {:error/type :fractal/attach-capability-rejected
+                       :source/session-id (:session/id source)
+                       :source/capability (:capability/name source-prof)
+                       :caller/capability (:capability/name parent-prof)})))
+    (let [base-prof   (capability/clamp parent-prof source-prof)
+          override    (:capability child-opts)
+          child-prof  (if override
+                        (capability/resolve-override base-prof override)
+                        base-prof)
+          child-sid   (gen-id)
+          child-model (or (:child-model parent-cfg) (:model parent-cfg))
+          child-prov  (or (:child-provider parent-cfg)
+                          (resolve-provider
+                            (assoc parent-cfg
+                                   :model child-model
+                                   :provider (when (= child-model (:model parent-cfg))
+                                               (:provider parent-cfg)))))
+          child-cfg   (assoc parent-cfg
+                             :model child-model
+                             :provider child-prov
+                             :context-window (or (catalog/context-window child-model) :unknown)
+                             :harness :rlm
+                             :leaf-model child-model
+                             :leaf-provider nil)
+          child-adpt  (build-adapter child-cfg child-prov)
+          source-head (:head source)
+          session-map (with-meta
+                        {:session/id             child-sid
+                         :session/status         :running
+                         :session/created-at     (time/now-str)
+                         :session/provider       child-prov
+                         :session/model          child-model
+                         :session/capability     (:capability/name child-prof)
+                         :session/cache-id       child-sid
+                         :session/kind           :attached-child
+                         :session/source-session (:session/id source)
+                         :session/source-head-id (:head/id source-head)
+                         :session/system-overlay (:system-overlay child-opts)}
+                        (live-meta child-cfg))
+          handle0     (store/create-session! store session-map)
+          child       (merge handle0
+                             {:cfg child-cfg :adapter child-adpt
+                              :capability child-prof :cache-id child-sid
+                              :attach/source {:session/id (:session/id source)
+                                              :head source-head}}
+                             (build-leaf child-cfg child-prov child-adpt))
+          snap        (payload-io/read-payload store (:head/vars-ref source-head))]
+      (init-session-ctx! child child-prof)
+      (when (and (map? snap) (:vars snap))
+        (kernel/restore-vars! @(:sci-ctx child) child-sid snap))
+      (store/append-event! store child-sid {:event/type :session/started :session session-map})
+      child)))

@@ -18,6 +18,9 @@
    :turns     []
    :steps     []
    :evals     []
+   :heads     []
+   :current-head nil
+   :edges     []
    :counters  {:event 0 :message 0 :turn 0 :step 0 :eval 0}
    :vars-ref  nil
    :compact-from-event-id nil
@@ -59,6 +62,10 @@
       (cond-> view eid (update-in [:counters ck] (fnil max 0) eid))
       view)))
 
+(defn- conj-by-id
+  [coll id-key entity]
+  (if (some #(= (id-key entity) (id-key %)) coll) coll (conj coll entity)))
+
 (defn apply-event
   "`(view event) → view'`. PURE. The single source of truth for how an event
    advances the view (02 §6). Events carry results, never recipes."
@@ -71,6 +78,10 @@
         :step/put                 (update view :steps replace-by-id :step/id (:step ev))
         :message/appended         (update view :messages conj (:message ev))
         :eval/added               (update view :evals conj (:eval ev))
+        :head/published           (-> view
+                                      (update :heads conj-by-id :head/id (:head ev))
+                                      (assoc :current-head (:head/id (:head ev))))
+        :lineage/edge-added       (update view :edges conj-by-id :edge/id (:edge ev))
         :session/vars-snapshotted (assoc view :vars-ref (:vars-ref ev))
         :session/compacted        (-> view
                                       (assoc :vars-ref (:vars-ref ev)
@@ -84,6 +95,67 @@
         view)
       (update :events conj ev)
       (bump-counters ev)))
+
+;; ---------------------------------------------------------------------------
+;; Phase 4 · Merkle heads + lineage edges
+;; ---------------------------------------------------------------------------
+
+(def head-version 1)
+(def edge-version 1)
+
+(defn head-by-id
+  "The immutable head with `head-id` in a folded view."
+  [view head-id]
+  (first (filter #(= head-id (:head/id %)) (:heads view))))
+
+(defn current-head
+  "The folded current head map, or nil before the first published boundary."
+  [view]
+  (head-by-id view (:current-head view)))
+
+(defn next-head-range
+  "The event range a newly published head should cover, ending at `to-event-id`.
+   The first head covers from event 1; later heads start after their basis range."
+  [view to-event-id]
+  (let [basis (current-head view)
+        from  (if basis (inc (second (:head/event-range basis))) 1)]
+    [from to-event-id]))
+
+(defn head-with-id
+  "Build a content-addressed immutable head from head content. The id hashes the
+   canonical head content without :head/id, so it is reproducible."
+  [head]
+  (let [content (-> head
+                    (dissoc :head/id :head/expected-basis :head/to-event-id)
+                    (assoc :head/version head-version))]
+    (assoc content :head/id (payload/content-id content))))
+
+(defn prepare-head
+  "Prepare a head for publication against the current folded view. Validates the
+   optimistic basis when :head/expected-basis is present."
+  [view sid head]
+  (let [basis (:current-head view)
+        expected (:head/expected-basis head)]
+    (when (and (contains? head :head/expected-basis)
+               (not= expected basis))
+      (throw (ex-info "current head changed before publish"
+                      {:error/type :fractal/head-cas-failed
+                       :head/expected-basis expected
+                       :head/current basis
+                       :session/id sid})))
+    (head-with-id
+      (-> head
+          (dissoc :head/expected-basis :head/to-event-id)
+          (assoc :head/session sid
+                 :head/basis basis
+                 :head/event-range (next-head-range view (:head/to-event-id head)))))))
+
+(defn edge-with-id
+  "Content-address a lineage edge. The id hashes the edge content without
+   :edge/id, matching the immutable-head convention."
+  [edge]
+  (let [content (-> edge (dissoc :edge/id) (assoc :edge/version edge-version))]
+    (assoc content :edge/id (payload/content-id content))))
 
 (defn kept-messages
   "The messages surviving compaction (a PURE view derivation, shared by
@@ -118,6 +190,16 @@
   (append-events! [store sid events]
     "Batch variant: assign consecutive ids + persist + fold in ONE critical
      section. MemoryStore may delegate to append-event! in a loop.")
+  (publish-head! [store sid head]
+    "Phase 4: atomically publish an immutable content-addressed head. Under the
+     same per-session STORE LOCK as append-event!: validate optional
+     :head/expected-basis against the folded :current-head, compute :head/basis,
+     :head/event-range, and :head/id, persist a :head/published event, fold it,
+     notify live, and return the head.")
+  (append-lineage-edge! [store sid edge]
+    "Phase 4: content-address and append one invocation/derivation lineage edge
+     as a durable :lineage/edge-added event in session sid's log. Returns the
+     stamped edge event.")
   (intern-payload! [store value opts]
     "Content-address value into the GLOBAL blob store (id = sha256 over
      canonical-bytes). Returns a tagged opaque payload-ref. IDEMPOTENT (dedup).

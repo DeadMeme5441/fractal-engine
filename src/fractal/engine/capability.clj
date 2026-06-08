@@ -68,7 +68,7 @@
    :cap/network      :deny
    :ns/granted       default-ns-grant
    :cap/java-classes {}
-   :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm}})
+   :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}})
 
 (defn trusted
   "Broad: fs-read everywhere, writes to the work area, shell + network open."
@@ -80,7 +80,7 @@
    :cap/network      :allow
    :ns/granted       default-ns-grant
    :cap/java-classes {}
-   :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm}})
+   :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}})
 
 (defn named-profile [k]
   (case k

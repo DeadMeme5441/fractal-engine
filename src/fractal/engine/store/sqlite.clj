@@ -197,6 +197,22 @@
           (doseq [s stamped] (live/schedule-notify dispatch s))
           stamped))))
 
+  (publish-head! [_ sid head]
+    (live/check-not-reentrant! sid)
+    (let [{:keys [view lock dispatch]} (get @sessions sid)]
+      (locking lock
+        (let [head*   (store/prepare-head @view sid head)
+              stamped (stamp-ids+ts @view {:event/type :head/published :head head*})]
+          (locking db-lock (insert-event!* conn sid stamped)) ; ⛔ PERSIST first
+          (swap! view store/apply-event stamped)
+          (live/schedule-notify dispatch stamped)
+          head*))))
+
+  (append-lineage-edge! [this sid edge]
+    (store/append-event! this sid
+                         {:event/type :lineage/edge-added
+                          :edge (store/edge-with-id edge)}))
+
   (intern-payload! [_ value opts]
     (blob/put! blobs value opts))                  ; GLOBAL, content-addressed, idempotent
 

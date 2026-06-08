@@ -106,8 +106,14 @@
                          :turn/final-preview (observe/value-display final-value observe/final-fit)
                          :turn/usage (:usage rolled)
                          :turn/cost  (:cost rolled)
-                         :turn/cache (:cache rolled))]
-      (store/append-event! store sid {:event/type :turn/put :turn updated})
+                         :turn/cache (:cache rolled))
+          turn-ev (store/append-event! store sid {:event/type :turn/put :turn updated})]
+      (store/publish-head! store sid
+                           {:head/kind :turn-final
+                            :head/to-event-id (:event/id turn-ev)
+                            :head/turn-id turn-id
+                            :head/vars-ref vars-ref
+                            :head/final-ref final-ref})
       (turn-result handle turn-id :final updated (payload-io/read-payload store final-ref)))))
 
 (defn finalize-turn!

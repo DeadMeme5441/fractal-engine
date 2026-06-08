@@ -78,6 +78,21 @@
                   stamped))
               events))))
 
+  (publish-head! [_ sid head]
+    (live/check-not-reentrant! sid)
+    (let [{:keys [view lock dispatch]} (get @sessions sid)]
+      (locking lock
+        (let [head*   (store/prepare-head @view sid head)
+              stamped (stamp-ids+ts @view {:event/type :head/published :head head*})]
+          (swap! view store/apply-event stamped)
+          (live/schedule-notify dispatch stamped)
+          head*))))
+
+  (append-lineage-edge! [this sid edge]
+    (store/append-event! this sid
+                         {:event/type :lineage/edge-added
+                          :edge (store/edge-with-id edge)}))
+
   (intern-payload! [_ value opts]
     (let [bytes (payload/canonical-bytes value)
           id    (str "sha256:" (payload/sha256-hex bytes))]

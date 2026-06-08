@@ -99,9 +99,15 @@
         compact-msg {:message/role :user
                      :message/turn-id nil
                      :message/content-or-ref (payload-io/maybe-intern store summary {:payload/kind :message})}]
-    (store/append-event! store sid
-                         {:event/type :session/compacted
-                          :vars-ref vars-ref
-                          :compact-from-event-id boundary
-                          :message compact-msg})
+    (let [compact-ev (store/append-event! store sid
+                                           {:event/type :session/compacted
+                                            :vars-ref vars-ref
+                                            :compact-from-event-id boundary
+                                            :message compact-msg})]
+      (store/publish-head! store sid
+                           {:head/kind :compaction
+                            :head/to-event-id (:event/id compact-ev)
+                            :head/vars-ref vars-ref
+                            :head/final-ref nil
+                            :head/compact-from-event-id boundary}))
     handle))

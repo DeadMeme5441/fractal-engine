@@ -10,6 +10,9 @@
      (map-rlm tasks [shared])     CHILD   + SessionStore session, inherit-and-
                                           clamped capability) running the WHOLE
                                           loop to FINAL; returns an ENVELOPE.
+     (attach-rlm handle task [opts])
+                                  REUSE — a FRESH derived child restored from a
+                                          selected immutable source head.
 
    Recursion happens BETWEEN interpreters, in the HOST (03 recursion note): a
    child is a normal session in the SAME store. This ns NEVER requires `session`
@@ -22,15 +25,15 @@
    honest: a child's usage/cost/cache rides its envelope's :rlm/meta; the root
    turn's :turn/usage/:turn/cost remain SELF-ONLY (06 §6).
 
-   Phase-4 (OUT here, seams kept additive): the durable recursion data model —
-   invocation/derivation edges, cross-session lineage, immutable heads,
-   attach-rlm. The envelope's :rlm/head is the Phase-1/2 proxy (the child's
-   :vars-ref + session id); the parent↔child edge is not persisted yet."
+   Phase 4 adds the durable recursion data model here: invocation/derivation
+   edges, cross-session lineage, immutable heads, and attach-rlm. The envelope's
+   :rlm/head is the immutable current head plus legacy :vars-ref/session aliases."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [fractal.engine.adapter :as adapter]
             [fractal.engine.cache :as cache]
             [fractal.engine.concurrent :as concurrent]
+            [fractal.engine.kernel :as kernel]
             [fractal.engine.payload :as payload]
             [fractal.engine.prompt :as prompt]
             [fractal.engine.store :as store]))
@@ -189,17 +192,21 @@
 (defn- envelope
   "The model-visible result of a child invocation: a compact map carrying the
    child's settled value plus continuation/branch proxies and recognition data.
-   :rlm/head is the Phase-1/2 proxy (child :vars-ref + session id); the immutable
-   Merkle head + invocation edges attach additively in Phase 4."
+   :rlm/head is the child's immutable Merkle current head plus the legacy
+   :vars-ref/session aliases for easy model handling."
   [child-handle result final-value task kind]
   (let [cid  (:session-id child-handle)
         view (store/current-view (:store child-handle) cid)
-        sess (:session view)]
+        sess (:session view)
+        head (store/current-head view)]
     {:rlm/result  true
      :rlm/status  :final
      :rlm/value   final-value
      :rlm/session {:session/id cid :session/cache-id (:session/cache-id sess)}
-     :rlm/head    {:session/id cid :vars-ref (:vars-ref view)}
+     :rlm/head    (cond-> (select-keys head [:head/id :head/session :head/basis
+                                             :head/event-range :head/vars-ref
+                                             :head/final-ref :head/kind])
+                    true (assoc :session/id cid :vars-ref (:vars-ref view)))
      :rlm/meta    (cond-> {:kind          kind
                            :label         (task-label task)
                            :task/hash     (payload/content-id task)
@@ -215,6 +222,59 @@
                            :cache         (:turn/cache result)}
                     (map? final-value) (assoc :value/keys (vec (take 12 (keys final-value)))))}))
 
+(defn- parent-head-id [handle]
+  (:current-head (store/current-view (:store handle) (:session-id handle))))
+
+(defn- invocation-context []
+  {:edge/turn-id kernel/*current-turn-id*
+   :edge/step-id kernel/*current-step-id*
+   :edge/eval-id kernel/*current-eval-id*})
+
+(defn- record-invocation-edge! [parent child env task kind from-head]
+  (let [store (:store parent)
+        psid  (:session-id parent)
+        csid  (:session-id child)
+        to-head (get-in env [:rlm/head :head/id])]
+    (when to-head
+      (store/append-lineage-edge!
+        store psid
+        (merge {:edge/type :invocation
+                :edge/kind kind
+                :edge/parent-session psid
+                :edge/child-session csid
+                :edge/from-session psid
+                :edge/to-session csid
+                :edge/from-head from-head
+                :edge/to-head to-head
+                :edge/task-hash (payload/content-id task)
+                :edge/task-preview (compact-preview task 240)}
+               (invocation-context))))))
+
+(defn- record-derivation-edge! [parent child env task source]
+  (let [store (:store parent)
+        psid  (:session-id parent)
+        target-head (get-in env [:rlm/head :head/id])
+        source-head (:head source)]
+    (when target-head
+      (store/append-lineage-edge!
+        store psid
+        (merge {:edge/type :derivation
+                :edge/kind :attach-rlm
+                :edge/caller-session psid
+                :edge/source-session (:session/id source)
+                :edge/target-session (:session-id child)
+                :edge/from-session (:session/id source)
+                :edge/to-session (:session-id child)
+                :edge/from-head (:head/id source-head)
+                :edge/to-head target-head
+                :edge/source {:session/id (:session/id source)
+                              :head/id (:head/id source-head)}
+                :edge/target {:session/id (:session-id child)
+                              :head/id target-head}
+                :edge/task-hash (payload/content-id task)
+                :edge/task-preview (compact-preview task 240)}
+               (invocation-context))))))
+
 (defn- child-call
   "Spawn a fresh inherit-and-clamped child session (reusing the parent store),
    run its WHOLE loop to FINAL on this thread, and return the envelope. Always
@@ -224,11 +284,30 @@
   (let [spawn! (:spawn-child! env)
         run!   (:run-turn! env)
         stop!  (:stop-child! env)
+        from-head (parent-head-id handle)
         child  (spawn! handle {})]
     (try
       (let [result      (run! child (prompt/child-invocation-frame task))
-            final-value (child-final-value result (:session-id child))]
-        (envelope child result final-value task kind))
+            final-value (child-final-value result (:session-id child))
+            envl        (envelope child result final-value task kind)]
+        (record-invocation-edge! handle child envl task kind from-head)
+        envl)
+      (finally (stop! child)))))
+
+(defn- attach-call
+  "Restore a selected source head into a fresh derived child, run one task, and
+   return the same envelope shape as rlm. The source session is never advanced."
+  [handle env source-handle task opts]
+  (let [spawn! (:spawn-attached! env)
+        run!   (:run-turn! env)
+        stop!  (:stop-child! env)
+        child  (spawn! handle source-handle (or opts {}))]
+    (try
+      (let [result      (run! child (prompt/child-invocation-frame task))
+            final-value (child-final-value result (:session-id child))
+            envl        (envelope child result final-value task :attach-rlm)]
+        (record-derivation-edge! handle child envl task (:attach/source child))
+        envl)
       (finally (stop! child)))))
 
 (defn- map-child [handle env tasks shared]
@@ -252,10 +331,12 @@
    (the profile's :engine-fns selects which of these inject; :locked-down drops
    lm/rlm). The fns read cfg/adapter/store off the handle at CALL time."
   [handle env]
-  {:lm      (fn ([input query]       (leaf-call handle input query :string))
+   {:lm      (fn ([input query]       (leaf-call handle input query :string))
                 ([input query mode]  (leaf-call handle input query mode)))
    :map-lm  (fn ([inputs query]      (map-leaf handle inputs query :string))
                 ([inputs query mode] (map-leaf handle inputs query mode)))
    :rlm     (fn [task]               (child-call handle env :child task))
    :map-rlm (fn ([tasks]             (map-child handle env tasks nil))
-                ([tasks shared]      (map-child handle env tasks shared)))})
+                ([tasks shared]      (map-child handle env tasks shared)))
+   :attach-rlm (fn ([source task]      (attach-call handle env source task {}))
+                   ([source task opts] (attach-call handle env source task opts)))})

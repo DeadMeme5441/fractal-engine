@@ -4,9 +4,9 @@
      :clojure → the Phase-1 clojure-harness prompt (operator doctrine for a
                 sandboxed REPL whose only host fns are FINAL/inspect — NO
                 recursion). Unchanged byte-for-byte from Phase 1.
-     :rlm     → the v24 recursion doctrine (the six-function surface, the
-                leaf/child cheapness hierarchy, envelopes, the ≤50 fan-out cap,
-                partial-fanout sentinels, the smell tests, trust discipline).
+     :rlm     → the v24 recursion doctrine (the recursive host-fn surface, the
+                leaf/child/attach cheapness hierarchy, envelopes, the ≤50
+                fan-out cap, partial-fanout sentinels, the smell tests, trust discipline).
    Plus the leaf prompt (a single probabilistic transformation, no REPL) and the
    compaction prompt. Each is stamped name/version/hash so runs are reproducible
    and auditable. Role (root vs child) is a per-turn USER-MESSAGE FRAME
@@ -149,10 +149,11 @@ future self, in plain text. Do not include code fences.")
     "- (map-lm inputs query [mode]) is that same function mapped over up to 50 bounded inputs in one parallel fan-out, order preserved."
     "- (rlm task) hands one sub-problem to a fresh RLM session that runs this entire loop and returns an RLM envelope -- NOT a bare value. Read the child's settled value at (:rlm/value env)."
     "- (map-rlm tasks [shared-instruction]) is recursive processing mapped over up to 50 independent sub-problems in one parallel fan-out. Each successful slot is an RLM envelope; read its child FINAL at :rlm/value."
+    "- (attach-rlm handle task [opts]) restores a prior session/head into a fresh derived child and runs task there. Pass an envelope's :rlm/head or :rlm/session. A session handle means use that session's current head; a head handle branches from that immutable head. The source session is not advanced; the result is a new envelope."
     "- (FINAL value) emits the output of the current turn and ends it. The session stays live for later turns; your vars persist."
     ""
-    "Envelopes. rlm/map-rlm return an envelope map, not the bare child FINAL:"
-    "  {:rlm/result true :rlm/value <child FINAL> :rlm/session <continue-handle> :rlm/head <branch/provenance handle> :rlm/meta <recognition data>}"
+    "Envelopes. rlm/map-rlm/attach-rlm return an envelope map, not the bare child FINAL:"
+    "  {:rlm/result true :rlm/value <child FINAL> :rlm/session <session handle> :rlm/head <immutable head handle> :rlm/meta <recognition data>}"
     "- Use (:rlm/value env) for the child's settled value. :rlm/meta is deterministic recognition data (kind, label, task preview/hash, value preview, the child's own usage/cost) -- use it to identify a vector of children without rereading them, not as a semantic summary. Each child carries its OWN cost in :rlm/meta; your turn's :turn/cost is self-only."
     ""
     "Scaling a fan-out:"
