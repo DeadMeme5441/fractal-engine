@@ -131,24 +131,24 @@ ids, head ids, event ids, and edge ids.
 sequenceDiagram
   participant Caller
   participant Session
-  participant Loop
+  participant EngineLoop
   participant Adapter
   participant Kernel
   participant Store
 
   Caller->>Session: run-turn!
   Session->>Store: turn started and user message
-  Session->>Loop: run step loop
-  Loop->>Adapter: provider request
-  Adapter-->>Loop: assistant message
-  Loop->>Kernel: evaluate fenced Clojure
-  Kernel-->>Loop: eval records and optional FINAL
-  Loop->>Store: assistant, evals, observation
+  Session->>EngineLoop: run step loop
+  EngineLoop->>Adapter: provider request
+  Adapter-->>EngineLoop: assistant message
+  EngineLoop->>Kernel: evaluate fenced Clojure
+  Kernel-->>EngineLoop: eval records and optional FINAL
+  EngineLoop->>Store: assistant, evals, observation
   alt FINAL
-    Loop->>Store: vars snapshot, terminal turn, head
-    Loop-->>Caller: final TurnResult
+    EngineLoop->>Store: vars snapshot, terminal turn, head
+    EngineLoop-->>Caller: final TurnResult
   else more work
-    Loop->>Adapter: request with observation
+    EngineLoop->>Adapter: request with observation
   end
 ```
 

@@ -73,23 +73,23 @@ One turn follows one loop:
 ```mermaid
 sequenceDiagram
   participant Caller
-  participant Loop
+  participant EngineLoop
   participant Model
   participant REPL as Session REPL
   participant Store
 
-  Caller->>Loop: run-turn! / CLI run
-  Loop->>Store: append user message and turn start
-  Loop->>Model: request with kept transcript
-  Model-->>Loop: assistant text with fenced Clojure
-  Loop->>REPL: evaluate blocks
-  REPL-->>Loop: eval records and FINAL status
-  Loop->>Store: append assistant, evals, observation
+  Caller->>EngineLoop: run-turn! / CLI run
+  EngineLoop->>Store: append user message and turn start
+  EngineLoop->>Model: request with kept transcript
+  Model-->>EngineLoop: assistant text with fenced Clojure
+  EngineLoop->>REPL: evaluate blocks
+  REPL-->>EngineLoop: eval records and FINAL status
+  EngineLoop->>Store: append assistant, evals, observation
   alt no FINAL yet
-    Loop->>Model: next request with observation
+    EngineLoop->>Model: next request with observation
   else FINAL
-    Loop->>Store: snapshot vars and publish head
-    Loop-->>Caller: TurnResult
+    EngineLoop->>Store: snapshot vars and publish head
+    EngineLoop-->>Caller: TurnResult
   end
 ```
 
