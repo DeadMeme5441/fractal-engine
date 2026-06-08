@@ -43,9 +43,9 @@ jobs:
 
       - name: Install Clojure CLI
         run: |
-          curl -fsSL -O https://github.com/clojure/brew-install/releases/latest/download/posix-install.sh
-          chmod +x posix-install.sh
-          sudo ./posix-install.sh
+          curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 15 -fsSLO https://download.clojure.org/install/linux-install-1.12.5.1654.sh
+          chmod +x linux-install-1.12.5.1654.sh
+          sudo ./linux-install-1.12.5.1654.sh
           clojure --version
 
       - name: Check whitespace
