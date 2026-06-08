@@ -283,7 +283,7 @@ The release version is derived from the tag name without the leading `v`.
 After a release is published, depend on the Clojars coordinate:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.1.0"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.5.0"}}}
 ```
 
 Then use the public facade:
