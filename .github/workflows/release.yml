@@ -1,15 +1,9 @@
 name: release
 
-# On every v* tag this workflow:
-#   1. reruns the public validation suite,
-#   2. publishes the thin library jar to Clojars when Clojars secrets are present,
-#      using coordinate net.clojars.deadmeme5441/fractal-engine, and
-#   3. builds the `fractal` CLI uberjar and attaches release assets to GitHub.
-
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
@@ -18,9 +12,6 @@ jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    concurrency:
-      group: release-${{ github.ref }}
-      cancel-in-progress: false
 
     steps:
       - name: Check out repository
@@ -30,7 +21,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
 
       - name: Cache Clojure dependencies
         uses: actions/cache@v4
@@ -52,11 +43,11 @@ jobs:
           clojure --version
 
       - name: Derive version from tag
-        id: ver
+        id: version
         run: |
-          V="${GITHUB_REF_NAME#v}"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "Releasing version $V"
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing fractal-engine $VERSION"
 
       - name: Check whitespace
         run: git diff --check
@@ -64,48 +55,34 @@ jobs:
       - name: Run engine tests
         run: clojure -M:test
 
-      - name: Run eval harness tests
-        run: clojure -M:evals-test
-
       - name: Build library jar
         env:
-          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
-        run: clojure -T:build jar      # -> target/fractal-engine-<version>.jar
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: clojure -T:build jar
 
-      - name: Stage library asset
-        run: |
-          mkdir -p release-assets
-          cp "target/fractal-engine-${{ steps.ver.outputs.version }}.jar" release-assets/
-
-      - name: Publish library to Clojars when configured
+      - name: Publish library to Clojars
         env:
-          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
           CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_PASSWORD }}
         run: |
-          if [ -z "${CLOJARS_USERNAME:-}" ] || [ -z "${CLOJARS_PASSWORD:-}" ]; then
-            echo "::notice::Skipping Clojars publish because CLOJARS_USERNAME/CLOJARS_PASSWORD are not configured."
-            exit 0
-          fi
           clojure -X:deploy \
-            :artifact "\"target/fractal-engine-${{ steps.ver.outputs.version }}.jar\""
+            :artifact "\"target/fractal-engine-${{ steps.version.outputs.value }}.jar\""
 
-      - name: Build uberjar
-        run: clojure -T:build uber      # -> target/fractal.jar
+      - name: Build CLI uberjar
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: clojure -T:build uber
 
-      - name: Smoke-test the jar
+      - name: Smoke-test CLI jar
         run: java -jar target/fractal.jar help
 
-      - name: Stage CLI asset
-        run: cp target/fractal.jar release-assets/
-
-      - name: Publish release
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            release-assets/fractal.jar \
-            "release-assets/fractal-engine-${{ steps.ver.outputs.version }}.jar" \
-            --title "fractal-engine ${GITHUB_REF_NAME}" \
+          gh release create "$GITHUB_REF_NAME" \
+            target/fractal.jar \
+            --title "fractal-engine $GITHUB_REF_NAME" \
             --notes-from-tag \
             --verify-tag

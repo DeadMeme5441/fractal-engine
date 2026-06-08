@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   test:
-    name: test, evals, and jars
+    name: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -51,11 +51,11 @@ jobs:
       - name: Check whitespace
         run: git diff --check
 
+      # The whole engine validates offline. This includes the pinned SCI sandbox
+      # regression tests, snapshot/restore round trips, and namespace-graph
+      # acyclicity. Re-run locally before pushing runtime changes.
       - name: Run engine tests
         run: clojure -M:test
-
-      - name: Run eval harness tests
-        run: clojure -M:evals-test
 
       - name: Build library jar
         run: clojure -T:build jar

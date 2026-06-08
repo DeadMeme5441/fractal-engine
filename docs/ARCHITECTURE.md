@@ -1,190 +1,297 @@
-# Architecture
+# fractal-engine-v1 Architecture
 
-`fractal-engine` is a small recursive compute engine with a canonical storage layer
-around it. The compute kernel remains `input -> processing -> output`; storage records
-what happened without adding model-facing concepts.
+This document is a public maintainer and contributor map for the v1 runtime. It
+describes the current engine architecture and the thin agent control plane
+around it.
 
-```text
-┌─────────────────────────────┐
-│ CLI / API / codebrain       │
-│ agentcli · api · render     │
-└──────────────┬──────────────┘
-               │
-┌──────────────▼──────────────┐
-│ read surface                 │
-│ projection · inspect · trust │
-└──────────────┬──────────────┘
-               │
-┌──────────────▼──────────────┐
-│ canonical storage            │
-│ session-db · store.*         │
-└──────────────┬──────────────┘
-               │
-┌──────────────▼──────────────┐        ┌──────────────────────┐
-│ compute engine               │        │ provider             │
-│ process · session-loop       │◄──────►│ clojure-llm-sdk      │
-│ leaf · session-invocation    │        │                      │
-│ runtime · rlm                │        │                      │
-│ artifacts · snapshot · event │        └──────────────────────┘
-└─────────────────────────────┘
+The engine is a layered Clojure runtime where a session owns a persistent SCI
+context, a model produces fenced Clojure, the host evaluates those blocks in a
+capability sandbox, and the loop continues until a `FINAL` value or a terminal
+condition. Recursive calls reuse the same session and storage model rather than
+adding a second execution system.
+
+## Layer Map
+
+```mermaid
+flowchart TB
+  subgraph Public["Public surfaces"]
+    API["fractal.engine.api"]
+    CLI["fractal.engine.cli"]
+  end
+
+  subgraph Composition["Composition roots"]
+    SESSION["fractal.engine.session"]
+    RECUR["fractal.engine.recursion"]
+  end
+
+  subgraph Runtime["Runtime spine"]
+    LOOP["fractal.engine.session-loop"]
+    KERNEL["fractal.engine.kernel"]
+  end
+
+  subgraph Ports["Ports and shared services"]
+    STORE["fractal.engine.store"]
+    ADAPTER["fractal.engine.adapter"]
+    CAP["fractal.engine.capability"]
+    COMPACT["fractal.engine.compaction"]
+    LIVE["fractal.engine.live"]
+    PIO["fractal.engine.payload-io"]
+  end
+
+  subgraph Backends["Backends"]
+    MEM["fractal.engine.store.memory"]
+    SQLITE["fractal.engine.store.sqlite"]
+    BLOB["fractal.engine.store.blobstore"]
+    FAKE["fractal.engine.adapter.fake"]
+    SDK["fractal.engine.adapter.sdk"]
+  end
+
+  subgraph Foundation["Foundations"]
+    PAYLOAD["fractal.engine.payload"]
+    CACHE["fractal.engine.cache"]
+    PROMPT["fractal.engine.prompt"]
+    CATALOG["fractal.engine.catalog"]
+    CONCUR["fractal.engine.concurrent"]
+    TIME["fractal.engine.time"]
+  end
+
+  CLI --> API
+  API --> SESSION
+  SESSION --> LOOP
+  SESSION --> RECUR
+  LOOP --> KERNEL
+  LOOP --> ADAPTER
+  LOOP --> STORE
+  LOOP --> LIVE
+  RECUR --> ADAPTER
+  RECUR --> STORE
+  STORE --> MEM
+  STORE --> SQLITE
+  SQLITE --> BLOB
+  ADAPTER --> FAKE
+  ADAPTER --> SDK
+  STORE --> PIO
+  PIO --> PAYLOAD
 ```
 
-## Compute engine
+The namespace graph is expected to remain acyclic. `test/fractal/engine/deps_acyclic_test.clj`
+guards the load-bearing dependency rules: the store port depends only on pure
+payload helpers, live dispatch does not depend on the store, the adapter port is
+engine-free, and capability profiles take host function implementations as data.
 
-- **`process`** owns configuration and session execution assembly. It starts sessions,
-  installs the six REPL functions, selects the configured model for the current
-  invocation edge, and delegates the actual loop/call/invocation work to smaller
-  namespaces.
-- **`session-loop`** owns one session input: provider message, Clojure eval,
-  observation, repeat, then commit a completed head when `(FINAL value)` appears. The
-  persisted row is still named `turn` for the read surface, but the semantic boundary is
-  "session input to immutable head."
-- **`leaf`** owns `lm` / `map-lm`: bounded provider calls recorded as call rows and
-  payload refs only. Leaves never create sessions, heads, or invocation edges.
-- **`session-invocation`** owns `rlm` / `map-rlm` / `attach-rlm`: normal session
-  creation/continuation plus invocation edges between caller and callee heads. It frames
-  child/attach instructions as the callee's user input for that edge; it does not install
-  a different behavior prompt into the callee session.
-- **`provider-call`** owns provider request construction, cache descriptors, traced
-  provider completions, leaf parsing, and fanout bounds.
-- **`rlm`** owns RLM invocation values: child result validation, stable handles,
-  envelopes, attach target resolution, and invocation fact recording.
-- **`runtime`** owns namespace creation, model-facing function interning, fenced Clojure
-  extraction, eval, and observations.
-- **`call`** is the traced-call skeleton: reserve id, record running call, run work,
-  record success/failure.
-- **`event`** folds rich runtime event values into the in-memory view used while a
-  process is running. Persisted event history is compact SQLite rows plus row/payload
-  refs, not full event-body blobs.
-- **`artifacts`** owns live session state and writes canonical facts/payloads through
-  storage. It does not maintain per-session filesystem homes.
-- **`snapshot`** captures/restores EDN-safe vars through BlobStore payloads and
-  SQLite snapshot rows.
+## Responsibilities
 
-The model-facing REPL surface is exactly:
+| Namespace | Responsibility |
+|-----------|----------------|
+| `fractal.engine.api` | Supported Clojure API for config, lifecycle, reads, payload hydration, live subscriptions, and the fake responder helper. |
+| `fractal.engine.cli` | Agent-operable command seam over the public API. It handles CLI config files, JSON/EDN output, usage commands, and inspection commands without adding runtime semantics. |
+| `fractal.engine.session` | Sole composition root. It builds stores and adapters, resolves config, creates and resumes sessions, owns the turn lock, initializes SCI contexts, and spawns child or attached sessions. |
+| `fractal.engine.session-loop` | Turn and step spine: open turns, assemble requests, call adapters under deadline, append assistant/observation messages, finalize turns, and publish heads after successful `FINAL`. |
+| `fractal.engine.kernel` | SCI evaluation mechanics, block extraction, eval records, `FINAL`, `inspect`, vars snapshotting, and vars restore. |
+| `fractal.engine.recursion` | Leaf calls, child calls, attached-child calls, fan-out behavior, recursive envelopes, and lineage-edge recording. It receives spawn/run/stop closures from `session` instead of requiring `session` directly. |
+| `fractal.engine.store` | `SessionStore` protocol, pure event fold, event taxonomy, head helpers, lineage-edge helpers, and payload-ref auditing. |
+| `fractal.engine.store.sqlite` | Durable `SessionStore`: SQLite event storage plus a global BlobStore payload backend. |
+| `fractal.engine.store.memory` | In-process `SessionStore` with the same semantic contract, primarily for tests and ephemeral runs. |
+| `fractal.engine.store.blobstore` | File-backed content-addressed payload storage for SQLite durability. |
+| `fractal.engine.payload` | Pure canonical EDN bytes, SHA-256 content ids, and tagged payload refs. |
+| `fractal.engine.payload-io` | Store-coupled inline-vs-ref policy and payload hydration. |
+| `fractal.engine.adapter` | Provider adapter port and call-record shape. |
+| `fractal.engine.adapter.request` | Request assembly from the folded view, compaction boundary, system overlays, and cache metadata. |
+| `fractal.engine.capability` | Capability profile lattice, clamp/validation rules, and SCI options. |
+| `fractal.engine.compaction` | Context assessment and transcript compaction. |
+| `fractal.engine.live` | Per-session live dispatch, transient notifications, backlog recovery, and progress projection. |
 
-```text
-FINAL lm map-lm rlm map-rlm attach-rlm
+No namespace outside the store should invent a durable write path. Runtime code
+appends facts through the `SessionStore` port and reads runtime state through the
+folded view.
+
+## Core Ontology
+
+| Term | Meaning |
+|------|---------|
+| Session | Durable identity boundary for metadata, event history, counters, SCI context, heads, and lineage. |
+| Turn | One user message processed until `FINAL` or a terminal non-final status. |
+| Step | One adapter-call iteration inside a turn. |
+| Eval | One fenced Clojure block evaluated by the SCI kernel. |
+| Message | Transcript entry with role `:user`, `:assistant`, or `:observation`; system text is assembled for requests. |
+| Event | Durable appended fact. Folding events produces the session view. |
+| View | Pure projection over events. It is not a second persistence authority. |
+| Payload ref | Tagged content-addressed reference to a value stored in the payload backend. |
+| Head | Immutable content-addressed continuation boundary for a session. |
+| Current head | Mutable pointer to the session head that resume and attach should advance from. |
+| Lineage edge | Durable content-addressed relation between source/target sessions and heads. |
+
+Filesystem locations, including `:store/dir`, are physical backend locations.
+They are not logical session identity. Identity is carried by session ids, payload
+ids, head ids, event ids, and edge ids.
+
+## Normal Turn Flow
+
+```mermaid
+sequenceDiagram
+  participant Caller
+  participant Session
+  participant Loop
+  participant Adapter
+  participant Kernel
+  participant Store
+
+  Caller->>Session: run-turn!
+  Session->>Store: turn started and user message
+  Session->>Loop: run step loop
+  Loop->>Adapter: provider request
+  Adapter-->>Loop: assistant message
+  Loop->>Kernel: evaluate fenced Clojure
+  Kernel-->>Loop: eval records and optional FINAL
+  Loop->>Store: assistant, evals, observation
+  alt FINAL
+    Loop->>Store: vars snapshot, terminal turn, head
+    Loop-->>Caller: final TurnResult
+  else more work
+    Loop->>Adapter: request with observation
+  end
 ```
 
-## Canonical storage
+1. `session/run-turn!` checks stop status and `:max-turns`, acquires the turn
+   lock, optionally compacts, appends the user message, appends `:turn/started`,
+   and delegates to `session-loop`.
+2. `session-loop/run-step!` appends `:step/started` before provider work so live
+   observers can see in-flight progress.
+3. `adapter.request/build-request` reads the current folded view, selects kept
+   messages after compaction, hydrates payload refs, maps observations to
+   adapter-facing user messages, prepends system text, and attaches cache
+   metadata.
+4. The adapter is called through the `LlmAdapter` port under one deadline.
+   Streaming token fragments, when enabled, are transient live items only.
+5. The loop appends the assistant message and `:step/put`.
+6. The kernel extracts fenced Clojure blocks, evaluates them in the session SCI
+   context, and appends one `:eval/added` event per block.
+7. The loop appends one observation message derived from the eval records.
+8. If no `FINAL` was called, the loop continues to another step.
+9. If `FINAL` was called, the loop snapshots vars, appends
+   `:session/vars-snapshotted`, appends the terminal `:turn/put`, publishes a
+   `:turn-final` head, hydrates the final value, and returns a final turn result.
+10. If timeout, provider failure, stop, context hard limit, or max steps occurs,
+    the loop appends a terminal `:turn/put` with a non-final status and returns a
+    non-final turn result. Non-final terminal paths do not publish heads.
 
-- **`session-db`** owns the session-store facade: SQLite hot rows, head/current-ref
-  writes, handle/alias resolution, materialized state reads, and relationship reads.
-- **`session-sqlite`** owns the local SQLite database, WAL setup, typed row writes,
-  and transaction-batch storage for the derived Datalog index.
-- **`store.index`** owns Datahike projection catch-up/rebuild/query over SQLite
-  transaction batches.
-- **`store.consistency`** owns quick/deep integrity checks over SQLite rows, BlobStore
-  bytes, and the derived Datahike index.
-- **`store.io`** owns filesystem/EDN mechanics for local backends and product-side
-  exports.
-- **`store.payload`** owns content-addressed payload refs and blob identity facts.
-- **`store.schema`** owns the Datahike schema value.
-- **`store.value`** owns pure lookup-ref/value-shaping helpers.
-- **`blob-store`** owns content-addressed payload bytes. The local implementation writes
-  under the store root and verifies hash/size before SQLite rows point at blobs.
-- **`session-model`** defines stable ids, head fingerprints, and invocation handles.
+## Recursive Flow
 
-SQLite is canonical for hot facts, identity, refs, time, and graph relationships. BlobStore
-is canonical for payloads. Datahike is a derived Datalog index rebuilt or lazily caught up
-from SQLite transaction batches. Filesystem paths are backend details for the local SQLite,
-Datahike, and BlobStore implementations; they are not session identity.
+The recursive harness adds model-call host functions inside the SCI context. They
+are not top-level API functions.
 
-There is no filesystem session-home source of truth.
+```mermaid
+flowchart LR
+  ROOT["Root session"] --> EXACT["Clojure exact work"]
+  ROOT --> LEAF["lm / map-lm leaf call"]
+  ROOT --> CHILD["rlm / map-rlm child session"]
+  ROOT --> ATTACH["attach-rlm derived child"]
+  CHILD --> CHILDHEAD["Child FINAL head"]
+  ATTACH --> DERIVEDHEAD["Derived child FINAL head"]
+  ROOT --> ROOTHEAD["Root current head"]
+  ROOTHEAD --> EDGE1["invocation edge"]
+  CHILDHEAD --> EDGE1
+  ROOTHEAD --> EDGE2["derivation edge"]
+  DERIVEDHEAD --> EDGE2
+```
 
-## Fact/payload boundary
+- `lm` and `map-lm` are leaf calls. They make bounded adapter calls and do not
+  create sessions, heads, or lineage edges. `map-lm` preserves input order and
+  returns per-slot failure sentinels instead of throwing the whole fan-out on a
+  partial failure.
+- `rlm` and `map-rlm` create fresh child sessions in the same store. Each child
+  has its own SCI context, cache id, capability-clamped profile, loop, events,
+  and heads. After the child reaches `FINAL`, the parent receives an envelope and
+  records a `:invocation` edge to the child's current head.
+- `attach-rlm` resolves a selected source session/head, creates a fresh attached
+  child, restores that child from the source head's vars snapshot, runs one task,
+  returns the usual envelope, and records a `:derivation` edge. The source
+  session and selected source head are not advanced.
 
-SQLite stores queryable hot rows: ids, refs, statuses, timestamps, kinds, labels,
-aliases, compact event records, head basis/current-head, derivation edges, invocation
-caller/callee/source relationships, model/provider ids, token/cost facts, cache ids, and blob
-hash/size/key/media-type facts. Datahike indexes the same facts for Datalog graph reads.
+Recursive children are ordinary sessions. Storage, resume, live query, heads, and
+payload refs use the same mechanisms as root sessions.
 
-BlobStore stores replayable/restorable/renderable payloads: message content, root request
-descriptors, bounded leaf requests, provider responses, eval code/results/observations,
-final values, snapshots, vars, head state roots/components, raw errors, stack traces, and
-export bodies. It does not store a generic full event payload for every event; compact
-event records point at the typed payload refs that already own the bytes.
+## Storage Authority
 
-The boundary is semantic. Small final values and small snapshots are still blobs. Bounded
-summaries/previews may be SQLite rows and Datahike index facts; arbitrary generated
-content is not.
+For durable v1 storage, SQLite plus BlobStore are canonical:
 
-## Session transitions
+- SQLite stores session rows and per-session event rows.
+- BlobStore stores payload bytes by content hash.
+- The current view is a pure fold/projection over events.
+- `current-head` is the authoritative continuation pointer.
+- `MemoryStore` implements the same port for test and in-process use, but it is
+  not the durable authority.
 
-- **Start session** creates a SQLite session row, optional alias, cache id, system
-  transcript, and initial head state.
-- **Prompt identity** is session-level and uniform: every RLM session starts with the same
-  base behavior prompt, optionally plus a host overlay at birth. Root/child/attach are
-  relation labels on invocation edges, so the edge-specific boundary is carried as the
-  user input that caused that head transition.
-- **Turn reaching `FINAL`** writes final/snapshot blobs, commits call/eval/message rows,
-  writes a compact immutable head-state root, creates an immutable head, and advances the
-  same session's current-head. `FINAL` does not terminate the session.
-- **Provider-history compaction** is an internal model-mediated head transition. The
-  engine asks the configured root model to rewrite the current head's transcript and
-  state facts into one semantic continuation frame, records that output as a synthetic
-  user message, writes a `:context-compaction` snapshot/head, and advances the same
-  session's current-head. Prior heads keep the old transcript.
-- **Resume** reads a selected head state, restores that exact state into the same
-  session, and advances that same session from the selected basis head.
-- **Fork** reads a selected source head state into a new user/API session and leaves the
-  source unchanged. The source head is provenance, not the fork's same-session basis.
-- **`rlm`/`map-rlm`** create child sessions and invocation facts; the model receives an
-  RLM envelope with `:rlm/value`, continuation handle, head handle, and deterministic
-  recognition metadata.
-- **`attach-rlm`** continues a session ref or branches from a head ref. Session-ref attach
-  advances the callee session's current-head. Head-ref attach creates a new attached
-  child and records source -> attached-child derivation; the source head does not change.
-- **`lm`/`map-lm`** create call facts and payload blobs only; no sessions or invocations.
+See `STORAGE_AND_HEADS.md` for the storage and head model in detail.
 
-## Read surface
+## High-Level Event Types
 
-- **`projection`** defaults to current/head state for addressable recursive node reads and
-  resolves blob refs as needed. It exposes event/history reads separately.
-- **`inspect`** returns structured call/session/head/invocation detail for CLI/API JSON.
-- **`render`** formats `show`, `tree`, `cost`, `leaves`, `step`, and trust output.
-- **`provenance`** extracts and checks claim-vs-evidence structures.
-- **`api`** exposes the supported Clojure facade.
-- **`agentcli`** is the command-line use surface.
+The folded view is advanced by a small event taxonomy:
 
-Current reads dereference `session/current-head -> head/state-ref`, then materialize the
-state root into the active session view; they do not mix abandoned branch events into
-active output. History and progress reads use SQLite rows directly, so they remain useful
-mid-run. No command requires Datahike or a generated projection file to exist.
-The history/event stream is a compact audit surface: append order, event type, row
-identity, status, source ids, and payload refs. It is not the current-state source and is
-not a byte-for-byte replay of the rich in-memory event values. The derived event trace
-adds summaries and causal refs over that compact stream for operators and product UIs;
-it still does not participate in restore.
+| Group | Event types |
+|-------|-------------|
+| Session lifecycle | `:session/started`, `:session/stop-requested`, `:session/stopped`, `:session/error` |
+| Turn lifecycle | `:turn/started`, `:turn/put` |
+| Step lifecycle | `:step/started`, `:step/put` |
+| Transcript and evals | `:message/appended`, `:eval/added` |
+| Snapshots and compaction | `:session/vars-snapshotted`, `:session/compacted` |
+| Heads and lineage | `:head/published`, `:lineage/edge-added` |
+| Live transient only | `:delta/token`, `:subscribe/gap` |
 
-## Concurrency
+Only durable events receive `:event/id` and fold into the view. Transient live
+items are never persisted and are recoverable only through later durable state.
 
-The runtime serializes in-session event/call/invocation id allocation through the
-session state's emit lock. SQLite commits are serialized per store root and use WAL mode
-so parallel `map-lm`/`map-rlm` branches do not race current-head or row writes. Child work
-can still run concurrently; only the canonical hot-store commits are serialized.
+## Failure Semantics
 
-## Backends
+- Store writes are single-writer per session under the store lock.
+- SQLite persists before fold. A failed durable insert does not advance the
+  in-process view.
+- SQLite batch appends are one transaction. A failed batch folds nothing.
+- Head publication validates an optional expected basis and fails with a typed
+  CAS error instead of silently replacing a changed current head.
+- Provider timeout, provider failure, eval error, stop, and budget exhaustion
+  settle the turn as non-final terminal results. They do not publish heads.
+- Failed evals are recorded as `:eval/added` with an error map and are returned
+  to the model as observations when the turn can continue.
+- Live delivery is off-lock. Slow or throwing subscribers cannot stall writes.
+- Live queue overflow may drop transient items or skip push delivery, but it does
+  not remove durable events from the log. Subscribers recover through
+  `events-since`.
+- Same-session writes from a subscriber callback are rejected as reentrant.
 
-This pass implements local SQLite, filesystem-backed Datahike projection, and local
-filesystem-backed BlobStore. The protocols and config keep backend choices isolated, but
-there is no S3/AWS implementation or live S3 validation.
+## Contributor Invariants
 
-## Invariants
+1. Keep `fractal.engine.api` thin. New runtime behavior should be composed below
+   the API unless a supported surface change is intentional.
+2. Keep the loop on ports. `session-loop` should not know SQLite, BlobStore, or a
+   provider implementation.
+3. Keep `apply-event` pure. Views are projections from events.
+4. Persist payloads before appending events that reference them. Orphan payloads
+   are acceptable; dangling refs are not.
+5. Treat `current-head` as the only mutable continuation pointer.
+6. Publish a head after every successful `FINAL` turn and after compaction.
+7. Do not restore by replaying provider calls or evals. Restore from stored
+   snapshots referenced by heads.
+8. Keep attach additive. `attach-rlm` must create a fresh derived child and leave
+   the selected source unchanged.
+9. Keep lineage durable and content-addressed. Do not infer invocation or
+   derivation edges from naming conventions or backend paths.
+10. Treat filesystem paths as backend configuration only, never as session
+    identity.
 
-- The model-facing surface is exactly six functions.
-- Behavior prompt constraints remain tested.
-- SQLite is canonical for session facts, refs, event rows, and index transaction batches.
-- BlobStore is canonical for payload bytes.
-- Datahike is rebuildable from SQLite and is not required for restore.
-- Blob writes happen before SQLite rows/facts that reference them.
-- A completed head points at a complete immutable state root.
-- Restore/fork/attach build live runtime state from the selected head state, not a
-  session-wide event fold.
-- History/event reads return compact facts and refs; current reads return head-root
-  state.
-- Orphan blobs after a failed transaction are acceptable; dangling SQLite blob refs are
-  not.
-- Session homes are optional projections/exports only, never source truth.
-- Folding recorded events never re-runs a model.
+## Verification Pointers
+
+The architecture above is covered by:
+
+- `src/fractal/engine/session.clj`
+- `src/fractal/engine/session_loop.clj`
+- `src/fractal/engine/kernel.clj`
+- `src/fractal/engine/recursion.clj`
+- `src/fractal/engine/store.clj`
+- `src/fractal/engine/store/sqlite.clj`
+- `src/fractal/engine/store/blobstore.clj`
+- `test/fractal/engine/store_contract_test.clj`
+- `test/fractal/engine/store_sqlite_test.clj`
+- `test/fractal/engine/session_test.clj`
+- `test/fractal/engine/recursion_test.clj`
+- `test/fractal/engine/deps_acyclic_test.clj`

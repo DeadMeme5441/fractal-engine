@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
-# fractal — the agent use surface for the recursive LM compute engine.
+# fractal - agent-operable CLI wrapper for fractal-engine.
 #
-#   fractal chat [run]            talk to a persistent brain
-#   fractal run "<task>"          one-shot
-#   fractal show <run> [node]     read a run (tree · prime · verify · cost · …)
-#
-# Prefers the built uberjar (fast startup, runs in your cwd). Build it with:
-#   clojure -T:build uber
-# Without the jar it falls back to running from source (slower; runs from the repo).
+# Prefers the built uberjar. Without the jar it falls back to running from
+# source via the :cli alias.
 set -euo pipefail
-# resolve through symlinks so a `fractal` symlink on PATH still finds the repo/jar
+
 src="${BASH_SOURCE[0]}"
-while [ -h "$src" ]; do
+while [[ -h "$src" ]]; do
   dir="$(cd -P "$(dirname "$src")" && pwd)"
   src="$(readlink "$src")"
-  [[ $src != /* ]] && src="$dir/$src"
+  [[ "$src" != /* ]] && src="$dir/$src"
 done
+
 here="$(cd -P "$(dirname "$src")/.." && pwd)"
 jar="$here/target/fractal.jar"
+
 if [[ -f "$jar" ]]; then
   exec java -jar "$jar" "$@"
 else
-  cd "$here" && exec clojure -M -m fractal-engine "$@"
+  cd "$here"
+  exec clojure -M:cli "$@"
 fi

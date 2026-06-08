@@ -1,25 +1,28 @@
 (ns build
-  "Builds for fractal-engine:
-   - `jar`   : a thin library jar (src only) published to Clojars, so Clojure
-               consumers depend on `net.clojars.deadmeme5441/fractal-engine`
-               via `:mvn/version` instead of a git SHA. The supported facade
-               is `fractal-engine.api`.
-   - `uber`  : the AOT-compiled `fractal` CLI uberjar (base engine + cheshire,
-               no TUI/fulcro), shipped as a GitHub release asset.
-   Run: clojure -T:build jar   |   clojure -T:build uber"
+  "Builds for fractal-engine.
+
+   - jar: a thin library jar for Clojars consumers.
+   - uber: a self-contained CLI jar for GitHub Releases.
+
+   Run:
+     clojure -T:build jar
+     clojure -T:build uber"
   (:require [clojure.tools.build.api :as b]))
 
 (def lib 'net.clojars.deadmeme5441/fractal-engine)
-;; Release coordinate. CI passes the git tag (minus the `v`) via RELEASE_VERSION
-;; so the tag, jar name, and pom never drift; local builds fall back to this.
-(def version (or (System/getenv "RELEASE_VERSION") "0.3.5"))
-(def ^:private class-dir "target/classes")
-(def ^:private uber-file "target/fractal.jar")
-(def jar-file (format "target/%s-%s.jar" (name lib) version))
-(defn- basis [] (b/create-basis {:project "deps.edn"}))
+(def version
+  (or (System/getenv "RELEASE_VERSION") "0.5.0-SNAPSHOT"))
 
-(def ^:private pom-data
-  [[:description "A small recursive language-model compute engine: a model drives a persistent Clojure REPL and decomposes work into deterministic, probabilistic, and recursive transformations."]
+(def class-dir "target/classes")
+(def uber-file "target/fractal.jar")
+(def jar-file (format "target/%s-%s.jar" (name lib) version))
+
+(defn- basis []
+  (b/create-basis {:project "deps.edn"}))
+
+(def pom-data
+  [[:description
+    "A recursive language-model compute engine with durable Clojure REPL sessions, child recursion, payload storage, and an agent-operable CLI."]
    [:url "https://github.com/DeadMeme5441/fractal-engine"]
    [:licenses
     [:license
@@ -33,11 +36,13 @@
     [:connection "scm:git:https://github.com/DeadMeme5441/fractal-engine.git"]
     [:developerConnection "scm:git:ssh://git@github.com/DeadMeme5441/fractal-engine.git"]]])
 
-(defn clean [_] (b/delete {:path "target"}))
+(defn clean [_]
+  (b/delete {:path "target"}))
 
 (defn jar
-  "Build the thin library jar (src + pom) for Clojars."
+  "Build the thin library jar for Clojars."
   [_]
+  (b/delete {:path class-dir})
   (b/write-pom {:class-dir class-dir
                 :lib lib
                 :version version
@@ -48,22 +53,27 @@
   (b/jar {:class-dir class-dir :jar-file jar-file})
   (println "built" jar-file))
 
-(defn uber [_]
+(defn uber
+  "Build the self-contained CLI jar."
+  [_]
   (clean nil)
   (b/copy-dir {:src-dirs ["src"] :target-dir class-dir})
-  (b/compile-clj {:basis (basis) :ns-compile '[fractal-engine] :class-dir class-dir})
+  (b/compile-clj {:basis (basis)
+                  :ns-compile '[fractal.engine.cli]
+                  :class-dir class-dir})
   (b/uber {:class-dir class-dir
            :uber-file uber-file
            :basis (basis)
-           :main 'fractal-engine})
+           :main 'fractal.engine.cli})
   (println "built" uber-file))
 
 (defn install
-  "Install the library jar into the local ~/.m2 for local consumers."
+  "Install the library jar into the local Maven repository."
   [_]
   (jar nil)
   (b/install {:basis (basis)
               :lib lib
               :version version
               :jar-file jar-file
-              :class-dir class-dir}))
+              :class-dir class-dir})
+  (println "installed" lib version))

@@ -1,593 +1,345 @@
 # fractal-engine
 
-[![ci](https://github.com/DeadMeme5441/fractal-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/DeadMeme5441/fractal-engine/actions/workflows/ci.yml)
-[![release](https://github.com/DeadMeme5441/fractal-engine/actions/workflows/release.yml/badge.svg)](https://github.com/DeadMeme5441/fractal-engine/actions/workflows/release.yml)
-[![Clojars Project](https://img.shields.io/clojars/v/net.clojars.deadmeme5441/fractal-engine.svg)](https://clojars.org/net.clojars.deadmeme5441/fractal-engine)
+fractal-engine is a recursive language-model compute engine for long-context,
+long-horizon work. A root model drives a persistent Clojure REPL, writes fenced
+Clojure, receives compact host observations, and continues until it calls
+`(FINAL value)`.
 
-A small **recursive language-model compute engine**. A model drives a persistent
-Clojure REPL: it writes fenced Clojure, the host evaluates it and returns a compact
-observation, and the loop repeats until the model calls `(FINAL value)`. Some of the
-functions the model can call are *themselves* language models — so a problem can be
-decomposed into sub-problems, each solved by a fresh recursion of the same loop.
+The engine is built as a Clojure SDK plus an agent-operable CLI/control plane.
+It is not a consumer chat app and not a repository-analysis product. It is a
+small runtime substrate for durable model-driven work:
 
-```clojure
-;; the model writes this; the host evaluates it and feeds back the result
-(def files (->> (file-seq (io/file "src")) (filter #(.endsWith (str %) ".clj")) (mapv str)))
-(def summaries (map-lm files "Summarize this file's responsibility in one line." :string))
-(FINAL {:n (count files) :summaries summaries})
+- exact work happens in Clojure;
+- bounded judgment happens through `lm` and `map-lm`;
+- recursive work happens through child sessions via `rlm` and `map-rlm`;
+- reusable prior state is derived through `attach-rlm`;
+- durable state is stored in SQLite plus content-addressed payload blobs;
+- every completed turn publishes an immutable head for resume and lineage.
+
+```mermaid
+flowchart LR
+  A["Caller or agent"] --> B["fractal.engine.api"]
+  A --> C["fractal CLI"]
+  C --> B
+  B --> D["Session loop"]
+  D --> E["Persistent Clojure REPL"]
+  D --> F["Provider adapter"]
+  E --> G["FINAL / lm / rlm calls"]
+  D --> H["SQLite event store"]
+  D --> I["BlobStore payloads"]
+  H --> J["Views, heads, lineage"]
+  I --> J
 ```
 
-**Why this shape?** Large contexts are expensive and lossy. Instead of stuffing
-everything into one window, fractal-engine gives the model a programming environment
-and lets it decide how to read its own input — slicing with ordinary code, judging
-bounded pieces with cheap model calls, and handing whole sub-problems to fresh
-recursions. It is built in the spirit of
-[Recursive Language Models](https://github.com/alexzhang13/rlm) (Alex Zhang et al.).
+## Capabilities
 
----
+The public Clojure facade is `fractal.engine.api`. The CLI facade is
+`fractal.engine.cli`, exposed by `clojure -M:cli` and by the `bin/fractal`
+wrapper.
 
-## Table of contents
-
-**Get it running:** [Requirements](#requirements) · [Install](#install) ·
-[Quickstart (no API keys)](#quickstart-no-api-keys) · [Where the store lives](#where-the-store-lives-fractal) ·
-[Use as a Clojure dependency](#use-as-a-clojure-dependency) · [The `fractal` CLI](#the-fractal-cli) ·
-[codebrain](#codebrain--a-code-discovery-brain) · [Going live: providers](#going-live-providers) ·
-[Troubleshooting](#troubleshooting)
-
-**Understand it:** [How the loop works](#how-the-loop-works) · [The six functions](#the-six-functions) ·
-[Context compaction](#context-compaction) · [Canonical storage](#canonical-storage) · [The trust layer](#the-trust-layer) ·
-[Resume, fork, attach](#resume-fork-attach) · [Sandboxing](#sandboxing) · [Architecture](#architecture) ·
-[Evaluations](#evaluations) · [Anti-goals](#anti-goals) · [Relevant reading](#relevant-reading)
-
-**Deep docs:** [`docs/CONCEPTS.md`](docs/CONCEPTS.md) · [`docs/API.md`](docs/API.md) ·
-[`docs/CLI.md`](docs/CLI.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
-[`docs/CODEBRAIN.md`](docs/CODEBRAIN.md) · [`docs/EVENT_LOG.md`](docs/EVENT_LOG.md) ·
-[`docs/EVALS.md`](docs/EVALS.md) · [`docs/RELEASE.md`](docs/RELEASE.md)
-
----
+| Capability | What it gives you |
+| --- | --- |
+| Persistent sessions | A model works inside a durable Clojure session whose vars can survive turns and process restarts. |
+| Exact host work | Model-written fenced Clojure runs in a capability-clamped SCI context and returns compact observations. |
+| Provider adapter seam | Offline fake runs and live provider runs share the same runtime path. |
+| Recursive harness | `lm`, `map-lm`, `rlm`, `map-rlm`, and `attach-rlm` let the model choose bounded leaf judgment, child sessions, fan-out, or derived continuation. |
+| Durable storage | SQLite stores events and session rows; BlobStore stores content-addressed payload bytes. |
+| Immutable heads | Completed turns publish continuation heads used by resume, attach, and lineage inspection. |
+| Agent control plane | The CLI drives usage commands and read-only inspection commands with JSON/EDN output and explicit config files. |
 
 ## Requirements
 
-You need two things, both free and cross-platform (macOS, Linux, Windows/WSL):
+- JDK 21 or newer
+- Clojure CLI
 
-| | What | Check it | Get it |
-|---|---|---|---|
-| **JDK 21+** | A Java runtime (the engine evaluates Clojure on the JVM) | `java -version` | [Temurin](https://adoptium.net/), [Homebrew](https://formulae.brew.sh/formula/openjdk) `brew install openjdk@21`, or your package manager |
-| **Clojure CLI** | The `clojure` / `clj` build+run tool | `clojure --version` | [clojure.org/guides/install_clojure](https://clojure.org/guides/install_clojure) |
+Check locally:
 
-There is no native binary on purpose — the engine compiles and runs model-generated
-code at runtime, so it ships as a JVM uberjar. Tested on OpenJDK 21 and Clojure CLI
-1.12.
-
-## Install
-
-The engine runs on any platform with a **JDK 21+** — it ships as a single
-self-contained uberjar (a native binary is out: the core loop `eval`s
-model-emitted Clojure at run time, which needs the JVM and the Clojure compiler
-present).
-
-### Download the prebuilt jar (no build)
-
-Grab `fractal.jar` from the [latest release](https://github.com/DeadMeme5441/fractal-engine/releases/latest):
-
-```bash
-mkdir -p ~/.local/bin
-curl -fsSL -o ~/.local/bin/fractal.jar \
-  https://github.com/DeadMeme5441/fractal-engine/releases/latest/download/fractal.jar
-
-# run it directly…
-java -jar ~/.local/bin/fractal.jar help
-
-# …or drop a tiny wrapper on your PATH so `fractal` just works:
-printf '#!/usr/bin/env bash\nexec java -jar "$HOME/.local/bin/fractal.jar" "$@"\n' > ~/.local/bin/fractal
-chmod +x ~/.local/bin/fractal
-fractal help
+```sh
+java -version
+clojure --version
 ```
 
-### Build from source
+## Quick Start: CLI, Offline
 
-Clone, build the uberjar, and put `fractal` on your `PATH`:
+Create a local config file and durable store. This uses the fake adapter, so it
+does not need provider credentials, network access, or paid calls.
 
-```bash
-git clone https://github.com/DeadMeme5441/fractal-engine.git
-cd fractal-engine
-
-clojure -T:build uber            # -> target/fractal.jar   (prints: built target/fractal.jar)
-
-# put `fractal` on your PATH (any dir on your PATH works; ~/.local/bin is common)
-mkdir -p ~/.local/bin
-ln -sf "$PWD/bin/fractal" ~/.local/bin/fractal
-
-fractal help                     # should print the verb list
+```sh
+clojure -M:cli init \
+  --config fractal.edn \
+  --store-dir .fractal/sessions/demo \
+  --session demo
 ```
 
-`bin/fractal` prefers the built jar (fast startup; runs in whatever directory you
-invoke it from) and resolves symlinks, so a `fractal` symlink anywhere on your `PATH`
-still finds the repo. If the jar isn't built it transparently falls back to running
-from source.
+Run one turn and inspect the result:
 
-**Prefer not to build?** Skip the uberjar and run the engine straight from source
-(slower startup, and it runs from the repo directory):
+```sh
+clojure -M:cli run \
+  --config fractal.edn \
+  --session demo \
+  --message "return a small value" \
+  --pretty
 
-```bash
-clojure -M -m fractal-engine <verb> ...      # e.g. clojure -M -m fractal-engine help
+clojure -M:cli report \
+  --config fractal.edn \
+  --session demo \
+  --pretty
 ```
 
-## Quickstart (no API keys)
+Trace the model code and engine observations for the latest turn:
 
-The default provider is an **offline scripted fake** — no keys, no network, no spend.
-Run a scripted task end to end:
-
-```bash
-fractal run "Define x and return it." --fake-script simple
+```sh
+clojure -M:cli trace \
+  --config fractal.edn \
+  --session demo \
+  --pretty
 ```
 
-You should see something like:
+The default CLI output is JSON. Use `--edn` when exact Clojure-shaped values
+matter, especially payload refs:
 
-```text
-run session-3269ffb5-65ba-41c8-921b-c4a1d8beebd8
-● {:answer 42}   $? · 2 calls
-  next: fractal show session-3269ffb5-65ba-41c8-921b-c4a1d8beebd8   ·   fractal verify session-3269ffb5-65ba-41c8-921b-c4a1d8beebd8
+```sh
+clojure -M:cli turns --config fractal.edn --session demo --edn
 ```
 
-That is a full run: the green `●` means the model reached `(FINAL …)`, `{:answer 42}`
-is the final value, and `$? · 2 calls` is the spend summary — `$?` because the
-scripted provider has no real pricing (a live run shows a dollar amount here).
-
-**Did it work?** Two checks:
-
-```bash
-test -d .fractal            # a local store root appeared here
-fractal ls                  # ○ session-...  s2 c0 final
-```
-
-Now look inside what it did:
-
-```bash
-fractal show <run>          # node detail: steps, leaves, children, final
-fractal tree <run>          # the whole addressable run tree
-```
-
-`<run>` is the `session-…` name printed above (or copy it from `fractal ls`).
-`fractal show` prints the run's steps — the exact Clojure the model wrote and the
-observation the host fed back at each step — ending in the `FINAL` value.
-
-Run the test suite to confirm a healthy checkout (all offline, no keys):
-
-```bash
-clojure -M:test                # offline engine suite
-clojure -M:evals-test          # offline eval harness suite
-```
-
-Other offline scenarios are available via `--fake-script`: `simple`, `lm`, `map-lm`,
-`map-lm-partial` (demonstrates partial-failure sentinels), `rlm`, `map-rlm`,
-`multi-turn-chat`, and more (see `src/fractal_engine/scripts.clj`).
-
-## Where the store lives: `.fractal/`
-
-Like `git` and `bd`, `fractal` keeps local durable state in a **`.fractal/` store root
-in the directory you invoke it from**, and finds it the same way git finds `.git`:
-
-- If a `.fractal/` already exists in the current directory **or any ancestor**, that
-  one is reused — so running from a subdirectory still lands in the project's store.
-- Otherwise a fresh `.fractal/` is created in the current directory on first write.
-
-So `cd ~/some-project && fractal run "..."` just works, and keeps that project's sessions
-with that project. Point it somewhere else for a single command with `--runs-dir`:
-
-```bash
-fractal run "..." --runs-dir scratch-store
-fractal ls       --runs-dir scratch-store
-```
-
-`.fractal/` is git-ignored by default. It contains the local SQLite fact/ref store, the
-local content-addressed BlobStore, the derived Datahike query index, and store identity.
-Session identity is a canonical store fact, not a session directory. A `<run>` argument
-is a session id or alias resolved under the store.
-
-## Use as a Clojure dependency
-
-The engine is published to [Clojars](https://clojars.org/net.clojars.deadmeme5441/fractal-engine).
-Add it to `deps.edn`:
+## Quick Start: SDK, Offline
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.3.5"}}}
-```
-
-The CLI is one consumer of the engine. Clojure applications should prefer the stable
-facade namespace, `fractal-engine.api`, instead of reaching into runtime namespaces
-such as `process`, `session`, `projection`, or `provenance`.
-
-```clojure
-(require '[fractal-engine.api :as fe])
+(require '[fractal.engine.api :as fe])
 
 (def cfg
-  (fe/config {:runs-dir ".fractal"
-              :models {:root  {:provider :scripted :model "scripted"}
-                       :leaf  {:provider :scripted :model "scripted"}
-                       :child {:provider :scripted :model "scripted"}}}))
+  (fe/make-config
+    {:adapter :fake
+     :model "fake-model"
+     :capability :default
+     :fake/respond
+     (fe/responder
+       [[:default "```clojure\n(FINAL {:answer 42})\n```"]])}))
 
-(def s
-  (fe/start-session! cfg {:id "demo"
-                          :alias "demo"
-                          :overlay "Additional application role instructions can go here."}))
+(def session (fe/start-session! cfg))
+(def result (fe/run-turn! session "What is 6 times 7?"))
 
-(def result
-  (fe/run-turn! s "Define x and FINAL {:answer 42}."))
+(:status result)
+;; => :final
 
-(fe/stop-session! s)
-(fe/load-node (:locator result))
+(:turn/final-value result)
+;; => {:answer 42}
+
+(fe/stop-session! session)
 ```
 
-The overlay is session-level specialization: it is appended once to the base system
-message and carried in the transcript. It does not add functions to the model-facing
-surface or change engine behavior. That surface remains exactly `FINAL`, `lm`,
-`map-lm`, `rlm`, `map-rlm`, and `attach-rlm`.
+## Durable Sessions
 
-Applications may put their own Clojure namespaces on the classpath and ask the model,
-through the overlay or task prompt, to require and use them. Session state stays
-engine-shaped and can be read with `fe/load-node`, `fe/load-at`, `fe/tree`,
-`fe/event-trace`, `fe/event-stream`, `fe/check-consistency`, and the
-claim/provenance helpers. Full reference:
-[`docs/API.md`](docs/API.md).
+Use `:store :sqlite` and a relative `:store/dir` when a session should survive
+process restart:
 
-## The `fractal` CLI
+```clojure
+(def cfg
+  (fe/make-config
+    {:adapter :fake
+     :model "fake-model"
+     :capability :default
+     :store :sqlite
+     :store/dir ".fractal/sessions/sdk-demo"
+     :fake/respond
+     (fe/responder
+       [["define" "```clojure\n(def remembered 7)\n(FINAL :defined)\n```"]
+        ["use" "```clojure\n(FINAL (* remembered 6))\n```"]])}))
 
-`fractal` is the engine's use surface — modeled on tools like `bd`: short verbs, a
-positional address instead of flag ceremony, run-name resolution, and output that
-prints the next command to run. **One grammar covers both halves of the loop — driving
-the engine and reading what it did.** Every verb takes `--json`; exit codes mean
-something. Full reference: [`docs/CLI.md`](docs/CLI.md).
+(def first-handle (fe/start-session! cfg {:id "sdk-demo"}))
+(fe/run-turn! first-handle "define")
+(fe/close-session! first-handle)
 
-### Drive (do work)
-
-```bash
-fractal chat [run]            # talk to a persistent, resumable session (the "brain")
-fractal run    "<task>"       # one-shot; prints a run handle to chain into a read verb
-fractal resume <run> "<task>" # continue a saved session from its snapshot
-fractal fork   <run> "<task>" # branch a session at a turn
+(def reopened (fe/resume-session! cfg "sdk-demo"))
+(:turn/final-value (fe/run-turn! reopened "use"))
+;; => 42
 ```
 
-`fractal chat` is the headline. It holds one live session and runs each message as a
-session input — REPL vars persist through canonical snapshots, the current-head ref
-advances, and a live `◐ thinking…` line shows children/steps/leaves as the engine works.
-Leave with `/quit`; come back with `fractal chat <run>`.
+Resume restores from the published current head. It does not replay provider
+calls or old evals.
 
-Long chats do not keep appending the full provider transcript forever. When the next
-root request approaches the configured model window, the engine runs a model-mediated
-provider-history compaction first: the same session advances to a new immutable head
-whose active provider transcript is the system prompt plus one compact continuation
-frame, while REPL vars and prior heads remain durable.
+## Recursive Harness
 
-### Read (look inside its head)
-
-```bash
-fractal show   <run> [node]   # node detail — the hub; node defaults to root
-fractal tree   <run>          # the full addressable run tree
-fractal prime  <run>          # compact "what is this run"
-fractal ls                    # list runs
-fractal verify <run> [node]   # claim-vs-evidence (the confabulation backstop)
-fractal trace  <run> [node]   # claim provenance
-fractal cost   <run>          # spend breakdown
-fractal leaves <run> [node]   # leaf inputs/outputs
-fractal step   <run> [node] N # one step, in full
-fractal events <run>          # agent/operator audit timeline
-fractal stream <run>          # canonical events as JSONL
-```
-
-A **node address** is `root`, `child-0001`, or `child-0001/child-0004` — the leading
-`root/` is implied. Drilling is just following the addresses a node view prints for its
-children.
-
-### Audit (what happened and why)
-
-`fractal events <run>` is the product-grade event-log UI. It shows a compact audit
-panel: total facts, turns, model calls, leaves, children, checkpoints, the current
-checkpoint, and a timeline of meaningful facts such as model calls, `FINAL`, snapshot
-capture, checkpoint sealing, and ref movement.
-
-```bash
-fractal events <run>
-fractal events <run> --event 31   # causal chain for one fact
-fractal events <run> --limit 40   # keep large runs readable
-```
-
-Use `fractal stream <run>` when a script wants raw JSONL compact facts. Use
-`fractal events <run>` when a human or agent needs to understand the run. The event log
-explains what happened; immutable head state restores the REPL. Full guide:
-[`docs/EVENT_LOG.md`](docs/EVENT_LOG.md).
-
-**Exit codes:** `0` final · `1` error · `2` no-final · `3` timeout · `5` confabulation
-suspected. So you can gate on them: `fractal verify <run> --deep --root . && deploy`.
-
-## codebrain — a code-discovery brain
-
-`fractal codebrain` is a thin product surface that points the engine at a codebase:
-it builds itself a **repo map** (by fanning children over the subsystems, not by a
-regex dump), keeps it on disk like `bd` keeps its db, and then answers a coding
-agent's questions about the code with small, **cited** EDN — so the agent spends
-its context on the change, not on reading the tree.
-
-```bash
-fractal codebrain init --path ./src \
-  --provider vertex-gemini       --model gemini-3.5-flash \
-  --child-provider vertex-gemini --child-model gemini-3.5-flash \
-  --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
-  --call-timeout-ms 600000
-fractal codebrain ask  "Where are CLI verbs registered and what's the handler contract?"
-fractal codebrain map        # show the persisted map  ·  status  # freshness + HEAD
-```
-
-Born once (the build is the amortized cost); each `ask` resumes the warm brain and
-runs cheap. Full setup, auth for every provider, and the answer shape:
-[`docs/CODEBRAIN.md`](docs/CODEBRAIN.md).
-
-## Going live: providers
-
-Provider calls go through [`clojure-llm-sdk`](https://github.com/DeadMeme5441/clojure-llm-sdk).
-Select provider and model per role — root / leaf / child can differ (a common, cheap
-split is a strong root with cheaper children and leaves):
-
-```bash
-fractal run "Map this repo's subsystems with evidence." \
-  --provider vertex-gemini       --model gemini-3.5-flash \
-  --leaf-provider vertex-gemini  --leaf-model gemini-3.1-flash-lite-preview \
-  --child-provider vertex-gemini --child-model gemini-3.5-flash \
-  --max-turns 50 --call-timeout-ms 600000
-```
-
-Credentials come from environment variables (an ignored `.env` is read for local dev —
-never commit secrets). Two non-obvious provider facts that will cost you time if you
-miss them:
-
-- **Codex OAuth** is the provider keyword `codex-backend` (plain `codex` is the
-  API-key path). It reads `~/.codex/auth.json`.
-- **Vertex Gemini** (`vertex-gemini`) needs `GOOGLE_CLOUD_PROJECT` and
-  `GOOGLE_CLOUD_LOCATION` **exported into the JVM environment** (the `.env` loader does
-  *not* push them to `System/getenv`), plus Application Default Credentials
-  (`gcloud auth application-default login`).
-
-> **Root-model strength is decisive.** A weak root will confabulate past its own
-> correct observations. Don't put a mini model at the root when you care about the
-> answer.
-
-> **Live runs cost money and can hang.** There is no engine-level budget/timeout
-> governor yet. Always leash live runs: `--call-timeout-ms`, `--max-turns`,
-> `--max-fanout`, and run them in the background with monitoring.
-
-## Evaluations
-
-The repository includes a small eval harness under [`evals/`](evals/README.md).
-It is an external consumer of the engine behind the `:evals` deps alias, not part of
-the shipped runtime or model-facing surface.
-
-The tracked public v17 run covers OOLONG-synth and FanOutQA long-context examples
-with a strong-root / cheap-leaf model split. The current v22 release branch was also
-live-validated on the same smart subsets with parallelism 5. Headline results:
-
-| run | benchmark | n | headline | spend |
-|---|---|--:|---:|--:|
-| tracked v17 | OOLONG-synth | 15 | exact accuracy `0.867` | `$3.3989` |
-| tracked v17 | FanOutQA | 15 | loose accuracy `0.695`; semantic audit `11/15` | `$4.5360` |
-| release v22 validation | OOLONG-synth | 15 | exact accuracy `0.933`; numeric `0.998` | `$3.3086` |
-| release v22 validation | FanOutQA | 15 | loose accuracy `0.704`; strict `0.467` | `$2.8873` |
-
-See [`docs/EVALS.md`](docs/EVALS.md) for exact commands, aggregate outputs, scorer
-caveats, and what the results do and do not establish.
-
-## Troubleshooting
-
-| Symptom | Cause / fix |
-|---|---|
-| `fractal: command not found` | The symlink isn't on your `PATH`. Confirm the target dir is on `PATH` (`echo $PATH`), or just run `./bin/fractal` from the repo. |
-| `java: command not found` / `UnsupportedClassVersionError` | No JDK, or older than 21. `bin/fractal` runs the jar with `java`. Install JDK 21+ and ensure `java -version` reports 21 or newer. |
-| `Could not find or load main class` / jar missing | The uberjar isn't built. Run `clojure -T:build uber` (creates `target/fractal.jar`). Without it, `bin/fractal` falls back to source — that needs `clojure` on your `PATH`. |
-| `no such run: <name>` | Runs resolve under `.fractal/` of the directory you're in (or an ancestor). Run `fractal ls` to see what's there, `cd` to the project, or pass `--runs-dir <dir>`. |
-| Live provider: `unauthorized` / auth errors | `codex-backend` needs `~/.codex/auth.json`; `vertex-gemini` needs `GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION` exported into the JVM env and valid ADC. See [Going live](#going-live-providers). |
-| Vertex first-call hang / `EOF` | A known cold-start transport hiccup. Retry is on by default and the SDK retries transient EOF/timeout with backoff; if a call truly hangs, your `--call-timeout-ms` bounds the whole retry loop (total wall-clock). |
-| A live run hangs for minutes | There's no governor yet — kill it and re-run leashed: `--call-timeout-ms`, `--max-turns`, `--max-fanout`, in the background. |
-
----
-
-## How the loop works
-
-1. Conversation messages are the model's working transcript.
-2. The model replies with one or more fenced ` ```clojure ` blocks.
-3. The host evaluates them, in order, in a **persistent namespace** (vars survive
-   across steps and turns).
-4. The host appends a compact **observation** message (values are projected, not dumped).
-5. Steps repeat until the model calls `(FINAL value)`, which ends the **turn** and
-   returns `value`.
-
-A session is long-lived. `(FINAL value)` completes the current turn; it does **not**
-end the session — the same history, REPL vars, and cache scope are available to the
-next turn. That is what makes a session a *persistent brain you can keep talking to.*
-
-## The six functions
-
-The entire model-facing surface is six functions, plus ordinary Clojure:
-
-| function | kind | what it does |
-|---|---|---|
-| `(FINAL value)` | — | end the current turn and return `value` to the caller |
-| `(lm input query [mode])` | probabilistic | one bounded input → one model judgment (`:string`/`:edn`) |
-| `(map-lm inputs query [mode])` | probabilistic | `lm` mapped over up to 50 inputs, in parallel |
-| `(rlm task)` | recursive | run this whole loop on a sub-problem; returns an RLM envelope with `:rlm/value`, session, and head refs |
-| `(map-rlm tasks [shared])` | recursive | `rlm` over up to 50 independent sub-problems, in parallel |
-| `(attach-rlm handle task [opts])` | recursive | create a new attached child from a prior source snapshot |
-
-Everything is `input -> processing -> output`; only the *kind* of processing varies —
-**deterministic** (plain Clojure), **probabilistic** (a *leaf*, `lm`/`map-lm`, whose
-body is a model), or **recursive** (a *child*, `rlm`/`map-rlm`, a full recursion of the
-loop). A leaf is the non-recursive base case. There is **no magic `context` variable** —
-working state lives in REPL vars the model defines with `def`. The root, every child,
-and every child run the *same* loop; leaves are the non-recursive base case. There is
-no separate "planner" or "executor." See
-[`docs/CONCEPTS.md`](docs/CONCEPTS.md) for the model in depth.
-
-A `map-lm` / `map-rlm` fan-out is **partial-failure tolerant**: if some items fail, the
-call still returns a vector aligned to the inputs — successful items return their value,
-and each failed slot holds a `{:fractal/failed true :index i :error ...}` sentinel
-instead. One bad item never costs you the rest. Split the sentinels out before
-aggregating (`(remove :fractal/failed results)`) and fold the failures into your answer's
-missingness. (Singular `lm`/`rlm` have no batch, so they surface a failure directly; and
-the pre-flight fan-out cap is a separate, recoverable error you retry by chunking.)
-
-## Context compaction
-
-A session can outlive one provider context window. The engine handles that by advancing
-the same session through a normal immutable head transition:
+Set `:harness :rlm` to expose the recursive model-facing surface inside the
+session REPL:
 
 ```text
-old current head -> compacted current head -> next user turn
+FINAL
+lm
+map-lm
+rlm
+map-rlm
+attach-rlm
 ```
 
-Compaction is model-driven. The host asks the configured root model to rewrite the
-current head's transcript and state facts into one semantic continuation frame. That
-model output becomes a synthetic user message on the compacted head. The provider-facing
-history for the next turn is then the unchanged system prompt plus that compact frame.
+The outer SDK and CLI call shape stays the same. The model decides whether to
+use ordinary Clojure, a bounded leaf call, or a child session.
 
-This does not summarize or discard runtime state. REPL vars are snapshotted on the
-compacted head, `session/current-head` remains the only current-state pointer, and older
-messages/heads remain queryable through history. It is indistinguishable from any other
-completed head transition to readers and restore code; only the active message
-projection is smaller.
+Use the smallest sufficient kind:
 
-The engine estimates root requests against the configured model's window using
-`clojure-llm-sdk` metadata when available. Soft overflow triggers compaction before the
-next user message is appended. Hard overflow records a typed context-limit error before
-calling the provider.
+- Clojure for parsing, counting, grouping, joining, validation, and final shape
+  construction.
+- `lm` / `map-lm` for bounded semantic judgments.
+- `rlm` / `map-rlm` for subproblems that need their own loop and state.
+- `attach-rlm` to derive a fresh child from a selected prior head without
+  advancing the source session.
 
-## Canonical storage
+## CLI Surface
 
-The durable model is:
+Run:
+
+```sh
+clojure -M:cli <command> [options] [args]
+```
+
+or build the wrapper target and call:
+
+```sh
+bin/fractal <command> [options] [args]
+```
+
+Usage commands:
 
 ```text
-SQLite    = canonical facts, identity, refs, time, graph
-BlobStore = canonical bytes and payloads
-Datahike  = derived Datalog query index, rebuilt from SQLite batches
-Filesystem = local physical backend for blobs and the derived index
+init config start run turn resume stop close compact wait
 ```
 
-SQLite stores facts the engine queries or uses for state transitions: session ids,
-aliases, statuses, timestamps, cache ids, current-head refs, immutable head lineage,
-call/eval/message identities, invocation caller/callee/source edges, model/provider ids,
-token/cost metadata, and blob hash/size/key facts.
+Inspection commands:
 
-BlobStore stores payloads the engine replays, restores, renders, inspects, or verifies:
-message content, provider request/response bodies, eval code/results/observations, final
-values, snapshots, vars, raw errors, stack traces, and export bodies.
-
-The boundary is semantic, not size-based. Small final values and small snapshots are
-still blobs; arbitrary generated content is not inlined into Datahike. Writes are
-blob-first and transaction-second: hash/write/verify the payload, then transact facts
-pointing to it. Orphan blobs after failed transactions are acceptable; dangling facts are
-not.
-
-Session homes are not source truth. If a file tree is ever emitted for debugging/export,
-it is a projection of Datahike + BlobStore and is not required for `show`, `tree`,
-`inspect`, resume, fork, attach, or API reads.
-
-## The trust layer
-
-A model's `FINAL` value is a **claim**, not a fact. `fractal verify` makes claims
-auditable in two layers:
-
-1. **Grep floor (free, default).** Extract the code symbols a claim cites as evidence
-   and check they actually occur in the cited file. Catches a fabricated citation
-   instantly. Cited paths are resolved against `--root <repo>`.
-2. **Engine judge (`--deep`).** Hand the claims *back to the engine* as a fresh task —
-   "read the cited code and decide whether it genuinely supports the claim; spawn a
-   child or use leaves, your call; be adversarial." The engine reads the real source and
-   returns `:supported` / `:refuted` per claim.
-
-The floor and the judge are complementary: grep answers *"are the cited symbols real?"*;
-the judge answers *"does the code actually mean what's claimed?"* In practice the judge
-catches confabulations the grep waves through. Details in
-[`docs/CONCEPTS.md`](docs/CONCEPTS.md#the-trust-layer).
-
-```bash
-fractal verify <run> child-0001 --root .          # grep floor
-fractal verify <run> child-0001 --root . --deep \
-  --provider vertex-gemini --model gemini-3.5-flash     # + engine judge
+```text
+status progress view events heads head edges tree payload messages turns steps evals trace check report
 ```
 
-## Resume, fork, attach
+The CLI is designed for agents and scripts first. It is non-interactive by
+default, uses explicit config files and session ids, emits structured output, and
+keeps payload hydration explicit.
 
-Snapshots are blobbed at completed turn heads: message history plus EDN-safe REPL vars
-(non-EDN values are recorded as unresumable, never silently dropped).
+Full CLI docs: [`docs/AGENT_CONTROL_PLANE.md`](docs/AGENT_CONTROL_PLANE.md).
 
-`resume` restores a snapshot into the same logical session, preserves the same cache id,
-runs a new turn, and advances that same session's current-head.
+## Live Providers
 
-`fork` restores a source snapshot into a new user/API session with a new cache id by
-default. The source current-head and fingerprint do not change.
+Provider-backed runs use `:adapter :sdk`, a provider id, model ids, and provider
+configuration supplied by your runtime environment or local secret manager. Keep
+credentials out of tracked files.
 
-`attach-rlm` resolves a prior completed source session/head by id, alias, or stable
-handle, restores that snapshot into a new attached child session, runs the task there,
-and records caller -> attached-child plus attached-from source facts. Attach never
-advances the source session.
+For live recursion, set explicit leashes:
 
-```bash
-fractal resume <run> "Use the var you defined and FINAL the result."
-fractal fork   <run> "Try a different approach." --turn 2
+```edn
+{:adapter :sdk
+ :provider :provider-key
+ :model "root-model-id"
+ :harness :rlm
+ :child-model "child-model-id"
+ :leaf-model "leaf-model-id"
+ :store :sqlite
+ :store/dir ".fractal/sessions/live-demo"
+ :max-steps 8
+ :max-turns 4
+ :call-timeout-ms 90000
+ :max-fanout 4
+ :fanout-pool 2
+ :leaf-concurrency 2
+ :cache-ttl "5m"}
 ```
 
-## Sandboxing
+Live validation is opt-in and may spend money. See
+[`docs/LIVE_VALIDATION.md`](docs/LIVE_VALIDATION.md).
 
-The engine evaluates model-generated Clojure in a live JVM — it can read files, spawn
-subprocesses, and use the network. That power is the point (it is how a node inspects a
-codebase and reaches its provider), but it means **you must treat the model's code as
-code you are running locally.**
+## Build And Release
 
-There is no true in-process sandbox on a modern JVM: the `SecurityManager` was disabled
-in JDK 24 ([JEP 486](https://openjdk.org/jeps/486)), and an interpreter sandbox (e.g.
-SCI) can't preserve the engine's real-var / snapshot model. Isolation is therefore a
-**process/OS-level** concern. `bin/fractal-sandboxed` runs the engine under a
-best-effort OS sandbox:
+Build the thin library jar:
 
-- **macOS** — `sandbox-exec` with `sandbox/macos.sb` (Seatbelt). Tested.
-- **Linux** — `bwrap` (bubblewrap). Written but untested; review before relying on it.
+```sh
+clojure -T:build jar
+```
 
-**It is a safety net, not a prison:** reads/subprocesses/compute/network stay open;
-only **writes** are confined to the run workspace and temp. It does **not** filter the
-network — a node that reads a file can send it to your provider (its purpose) or
-elsewhere. For untrusted inputs, use a hardened tier: a network-filtering sandbox such
-as [Anthropic's sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime)
-(allowlist the provider domain) or a container with a locked-down network namespace.
+Build the CLI uberjar:
 
-## Architecture
+```sh
+clojure -T:build uber
+java -jar target/fractal.jar help
+```
 
-The codebase is decomplected by concern; only the compute engine lives in core
-namespaces. Full map in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Install the library jar into the local Maven repository:
 
-| layer | responsibility | namespaces |
-|---|---|---|
-| compute engine | session input loop, persistent REPL, leaves, child/attach edges | `process` `session-loop` `leaf` `session-invocation` `runtime` `rlm` `call` |
-| canonical storage | SQLite facts/refs + BlobStore payloads, with Datahike as derived index | `session-db` `session-sqlite` `blob-store` `session-model` `store.*` |
-| event projection | canonical events + pure folds into views | `event` `artifacts` |
-| persistence | snapshot / restore / resume / fork / lineage | `snapshot` `resume` `session` |
-| provider | the LLM adapter boundary | `provider` |
-| read surface | Datahike/blob projection + the trust layer | `projection` `provenance` `render` `inspect` |
-| public API | stable Clojure facade for library consumers | `api` |
-| product | the `fractal` CLI | `agentcli` `cli` |
+```sh
+clojure -T:build install
+```
 
-## Anti-goals
+Release automation is tag-driven. Pushing a `v*` tag from a commit that contains
+the release workflow will:
 
-The core runtime does **not** include persistent-memory databases, vector search,
-workflow templates, task schemas, repository analyzers, MCP-server concepts, a web UI,
-deterministic planner layers, or hidden convenience functions. Those belong in layers
-*around* the kernel. The model-facing surface is exactly the six functions — kept small
-on purpose.
+1. run the offline test suite;
+2. build the library jar;
+3. publish the library to Clojars using `CLOJARS_USERNAME` and
+   `CLOJARS_PASSWORD` repository secrets;
+4. build and smoke-test the CLI uberjar;
+5. create a GitHub release with `target/fractal.jar`.
 
-## Relevant reading
+The release version is derived from the tag name without the leading `v`.
 
-- **Recursive Language Models** — Alex Zhang et al.: the idea this engine is built in
-  the spirit of (REPL-as-context, recursive self-calls).
-  [Repo](https://github.com/alexzhang13/rlm).
-- `AGENTS.md` — the design boundary and invariants for contributors and agents.
-- `docs/CONCEPTS.md`, `docs/API.md`, `docs/CLI.md`, `docs/ARCHITECTURE.md` — deep dives.
+## Use As A Dependency
+
+After a release is published, depend on the Clojars coordinate:
+
+```clojure
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.5.0"}}}
+```
+
+Then use the public facade:
+
+```clojure
+(require '[fractal.engine.api :as fe])
+```
+
+Do not depend on internal runtime namespaces unless you are contributing to the
+engine itself.
+
+## Validate
+
+Default offline gate:
+
+```sh
+clojure -M:test
+git diff --check
+```
+
+Optional live suite:
+
+```sh
+clojure -M:live-test
+```
+
+The default test alias excludes `^:live` tests and should not make network calls
+or require credentials.
+
+## Project Map
+
+- [`src/fractal/engine/api.clj`](src/fractal/engine/api.clj): public SDK facade.
+- [`src/fractal/engine/cli.clj`](src/fractal/engine/cli.clj): agent CLI facade.
+- [`docs/`](docs/): public maintainer and user documentation.
+- [`spec/`](spec/): architecture record and design rationale.
+- [`test/fractal/engine/`](test/fractal/engine/): offline and opt-in live tests.
+
+Recommended docs:
+
+- [`docs/README.md`](docs/README.md): v1 overview.
+- [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md): SDK and CLI walkthrough.
+- [`docs/API.md`](docs/API.md): public API reference.
+- [`docs/AGENT_CONTROL_PLANE.md`](docs/AGENT_CONTROL_PLANE.md): CLI contract.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): runtime architecture.
+- [`docs/STORAGE_AND_HEADS.md`](docs/STORAGE_AND_HEADS.md): storage and heads.
+- [`docs/RECURSION.md`](docs/RECURSION.md): recursion semantics.
+- [`docs/TESTING.md`](docs/TESTING.md): validation guide.
+
+## Scope And Limitations
+
+- No engine-level spend governor yet. Leash live runs with config.
+- No true in-process security sandbox. The runtime is for trusted local use.
+- No vector retrieval or long-term memory layer.
+- No S3/AWS storage backend.
+- Live verification quality depends on the configured model.
 
 ## License
 
-[Apache-2.0](LICENSE).
+Apache-2.0. See [`LICENSE`](LICENSE).
