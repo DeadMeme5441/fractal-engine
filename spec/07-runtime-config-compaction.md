@@ -1,9 +1,9 @@
 # 07 · Runtime, Config, and Compaction
 
 This spec covers the runtime knobs and execution rules that the current engine
-actually implements. These settings are not decorative. They are the control
-plane for agents and supervising humans to leash work, inspect progress, and
-recover durable state.
+actually implements. These settings are not decorative. They are the runtime
+governor and control plane for agents and supervising humans to bound work,
+inspect progress, and recover durable state.
 
 Relevant namespaces:
 
@@ -391,7 +391,7 @@ source session.
 
 ## 12. Control-plane reading
 
-The runtime knobs here are the leashes and recovery points:
+The runtime knobs here are the governor controls and recovery points:
 
 - `:max-steps`
 - `:max-turns`

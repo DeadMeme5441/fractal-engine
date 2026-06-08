@@ -247,8 +247,12 @@ The important boundary is architectural: application code should depend on
 namespaces.
 
 For CLI-driven live runs, keep provider credentials outside tracked files and use
-a config profile with explicit leashes such as `:max-steps`, `:max-turns`,
-`:call-timeout-ms`, `:max-fanout`, and `:fanout-pool`.
+a config profile with the engine's runtime governor configured explicitly:
+`:max-steps`, `:max-turns`, `:call-timeout-ms`, `:max-fanout`,
+`:fanout-pool`, `:leaf-concurrency`, and the hard context-window threshold.
+
+Those controls bound execution. Provider usage/cost records, when available, are
+for observability and reporting.
 
 ## 7. Read Deeper
 

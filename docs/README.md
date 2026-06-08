@@ -53,6 +53,7 @@ flowchart TB
 | Durable sessions | SQLite event store, content-addressed BlobStore payloads, and `resume-session!` over the same `SessionStore` port. |
 | Recursive harness | Model-facing `lm`, `map-lm`, `rlm`, and `map-rlm` with fan-out, child sessions, capability inheritance, and config-only harness switching. |
 | Durable state graph | Immutable content-addressed heads, current-head publication, invocation and derivation lineage edges, and `attach-rlm` for deriving a fresh child from a prior head. |
+| Runtime governance | SCI capability profiles plus step, turn, deadline, fan-out, leaf-concurrency, and context-window limits with explicit terminal statuses. |
 | Agent control plane | Non-interactive CLI usage and inspection commands, config files, JSON/EDN output, payload hydration, trace readback, store checks, and compact reports. |
 
 The public namespace remains `fractal.engine.api` across both harness modes.
@@ -104,6 +105,28 @@ In `:rlm` harness mode, the model can choose among three levels of work:
 - `rlm` / `map-rlm` for fresh child sessions that run their own loop to `FINAL`;
 - `attach-rlm` to restore a selected immutable source head into a fresh derived
   child without advancing the source session.
+
+## Sandbox And Runtime Governance
+
+The engine has two built-in safety layers that embedding products should expose
+as run policy instead of reimplementing:
+
+- **Capability sandbox.** Model-written Clojure runs in SCI with a validated
+  capability profile. The default profile can read inside the work area, uses a
+  small read-only shell allowlist, denies writes and network, denies Java
+  interop, and injects only the engine host functions allowed by the profile.
+  `:locked-down` removes filesystem, shell, network, recursive model egress, and
+  interop. Overrides are clamped so a child cannot widen its parent profile.
+- **Runtime governor.** Config keys such as `:max-steps`, `:max-turns`,
+  `:call-timeout-ms`, `:max-fanout`, `:fanout-pool`, `:leaf-concurrency`, and
+  the hard context-window threshold bound loop depth, session length, provider
+  stalls, fan-out width, worker count, concurrent leaf calls, and context
+  exhaustion.
+
+The governor reports modeled outcomes (`:timeout`, `:budget-exceeded`,
+`:error`) rather than hiding failures. Provider usage/cost records, when
+available, are observability metadata. The governor's job is execution control,
+not billing or accounting.
 
 ## Quick Offline Taste
 
@@ -194,7 +217,9 @@ Clojure-shaped refs, such as payload refs returned by `turns`.
   details; the logical identifiers are session ids, payload ids, head ids, and
   lineage-edge ids.
 - No public fork-session lifecycle API in v1.
-- No total spend governor or alternate durable index in the core v1 scope.
+- No vector retrieval layer or alternate durable index in the core v1 scope.
+- No OS/container isolation layer; the built sandbox is the in-process SCI
+  capability boundary.
 
 ## Read Next
 
