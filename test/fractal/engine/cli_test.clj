@@ -129,6 +129,36 @@
         (is (= 2000 (count (get-in payload [:out :value])))))
       (finally (rm-rf! dir)))))
 
+(deftest trace-command-hydrates-model-code-and-observations
+  (let [dir (temp-dir!)
+        store-dir (.getPath (io/file dir "store"))
+        config-path (write-config!
+                      dir
+                      {:adapter :fake
+                       :model "fake-model"
+                       :harness :clojure
+                       :capability :default
+                       :store :sqlite
+                       :store/dir store-dir
+                       :fake/respond
+                       [["scan" "```clojure\n(def files (vec (range 3)))\n(count files)\n```"]
+                        ["Observation" "```clojure\n(FINAL {:n (count files)})\n```"]]})]
+    (try
+      (is (zero? (:code (cli-edn ["run" "--config" config-path "--session" "trace" "--message" "scan"]))))
+      (let [trace (cli-edn ["trace" "--config" config-path "--session" "trace"])
+            entries (get-in trace [:out :trace])]
+        (is (zero? (:code trace)))
+        (is (= {:n 3} (get-in trace [:out :turn/final-value])))
+        (is (= [:assistant :observation :assistant :observation]
+               (mapv :message/role entries)))
+        (is (str/includes?
+              (get-in entries [0 :message/content])
+              "(def files"))
+        (is (str/includes?
+              (get-in entries [1 :message/content])
+              "3")))
+      (finally (rm-rf! dir)))))
+
 (deftest non-final-turn-status-is-not-a-cli-preflight-failure
   (let [dir (temp-dir!)
         config-path (write-config!

@@ -4,7 +4,7 @@ The adapter is the engine's **only network seam**. The engine never speaks HTTP 
 provider-native tool protocols; it hands a narrowed request to an `LlmAdapter` and gets
 back one assistant response as a normalized call record. Everything above that seam is
 turns, steps, REPL state, recursion, and the durable API / CLI control plane used by
-agents; everything below it is the sibling SDK.
+agents; everything below it is the provider SDK dependency.
 `fractal.engine.adapter` (port) · `.sdk` / `.fake` (impls) · `.request` (request assembly).
 
 ---
@@ -227,7 +227,7 @@ engine concerns: prompt text, cache scope, payload hydration, and transcript com
 The adapter therefore receives exactly one assembled system message plus the kept
 transcript. There is no hidden tool state or side channel at this boundary.
 
-One related Phase 3/4 truth: a child or attached-child task is **not** a different system
+One related recursion truth: a child or attached-child task is **not** a different system
 prompt. Recursion uses the same `:rlm` doctrine prompt and adds the child assignment as a
 normal **user message frame** (`prompt/child-invocation-frame`).
 

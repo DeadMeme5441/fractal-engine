@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# fractal - agent-operable CLI wrapper for fractal-engine.
+#
+# Prefers the built uberjar. Without the jar it falls back to running from
+# source via the :cli alias.
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [[ -h "$src" ]]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+
+here="$(cd -P "$(dirname "$src")/.." && pwd)"
+jar="$here/target/fractal.jar"
+
+if [[ -f "$jar" ]]; then
+  exec java -jar "$jar" "$@"
+else
+  cd "$here"
+  exec clojure -M:cli "$@"
+fi

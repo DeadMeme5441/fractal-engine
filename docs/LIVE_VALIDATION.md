@@ -22,6 +22,16 @@ checks is usually enough.
 
 Before starting a live run:
 
+```mermaid
+flowchart LR
+  Offline["clojure -M:test"] --> Models["Choose provider and models"]
+  Models --> Env["Export credentials into JVM shell"]
+  Env --> Leashes["Set max steps, turns, timeout, fanout"]
+  Leashes --> Run["Run API or CLI specimen"]
+  Run --> Inspect["Inspect report, events, heads, trace"]
+  Inspect --> Sanitize["Record public-safe summary"]
+```
+
 1. Run the offline gate first:
 
    ```sh
@@ -145,6 +155,7 @@ clojure -M:cli messages --config .fractal/live-cli-validation/run-id/fractal.edn
 clojure -M:cli turns --config .fractal/live-cli-validation/run-id/fractal.edn --session live-normal
 clojure -M:cli steps --config .fractal/live-cli-validation/run-id/fractal.edn --session live-normal
 clojure -M:cli evals --config .fractal/live-cli-validation/run-id/fractal.edn --session live-normal
+clojure -M:cli trace --config .fractal/live-cli-validation/run-id/fractal.edn --session live-normal
 clojure -M:cli check --config .fractal/live-cli-validation/run-id/fractal.edn --session live-normal
 clojure -M:cli report --config .fractal/live-cli-validation/run-id/fractal.edn --session live-normal
 clojure -M:cli close --config .fractal/live-cli-validation/run-id/fractal.edn --session live-normal
@@ -169,6 +180,7 @@ The assertions should prove more than command exit status:
   sessions;
 - `compact` publishes a compaction head;
 - `check` returns `ok true`;
+- `trace` hydrates assistant code and observation messages for a turn;
 - `payload` hydrates a content-addressed value from a ref returned by `turns`;
 - `stop`, `close`, and `resume` work through durable reopen.
 

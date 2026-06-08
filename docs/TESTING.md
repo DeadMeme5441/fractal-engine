@@ -9,6 +9,20 @@ network access, or paid provider calls.
 Run the offline suite before merging runtime, storage, adapter, prompt, or public
 API changes:
 
+```mermaid
+flowchart LR
+  Diff["Tracked change"] --> Offline["clojure -M:test"]
+  Offline --> Hygiene["git diff --check"]
+  Hygiene --> Package{"Packaging touched?"}
+  Package -- yes --> Build["jar + uber + java -jar help"]
+  Package -- no --> Done["Ready for review"]
+  Build --> Done
+  Done --> Live{"Provider path touched?"}
+  Live -- yes --> Matrix["Optional live suite or CLI matrix"]
+  Live -- no --> Report["Report evidence"]
+  Matrix --> Report
+```
+
 ```sh
 clojure -M:test
 ```
@@ -33,8 +47,14 @@ Run the patch hygiene check for every documentation or source change:
 git diff --check
 ```
 
-There is no `:evals-test` alias on this branch. Do not document it or treat it as
-part of the v1 gate unless the alias is actually added.
+For packaging or release workflow changes, also build both artifacts and smoke
+the CLI jar:
+
+```sh
+clojure -T:build jar
+clojure -T:build uber
+java -jar target/fractal.jar help
+```
 
 ## Optional Live Suite
 
@@ -57,8 +77,8 @@ flaky for provider reasons, and paid.
 For CLI/control-plane changes, also run a live command matrix through
 `clojure -M:cli` as described in [Live Validation](LIVE_VALIDATION.md). A
 complete matrix should exercise usage commands, inspection commands, recursive
-tree readback, compaction, stop/close/reopen behavior, and payload hydration from
-a stored ref.
+tree readback, trace readback, compaction, stop/close/reopen behavior, and
+payload hydration from a stored ref.
 
 ## Live Leashes
 
@@ -106,15 +126,15 @@ matches are documentation about what not to commit.
 
 ## Long-Horizon Dogfood Specimens
 
-Long-horizon specimens are not release gates yet, but they are the right shape
-for future confidence work. Useful specimens should cover:
+Use long-horizon specimens when the change needs evidence beyond deterministic
+unit tests. Useful specimens should cover:
 
 - many-turn continuity with persistent working state;
 - stop, close, resume, and continue from durable state;
 - branch or attach from a prior head without advancing the source;
 - child and leaf decomposition under explicit fan-out and timeout limits;
 - agent-driven CLI usage with human-observed JSON or EDN artifacts;
-- partial failure where sibling lanes still produce usable results;
+- partial failure where other lanes still produce usable results;
 - artifact growth over time, including payload hydration and missing/corrupt
   blob behavior;
 - live-provider cost and usage envelopes, reported without assuming all

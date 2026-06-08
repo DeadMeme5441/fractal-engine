@@ -1,129 +1,345 @@
 # fractal-engine
 
-A small **recursive language-model compute engine**. A model drives a persistent
-Clojure REPL: it writes fenced Clojure, the host evaluates it in a sandboxed
-interpreter and returns a compact observation, and the loop repeats until the model
-calls `(FINAL value)`. Some of the functions the model can call are *themselves*
-language models — so a problem can be decomposed into sub-problems, each solved by a
-fresh recursion of the same loop.
+fractal-engine is a recursive language-model compute engine for long-context,
+long-horizon work. A root model drives a persistent Clojure REPL, writes fenced
+Clojure, receives compact host observations, and continues until it calls
+`(FINAL value)`.
 
-> **Phases 1, 2, 3 & 4 are built.** The complete non-recursive session core — the uniform
-> step loop, the SCI eval kernel, the capability sandbox, the event-sourced state
-> port, the adapter (sdk + fake), the public API, config, live-query, and compaction
-> — is implemented from **[`spec/`](spec/)** under the `fractal.engine.*` namespace
-> root, plus **Phase 2 durable storage**: a SQLite `SessionStore` + a file-based,
-> content-addressed blob store slotted under the *same* port (zero loop changes), and
-> durable `resume-session!`. **Phase 3 adds the RLM recursion layer**: the four
-> model-calling host fns (`lm`/`map-lm` leaves, `rlm`/`map-rlm` children) and a
-> **hot-swap** between a plain coding harness and the recursive harness *by config
-> alone*. **Phase 4 adds the durable recursion data model**: immutable content-addressed
-> heads, current-head publication, invocation/derivation lineage edges, and
-> `attach-rlm` for deriving a fresh child from a prior session/head. `clojure -M:test`
-> is green offline with no API keys, and a live codex-OAuth
-> suite drives real recursion end to end (`clojure -M:live-test`).
->
-> The spec in `spec/` (`00`–`12`) is the source of truth and is deliberately
-> complete on its own. (A v1 reference implementation lives in the sibling
-> directories `../fractal-engine` and `../fractal-engine-seeing`.)
+The engine is built as a Clojure SDK plus an agent-operable CLI/control plane.
+It is not a consumer chat app and not a repository-analysis product. It is a
+small runtime substrate for durable model-driven work:
 
-## Quick start
+- exact work happens in Clojure;
+- bounded judgment happens through `lm` and `map-lm`;
+- recursive work happens through child sessions via `rlm` and `map-rlm`;
+- reusable prior state is derived through `attach-rlm`;
+- durable state is stored in SQLite plus content-addressed payload blobs;
+- every completed turn publishes an immutable head for resume and lineage.
+
+```mermaid
+flowchart LR
+  A["Caller or agent"] --> B["fractal.engine.api"]
+  A --> C["fractal CLI"]
+  C --> B
+  B --> D["Session loop"]
+  D --> E["Persistent Clojure REPL"]
+  D --> F["Provider adapter"]
+  E --> G["FINAL / lm / rlm calls"]
+  D --> H["SQLite event store"]
+  D --> I["BlobStore payloads"]
+  H --> J["Views, heads, lineage"]
+  I --> J
+```
+
+## Capabilities
+
+The public Clojure facade is `fractal.engine.api`. The CLI facade is
+`fractal.engine.cli`, exposed by `clojure -M:cli` and by the `bin/fractal`
+wrapper.
+
+| Capability | What it gives you |
+| --- | --- |
+| Persistent sessions | A model works inside a durable Clojure session whose vars can survive turns and process restarts. |
+| Exact host work | Model-written fenced Clojure runs in a capability-clamped SCI context and returns compact observations. |
+| Provider adapter seam | Offline fake runs and live provider runs share the same runtime path. |
+| Recursive harness | `lm`, `map-lm`, `rlm`, `map-rlm`, and `attach-rlm` let the model choose bounded leaf judgment, child sessions, fan-out, or derived continuation. |
+| Durable storage | SQLite stores events and session rows; BlobStore stores content-addressed payload bytes. |
+| Immutable heads | Completed turns publish continuation heads used by resume, attach, and lineage inspection. |
+| Agent control plane | The CLI drives usage commands and read-only inspection commands with JSON/EDN output and explicit config files. |
+
+## Requirements
+
+- JDK 21 or newer
+- Clojure CLI
+
+Check locally:
+
+```sh
+java -version
+clojure --version
+```
+
+## Quick Start: CLI, Offline
+
+Create a local config file and durable store. This uses the fake adapter, so it
+does not need provider credentials, network access, or paid calls.
+
+```sh
+clojure -M:cli init \
+  --config fractal.edn \
+  --store-dir .fractal/sessions/demo \
+  --session demo
+```
+
+Run one turn and inspect the result:
+
+```sh
+clojure -M:cli run \
+  --config fractal.edn \
+  --session demo \
+  --message "return a small value" \
+  --pretty
+
+clojure -M:cli report \
+  --config fractal.edn \
+  --session demo \
+  --pretty
+```
+
+Trace the model code and engine observations for the latest turn:
+
+```sh
+clojure -M:cli trace \
+  --config fractal.edn \
+  --session demo \
+  --pretty
+```
+
+The default CLI output is JSON. Use `--edn` when exact Clojure-shaped values
+matter, especially payload refs:
+
+```sh
+clojure -M:cli turns --config fractal.edn --session demo --edn
+```
+
+## Quick Start: SDK, Offline
 
 ```clojure
 (require '[fractal.engine.api :as fe])
 
-;; offline, no keys — the FakeAdapter scripts the model
-(def cfg (fe/make-config {:adapter :fake :model "fake-model" :capability :default
-                          :fake/respond (fe/responder
-                                          [[:default "```clojure (FINAL {:answer 42})```"]])}))
-(def s   (fe/start-session! cfg))
-(def res (fe/run-turn! s "What is 6 times 7?"))
-(:turn/final-value res)   ;=> {:answer 42}
+(def cfg
+  (fe/make-config
+    {:adapter :fake
+     :model "fake-model"
+     :capability :default
+     :fake/respond
+     (fe/responder
+       [[:default "```clojure\n(FINAL {:answer 42})\n```"]])}))
 
-;; live — a real provider via the sibling SDK (model resolves the provider)
-(def cfg (fe/make-config {:adapter :sdk :model "deepseek-chat" :capability :default}))
+(def session (fe/start-session! cfg))
+(def result (fe/run-turn! session "What is 6 times 7?"))
+
+(:status result)
+;; => :final
+
+(:turn/final-value result)
+;; => {:answer 42}
+
+(fe/stop-session! session)
 ```
 
-The session stays live across turns; `def`'d REPL vars persist; each `run-turn!`
-returns when the model calls `FINAL`.
+## Durable Sessions
 
-### Durable sessions (Phase 2)
-
-Add `:store :sqlite :store/dir "..."` and the event log + content-addressed blobs
-persist to disk. Close the handle, then `resume-session!` reopens it — folding the
-durable log and restoring the live REPL vars — so a new turn can use state from
-before the restart:
+Use `:store :sqlite` and a relative `:store/dir` when a session should survive
+process restart:
 
 ```clojure
-(def cfg (fe/make-config {:adapter :fake :model "fake-model" :capability :default
-                          :store :sqlite :store/dir "/tmp/fe-demo"
-                          :fake/respond (fe/responder
-                                          [["define" "```clojure (def x 7) (FINAL :ok)```"]
-                                           ["use"    "```clojure (FINAL (* x 6))```"]])}))
-(def s (fe/start-session! cfg {:id "demo"}))
-(fe/run-turn! s "define the value")     ;=> {:status :final :turn/final-value :ok}
-(fe/close-session! s)                   ; releases the connection (e.g. process exit)
+(def cfg
+  (fe/make-config
+    {:adapter :fake
+     :model "fake-model"
+     :capability :default
+     :store :sqlite
+     :store/dir ".fractal/sessions/sdk-demo"
+     :fake/respond
+     (fe/responder
+       [["define" "```clojure\n(def remembered 7)\n(FINAL :defined)\n```"]
+        ["use" "```clojure\n(FINAL (* remembered 6))\n```"]])}))
 
-(def s2 (fe/resume-session! cfg "demo")) ; fresh process: fold the log + restore vars
-(:turn/final-value (fe/run-turn! s2 "use it")) ;=> 42  (x survived the reopen)
+(def first-handle (fe/start-session! cfg {:id "sdk-demo"}))
+(fe/run-turn! first-handle "define")
+(fe/close-session! first-handle)
+
+(def reopened (fe/resume-session! cfg "sdk-demo"))
+(:turn/final-value (fe/run-turn! reopened "use"))
+;; => 42
 ```
 
-### The recursion layer + the hot-swap (Phase 3)
+Resume restores from the published current head. It does not replay provider
+calls or old evals.
 
-Two harnesses live in one repo, **selected by config alone** (`:harness`, default
-`:clojure`):
+## Recursive Harness
 
-- **`:clojure`** — the plain coding harness. The REPL exposes only `FINAL`/`inspect`
-  and the Phase-1 prompt. Byte-for-byte the Phase-1/2 behaviour.
-- **`:rlm`** — the recursive harness. The REPL *also* exposes four model-calling host
-  fns, `attach-rlm`, and the model gets the recursion doctrine:
-  - `(lm input query [mode])` / `(map-lm inputs query [mode])` — **leaves**: one bounded
-    model call (no session, no loop); `map-lm` fans out over ≤50 inputs, order-preserved.
-  - `(rlm task)` / `(map-rlm tasks [shared])` — **children**: a fresh recursion (its own
-    SCI ctx + session, capability inherited-and-clamped) running the whole loop to
-    `FINAL`; returns an envelope `{:rlm/value … :rlm/session … :rlm/meta …}`.
-  - `(attach-rlm handle task [opts])` — **reuse**: restore a prior session/head into a
-    fresh derived child, run `task`, and return the same envelope shape. The source
-    session is not advanced; lineage records the derivation edge.
+Set `:harness :rlm` to expose the recursive model-facing surface inside the
+session REPL:
 
-Switching is zero code edits — it drives both the system prompt and the injected fns.
-The capability profile still gates egress: **`:locked-down` drops `lm`/`rlm`**.
+```text
+FINAL
+lm
+map-lm
+rlm
+map-rlm
+attach-rlm
+```
+
+The outer SDK and CLI call shape stays the same. The model decides whether to
+use ordinary Clojure, a bounded leaf call, or a child session.
+
+Use the smallest sufficient kind:
+
+- Clojure for parsing, counting, grouping, joining, validation, and final shape
+  construction.
+- `lm` / `map-lm` for bounded semantic judgments.
+- `rlm` / `map-rlm` for subproblems that need their own loop and state.
+- `attach-rlm` to derive a fresh child from a selected prior head without
+  advancing the source session.
+
+## CLI Surface
+
+Run:
+
+```sh
+clojure -M:cli <command> [options] [args]
+```
+
+or build the wrapper target and call:
+
+```sh
+bin/fractal <command> [options] [args]
+```
+
+Usage commands:
+
+```text
+init config start run turn resume stop close compact wait
+```
+
+Inspection commands:
+
+```text
+status progress view events heads head edges tree payload messages turns steps evals trace check report
+```
+
+The CLI is designed for agents and scripts first. It is non-interactive by
+default, uses explicit config files and session ids, emits structured output, and
+keeps payload hydration explicit.
+
+Full CLI docs: [`docs/AGENT_CONTROL_PLANE.md`](docs/AGENT_CONTROL_PLANE.md).
+
+## Live Providers
+
+Provider-backed runs use `:adapter :sdk`, a provider id, model ids, and provider
+configuration supplied by your runtime environment or local secret manager. Keep
+credentials out of tracked files.
+
+For live recursion, set explicit leashes:
+
+```edn
+{:adapter :sdk
+ :provider :provider-key
+ :model "root-model-id"
+ :harness :rlm
+ :child-model "child-model-id"
+ :leaf-model "leaf-model-id"
+ :store :sqlite
+ :store/dir ".fractal/sessions/live-demo"
+ :max-steps 8
+ :max-turns 4
+ :call-timeout-ms 90000
+ :max-fanout 4
+ :fanout-pool 2
+ :leaf-concurrency 2
+ :cache-ttl "5m"}
+```
+
+Live validation is opt-in and may spend money. See
+[`docs/LIVE_VALIDATION.md`](docs/LIVE_VALIDATION.md).
+
+## Build And Release
+
+Build the thin library jar:
+
+```sh
+clojure -T:build jar
+```
+
+Build the CLI uberjar:
+
+```sh
+clojure -T:build uber
+java -jar target/fractal.jar help
+```
+
+Install the library jar into the local Maven repository:
+
+```sh
+clojure -T:build install
+```
+
+Release automation is tag-driven. Pushing a `v*` tag from a commit that contains
+the release workflow will:
+
+1. run the offline test suite;
+2. build the library jar;
+3. publish the library to Clojars using `CLOJARS_USERNAME` and
+   `CLOJARS_PASSWORD` repository secrets;
+4. build and smoke-test the CLI uberjar;
+5. create a GitHub release with `target/fractal.jar`.
+
+The release version is derived from the tag name without the leading `v`.
+
+## Use As A Dependency
+
+After a release is published, depend on the Clojars coordinate:
 
 ```clojure
-;; codex via OAuth (creds read from ~/.codex/auth.json); :provider is explicit because
-;; codex model ids resolve to :openai in the catalog.
-(def cfg (fe/make-config {:adapter :sdk :provider :codex-backend :model "gpt-5.5"
-                          :harness :rlm :capability :default}))
-(def s (fe/start-session! cfg))
-;; the model decomposes via map-rlm / map-lm and aggregates in Clojure
-(fe/run-turn! s "Sum each of these 8 CSV blobs' amount column …")
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.1.0"}}}
 ```
 
-`:turn/usage`/`:turn/cost` stay **self-only** at the root; each child's cost rides its
-envelope's `:rlm/meta`. Partial fan-out never throws — a failed slot is a
-`{:fractal/failed true …}` sentinel. Children are ordinary sessions in the same store,
-so Phase-2 durability + `resume-session!` work in `:rlm` mode too. Every successful
-turn publishes an immutable Merkle head; `rlm` records invocation edges and
-`attach-rlm` records derivation edges.
+Then use the public facade:
 
-## Develop
+```clojure
+(require '[fractal.engine.api :as fe])
+```
 
-- `clojure -M:test` — the full offline suite (incl. the pinned SCI sandbox test,
-  the snapshot/restore round-trip, the recursion suite — leaves/children/nested/
-  fan-out/partial-failure/clamp/hot-swap/resume — and the namespace-graph acyclicity
-  test). No API keys; never a paid call.
-- `clojure -M:live-test` — the optional live suite. The codex-OAuth recursion proofs
-  run from `~/.codex/auth.json` (no env key needed); the deepseek smoke test runs only
-  if `DEEPSEEK_API_KEY` is set. Never on the default/CI path; makes paid calls.
-- `clojure -M:dev -e "(require 'seeing) (seeing/demo)"` — the RUNS/SEES dev harness:
-  prints the model's code beside the engine's fit-or-stub observations.
+Do not depend on internal runtime namespaces unless you are contributing to the
+engine itself.
 
-## What to read
+## Validate
 
-- **[`spec/README.md`](spec/README.md)** — index, golden rules, the document map.
-- **[`spec/00-vision-and-scope.md`](spec/00-vision-and-scope.md)** — what this is and why.
-- **[`spec/01-architecture.md`](spec/01-architecture.md)** — layers, ontology, the acyclic dependency manifest.
+Default offline gate:
 
-## Stack
+```sh
+clojure -M:test
+git diff --check
+```
 
-Clojure on the JVM · model-code eval via **SCI** (`org.babashka/sci`) · provider
-access via the sibling **clojure-llm-sdk**. JDK 21+ and the Clojure CLI.
+Optional live suite:
+
+```sh
+clojure -M:live-test
+```
+
+The default test alias excludes `^:live` tests and should not make network calls
+or require credentials.
+
+## Project Map
+
+- [`src/fractal/engine/api.clj`](src/fractal/engine/api.clj): public SDK facade.
+- [`src/fractal/engine/cli.clj`](src/fractal/engine/cli.clj): agent CLI facade.
+- [`docs/`](docs/): public maintainer and user documentation.
+- [`spec/`](spec/): architecture record and design rationale.
+- [`test/fractal/engine/`](test/fractal/engine/): offline and opt-in live tests.
+
+Recommended docs:
+
+- [`docs/README.md`](docs/README.md): v1 overview.
+- [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md): SDK and CLI walkthrough.
+- [`docs/API.md`](docs/API.md): public API reference.
+- [`docs/AGENT_CONTROL_PLANE.md`](docs/AGENT_CONTROL_PLANE.md): CLI contract.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): runtime architecture.
+- [`docs/STORAGE_AND_HEADS.md`](docs/STORAGE_AND_HEADS.md): storage and heads.
+- [`docs/RECURSION.md`](docs/RECURSION.md): recursion semantics.
+- [`docs/TESTING.md`](docs/TESTING.md): validation guide.
+
+## Scope And Limitations
+
+- No engine-level spend governor yet. Leash live runs with config.
+- No true in-process security sandbox. The runtime is for trusted local use.
+- No vector retrieval or long-term memory layer.
+- No S3/AWS storage backend.
+- Live verification quality depends on the configured model.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).

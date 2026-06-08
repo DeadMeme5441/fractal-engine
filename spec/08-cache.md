@@ -2,7 +2,7 @@
 
 Prompt caching is a **host-owned request contract**. The engine chooses a stable cache
 identity, derives deterministic scope ids, and forwards one opaque cache map on each
-provider request. The sibling SDK owns all provider-specific marker placement.
+provider request. The provider SDK dependency owns all provider-specific marker placement.
 `fractal.engine.cache`.
 
 ---
@@ -181,7 +181,7 @@ So the durable turn-level cache accounting is:
              :cache/cache-write-tokens <int> | :unknown}
 ```
 
-Two important Phase 3/4 consequences follow from the current implementation:
+Two important recursion consequences follow from the current implementation:
 
 - **leaf calls send cache opts but do not persist their own call records**, so leaf cache
   result stats do **not** currently surface as separate durable cache accounting on the

@@ -201,7 +201,8 @@ to be true before moving on"; all of it is now reflected in the current tree.
   that constructs the adapter (sdk from the catalog provider-id; fake from `:fake/respond`)
   and stashes cfg+adapter on the handle, resets the `sci-ctx` atom after create, and sets
   `:session/system-overlay` from opts.
-- **DoD:** a full turn arc to `FINAL` with the fake adapter (verify via RUNS/SEES); each
+- **DoD:** a full turn arc to `FINAL` with the fake adapter (inspect through the
+  CLI `trace` command when human readback is needed); each
   step appends `:step/started` **before** the adapter call, so a live observer sees the
   step in flight; the deadline wraps the single adapter call; async delivers a result map
   and **always releases `busy` before delivering** (even if `error-result` throws);
@@ -217,8 +218,11 @@ to be true before moving on"; all of it is now reflected in the current tree.
   reads `current-view` then `live/progress`. Nothing else public.
 - **DoD:** the end-to-end example (06 §7) runs green offline.
 
-### 11. Dev harness (recommended) — `dev/seeing`
-- The RUNS/SEES tool (10 §2). Behind a `:dev` path; never in the build.
+### 11. Trace readback — CLI `trace`
+- Human inspection of model code and engine observations lives in the public
+  control-plane seam: `clojure -M:cli trace --config ... --session ...`. The old
+  standalone trace harness has been retired so diagnostic readback uses the same
+  config/session/output contract as agents.
 
 > After step 10, Phase 1 **was** complete: a fresh session could run the full offline
 > suite green with no credentials, and `start-session!` / `run-turn!` could drive a real

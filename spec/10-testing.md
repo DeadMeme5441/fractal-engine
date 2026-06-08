@@ -144,7 +144,7 @@ just happy-path construction.
   source head without advancing the source session.
 
 - **Recursive partial failure.** One bad leaf parse or one budget-exhausted child
-  lane turns into an index-aligned sentinel; sibling lanes still return normally.
+  lane turns into an index-aligned sentinel; other lanes still return normally.
 
 ---
 
@@ -185,13 +185,20 @@ extra run is useful because it proves the recursion/runtime path is not only gre
 on the checked-in live provider family. It is **evidence**, not yet a checked-in
 default lane.
 
-### Manual RUNS / SEES harness
+### CLI trace readback
 
-A `:dev` RUNS / SEES harness still exists for human inspection. It drives the real
-session loop and prints what the model **RUNS** beside what the engine **SEES**,
-plus the full FINAL value. It is useful for tuning observation shape and for
-understanding multi-step / recursive behavior, but it is a manual diagnostic tool,
-not an automated gate.
+The old standalone trace harness has been retired. Human inspection now goes
+through the public control-plane seam:
+
+```sh
+clojure -M:cli trace --config fractal.edn --session demo --pretty
+```
+
+`trace` reopens a durable session, selects a turn, hydrates assistant code and
+observation messages, and includes the hydrated final value when a final ref is
+present. It is useful for tuning observation shape and for understanding
+multi-step / recursive behavior, but it is a diagnostic command, not an
+automated gate.
 
 ---
 
@@ -215,9 +222,9 @@ recursive continuity program.
   correctness under bounded fan-out and durable reopen, but not long-running store
   growth, large-blob churn, or cost-envelope stability over time.
 
-- **The RUNS / SEES harness is a developer tool, not a tested contract.** It is useful
-  for observation-surface tuning, but its exact printed output is not currently
-  asserted by an automated test.
+- **The CLI trace view is diagnostic, not a full semantic verifier.** It is useful
+  for observation-surface tuning, and its core hydration path is covered by CLI
+  tests, but pretty rendering is not the proof of runtime correctness.
 
 - **Prompt quality is only partly pinned.** Cache ids and prompt stamping are tested,
   but real-provider behavior quality still depends on live scenario choice and manual

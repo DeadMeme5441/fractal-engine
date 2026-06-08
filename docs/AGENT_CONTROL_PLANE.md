@@ -77,6 +77,18 @@ attach-rlm
 
 The CLI has two command families.
 
+```mermaid
+flowchart LR
+  Agent["Shell agent or script"] --> CLI["fractal CLI"]
+  CLI --> Usage["Usage commands"]
+  CLI --> Inspect["Inspection commands"]
+  Usage --> API["fractal.engine.api writes"]
+  Inspect --> Reads["API reads and payload hydration"]
+  API --> Store["Durable session store"]
+  Store --> Reads
+  Reads --> Output["JSON or EDN output"]
+```
+
 Usage commands create, resume, mutate, or close durable runtime state:
 
 | Command | Purpose |
@@ -90,7 +102,7 @@ Usage commands create, resume, mutate, or close durable runtime state:
 | `stop` | Request stop on a durable session. |
 | `close` | Reopen and immediately close resources. |
 | `compact` | Force session compaction through the engine API. |
-| `wait` | Reopen and report current status; cross-process async waiting is not implemented. |
+| `wait` | Reopen and report the latest session state; cross-process async waiting is not implemented. |
 
 Inspection commands read durable state without making provider calls, except
 where the engine API being invoked explicitly does work such as compaction:
@@ -110,6 +122,7 @@ where the engine API being invoked explicitly does work such as compaction:
 | `turns` | Folded turn projection. |
 | `steps` | Folded step projection. |
 | `evals` | Folded eval projection. |
+| `trace` | Hydrated assistant code and observation messages for one turn, plus final value when present. |
 | `check` | Store sanity check for known sessions and payload refs. |
 | `report` | Human-observable compact summary of the latest session state. |
 
@@ -285,6 +298,12 @@ clojure -M:cli turns --config fractal.edn --session demo --edn > turns.edn
 clojure -M:cli payload --config fractal.edn --session demo --ref "$payload_ref" --pretty
 ```
 
+Read the model-code / engine-observation trace for the latest turn:
+
+```sh
+clojure -M:cli trace --config fractal.edn --session demo --pretty
+```
+
 Run the local integrity check:
 
 ```sh
@@ -327,9 +346,10 @@ not open or address the session.
 current `wait` command reopens durable state and reports status; it does not
 attach to a background turn owned by another CLI process.
 
-If a future process-control layer adds background ownership, it should return a
-durable turn id synchronously, expose progress through events, and recover from
-disconnects with `events`.
+Background turn ownership belongs in a separate process-control adapter if this
+repo grows one. The current CLI contract is explicit process-per-command usage:
+write commands open or resume a session, perform one action, return structured
+output, and release process-local resources.
 
 ## Public-Safe Output
 

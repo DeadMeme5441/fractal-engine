@@ -14,6 +14,19 @@ A session is a persistent working state. A turn appends new work to that state u
 `FINAL` returns a value for the turn. After `FINAL`, the session remains alive for
 future turns, and its current head becomes the authoritative continuation point.
 
+```mermaid
+flowchart LR
+  T1["Turn 1 FINAL"] --> H1["Head 1"]
+  H1 --> T2["Turn 2 FINAL"]
+  T2 --> H2["Current head"]
+  H1 --> ATTACH["attach-rlm"]
+  ATTACH --> D1["Derived child head"]
+  T2 --> CHILD["rlm child"]
+  CHILD --> C1["Child head"]
+  H2 --> RESUME["resume-session!"]
+  RESUME --> T3["Later turn"]
+```
+
 Operators steer the root session over time. They can narrow scope, provide new
 evidence, reject a branch, ask for a different decomposition, or attach from a
 useful prior head. The engine should preserve enough state for those steering moves

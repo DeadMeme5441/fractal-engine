@@ -1,4 +1,4 @@
-# fractal-engine v1
+# fractal-engine Docs
 
 fractal-engine is a recursive language-model compute engine for long-context,
 long-horizon work. A root model drives a persistent Clojure REPL, writes fenced
@@ -28,16 +28,32 @@ Use this repo if you are building:
 It is also useful for studying a minimal architecture for model-driven code eval
 with explicit storage and capability boundaries.
 
-## What Is Built
+## Capability Map
 
-v1 implements Phases 1-4:
+```mermaid
+flowchart TB
+  U["Clojure caller or shell agent"] --> API["fractal.engine.api"]
+  U --> CLI["fractal CLI"]
+  CLI --> API
+  API --> LOOP["Session loop"]
+  LOOP --> REPL["Persistent SCI Clojure REPL"]
+  LOOP --> ADAPTER["Fake or SDK adapter"]
+  REPL --> HOST["FINAL / lm / rlm host functions"]
+  LOOP --> STORE["SessionStore port"]
+  STORE --> MEM["MemoryStore"]
+  STORE --> SQL["SQLite events"]
+  SQL --> BLOB["Content-addressed BlobStore"]
+  SQL --> VIEWS["Views, heads, lineage, reports"]
+  BLOB --> VIEWS
+```
 
-| Phase | Built capability |
+| Capability | Built surface |
 | --- | --- |
-| 1 | Session core: persistent SCI-backed Clojure REPL, step loop, capability sandbox, in-memory store, fake/provider adapter seam, public API, live query, compaction. |
-| 2 | Durable sessions: SQLite event store, content-addressed BlobStore payloads, and `resume-session!` over the same `SessionStore` port. |
-| 3 | Recursive harness: model-facing `lm`, `map-lm`, `rlm`, and `map-rlm` with fan-out, child sessions, capability inheritance, and config-only harness switching. |
-| 4 | Durable recursion state graph: immutable content-addressed heads, current-head publication, invocation and derivation lineage edges, and `attach-rlm` for deriving a fresh child from a prior head. |
+| Session core | Persistent SCI-backed Clojure REPL, step loop, capability sandbox, fake/provider adapter seam, public API, live readback, and compaction. |
+| Durable sessions | SQLite event store, content-addressed BlobStore payloads, and `resume-session!` over the same `SessionStore` port. |
+| Recursive harness | Model-facing `lm`, `map-lm`, `rlm`, and `map-rlm` with fan-out, child sessions, capability inheritance, and config-only harness switching. |
+| Durable state graph | Immutable content-addressed heads, current-head publication, invocation and derivation lineage edges, and `attach-rlm` for deriving a fresh child from a prior head. |
+| Agent control plane | Non-interactive CLI usage and inspection commands, config files, JSON/EDN output, payload hydration, trace readback, store checks, and compact reports. |
 
 The public namespace remains `fractal.engine.api` across both harness modes.
 The recursive functions are injected into the model's session REPL; they are not
@@ -47,20 +63,34 @@ The command-line control plane is also built. It is a thin process seam over the
 API with usage commands (`init`, `config`, `start`, `run`, `turn`, `resume`,
 `stop`, `close`, `compact`, `wait`) and inspection commands (`status`,
 `progress`, `view`, `events`, `heads`, `head`, `edges`, `tree`, `payload`,
-`messages`, `turns`, `steps`, `evals`, `check`, `report`). See
+`messages`, `turns`, `steps`, `evals`, `trace`, `check`, `report`). See
 [Agent Control Plane](AGENT_CONTROL_PLANE.md).
 
 ## Mental Model
 
 One turn follows one loop:
 
-```text
-user message
-  -> model response with fenced Clojure
-  -> host evaluates in the session REPL
-  -> host appends one compact observation
-  -> model continues
-  -> (FINAL value)
+```mermaid
+sequenceDiagram
+  participant Caller
+  participant Loop
+  participant Model
+  participant REPL as Session REPL
+  participant Store
+
+  Caller->>Loop: run-turn! / CLI run
+  Loop->>Store: append user message and turn start
+  Loop->>Model: request with kept transcript
+  Model-->>Loop: assistant text with fenced Clojure
+  Loop->>REPL: evaluate blocks
+  REPL-->>Loop: eval records and FINAL status
+  Loop->>Store: append assistant, evals, observation
+  alt no FINAL yet
+    Loop->>Model: next request with observation
+  else FINAL
+    Loop->>Store: snapshot vars and publish head
+    Loop-->>Caller: TurnResult
+  end
 ```
 
 The session remains live after `FINAL`. Vars defined during earlier turns can be
@@ -121,14 +151,26 @@ Clojure-shaped refs, such as payload refs returned by `turns`.
 
 ## Repository Map
 
-- [`README.md`](../README.md): concise repo-level status and examples.
-- [`spec/`](../spec/): source-of-truth architecture record for v1.
-- [`spec/00-vision-and-scope.md`](../spec/00-vision-and-scope.md): engine thesis,
-  scope, model-facing surface, and anti-goals.
-- [`spec/01-architecture.md`](../spec/01-architecture.md): layers, ontology,
-  turn flow, recursion flow, namespace map, and dependency DAG.
-- [`spec/06-public-api.md`](../spec/06-public-api.md): exported
-  `fractal.engine.api` functions and result contracts.
+- [`README.md`](../README.md): concise repo-level orientation and examples.
+- [`GETTING_STARTED.md`](GETTING_STARTED.md): offline API and CLI walkthrough.
+- [`API.md`](API.md): supported `fractal.engine.api` functions and result
+  contracts.
+- [`AGENT_CONTROL_PLANE.md`](AGENT_CONTROL_PLANE.md): CLI command families,
+  config files, output contract, and inspection workflows.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): runtime layers, turn flow, recursion,
+  storage authority, and failure semantics.
+- [`STORAGE_AND_HEADS.md`](STORAGE_AND_HEADS.md): SQLite/BlobStore authority,
+  payload refs, folded views, immutable heads, and lineage edges.
+- [`RECURSION.md`](RECURSION.md): how to choose Clojure, leaf calls, child
+  calls, fan-out, and attach.
+- [`LONG_HORIZON_WORK.md`](LONG_HORIZON_WORK.md): how to shape durable
+  multi-turn work.
+- [`TESTING.md`](TESTING.md): offline gate, optional live validation, packaging
+  checks, and public-safety scans.
+- [`LIVE_VALIDATION.md`](LIVE_VALIDATION.md): provider-backed validation and CLI
+  live matrix.
+- [`OPERATIONS.md`](OPERATIONS.md): maintenance, artifacts, release automation,
+  and incident notes.
 - [`src/fractal/engine/api.clj`](../src/fractal/engine/api.clj): supported SDK
   facade.
 - [`src/fractal/engine/cli.clj`](../src/fractal/engine/cli.clj): agent-operable
@@ -137,7 +179,9 @@ Clojure-shaped refs, such as payload refs returned by `turns`.
   sessions, storage, recursion, adapter ports, payload IO, compaction, and live
   readback.
 - [`test/fractal/engine/`](../test/fractal/engine/): offline proof suite,
-  including fake-adapter, storage, recursion, and Phase 4 tests.
+  including fake-adapter, storage, recursion, heads, and lineage tests.
+- [`spec/`](../spec/): detailed design record, including build history and
+  lower-level implementation rationale.
 
 ## What It Intentionally Does Not Build
 

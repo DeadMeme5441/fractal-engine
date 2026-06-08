@@ -8,6 +8,20 @@ maintainers and contributors.
 
 The v1 runtime separates durable truth from projections:
 
+```mermaid
+flowchart LR
+  SESSION["Session id"] --> EVENTS["SQLite event rows"]
+  EVENTS --> VIEW["Folded view"]
+  EVENTS --> HEADS["Immutable heads"]
+  EVENTS --> EDGES["Lineage edges"]
+  LARGE["Large values"] --> BLOBS["BlobStore bytes"]
+  BLOBS --> REFS["Payload refs"]
+  REFS --> EVENTS
+  HEADS --> CURRENT["current-head pointer"]
+  CURRENT --> RESUME["resume-session!"]
+  CURRENT --> ATTACH["attach-rlm source selection"]
+```
+
 1. SQLite is canonical for durable session rows and per-session event rows when
    `:store :sqlite` is selected.
 2. BlobStore is canonical for content-addressed payload bytes.
@@ -343,4 +357,4 @@ The current storage model is exercised by:
 - `test/fractal/engine/payload_test.clj`
 - `test/fractal/engine/payload_io_test.clj`
 - `test/fractal/engine/session_test.clj`
-- `test/fractal/engine/phase4_test.clj`
+- head and lineage regression tests under `test/fractal/engine/`

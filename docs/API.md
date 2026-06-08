@@ -13,6 +13,21 @@ session runtimes; they are not ordinary vars exported from this namespace.
 (require '[fractal.engine.api :as fe])
 ```
 
+```mermaid
+flowchart LR
+  CFG["make-config"] --> START["start-session!"]
+  CFG --> RESUME["resume-session!"]
+  START --> RUN["run-turn! / run-turn-async!"]
+  RESUME --> RUN
+  RUN --> READS["view / progress / events-since / read-payload"]
+  RUN --> COMPACT["compact-session!"]
+  COMPACT --> READS
+  START --> STOP["stop-session!"]
+  RESUME --> CLOSE["close-session!"]
+  RUN --> CLOSE
+  STOP --> CLOSE
+```
+
 Exported functions:
 
 ```clojure

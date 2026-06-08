@@ -22,9 +22,9 @@
   ;; SDK, pinned here because the CLI is a first-class runtime surface.
   cheshire/cheshire {:mvn/version "5.13.0"}
 
-  ;; Phase 2 · the canonical durable event log + sessions table for the SQLite
-  ;; SessionStore impl (fractal.engine.store.sqlite). Slots under the SAME
-  ;; SessionStore port as MemoryStore — zero loop/kernel/adapter/api changes.
+  ;; The canonical durable event log + sessions table for the SQLite
+  ;; SessionStore impl (fractal.engine.store.sqlite). Slots under the same
+  ;; SessionStore port as MemoryStore.
   ;; Payloads do NOT live here: they go to a file-based, content-addressed blob
   ;; store (fractal.engine.store.blobstore — no extra dependency). Driven through
   ;; raw JDBC (no wrapper dep). PINNED for determinism.
@@ -32,7 +32,7 @@
 
  :aliases
  {;; Default-safe: excludes ^:live so `clojure -M:test` never makes a paid API
-  ;; call, even with keys in the environment. All of Phase 1 validates offline.
+  ;; call, even with keys in the environment.
   :test
   {:extra-paths ["test"]
    :extra-deps {io.github.cognitect-labs/test-runner
@@ -51,18 +51,25 @@
   :cli
   {:main-opts ["-m" "fractal.engine.cli"]}
 
-  ;; A REPL for development (adds the dev/ RUNS-SEES harness to the path).
-  :dev
-  {:extra-paths ["dev"]}}}
+  ;; Build the library jar and CLI uberjar. Native-image is out because the
+  ;; engine evaluates model-written Clojure at runtime.
+  :build
+  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
+   :ns-default build}
+
+  ;; Publish the thin library jar to Clojars. Reads CLOJARS_USERNAME and
+  ;; CLOJARS_PASSWORD from the environment. CI passes the artifact path on tags.
+  :deploy
+  {:replace-deps {slipset/deps-deploy {:mvn/version "0.2.2"}}
+   :exec-fn deps-deploy.deps-deploy/deploy
+   :exec-args {:installer :remote
+               :sign-releases? false
+               :pom-file "target/classes/META-INF/maven/net.clojars.deadmeme5441/fractal-engine/pom.xml"
+               :artifact "target/fractal-engine-0.1.0-SNAPSHOT.jar"}}}}
 
 ;; ---------------------------------------------------------------------------
-;; PHASE 2 (BUILT): org.xerial/sqlite-jdbc above backs fractal.engine.store.sqlite
-;; (the canonical durable event log + sessions); payloads go to the file-based,
-;; content-addressed blob store (fractal.engine.store.blobstore, no extra dep).
-;; Both slot under the existing SessionStore port. DATAHIKE: DROPPED — the
-;; event-sourced log + the pure apply-event fold are the query mechanism, and no
-;; concrete query need has materialized (spec/11 "lean: drop"); add a derived
-;; index only if a real need appears.
-;; Native-image (GraalVM) is a possible LATER distribution option that SCI unlocks
-;; (the model-code eval no longer needs the Clojure compiler) — see spec/00.
+;; org.xerial/sqlite-jdbc backs fractal.engine.store.sqlite: the durable event
+;; log and session table. Payloads go to fractal.engine.store.blobstore, which
+;; is file-based and content-addressed. Both stores sit behind SessionStore.
+;; Native-image is not a release target for this repo; ship jar and uberjar.
 ;; ---------------------------------------------------------------------------

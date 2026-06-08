@@ -20,6 +20,18 @@ Use the API when embedding the engine in Clojure. Use the CLI when an agent or
 script should drive a durable session from the shell while a human inspects
 structured artifacts.
 
+```mermaid
+flowchart LR
+  Goal["I want to use fractal-engine"] --> Embed{"Embedding in Clojure?"}
+  Embed -- yes --> API["Use fractal.engine.api"]
+  Embed -- no --> CLI["Use clojure -M:cli"]
+  API --> Fake["Start with fake adapter"]
+  CLI --> Config["Start with config file"]
+  Fake --> Durable["Add :store :sqlite when state must survive"]
+  Config --> Durable
+  Durable --> Live["Add :adapter :sdk only when ready for live calls"]
+```
+
 ## 1. Run a Fake-Adapter Turn
 
 The fake adapter scripts what the model will say. The engine still runs the real

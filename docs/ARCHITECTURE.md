@@ -1,8 +1,8 @@
 # fractal-engine-v1 Architecture
 
 This document is a public maintainer and contributor map for the v1 runtime. It
-describes the architecture that exists in the Phase 1-4 implementation and the
-thin agent control plane around it.
+describes the current engine architecture and the thin agent control plane
+around it.
 
 The engine is a layered Clojure runtime where a session owns a persistent SCI
 context, a model produces fenced Clojure, the host evaluates those blocks in a
@@ -12,41 +12,66 @@ adding a second execution system.
 
 ## Layer Map
 
-```text
-public API
-  fractal.engine.api
-  fractal.engine.cli
+```mermaid
+flowchart TB
+  subgraph Public["Public surfaces"]
+    API["fractal.engine.api"]
+    CLI["fractal.engine.cli"]
+  end
 
-composition roots
-  fractal.engine.session
-  fractal.engine.recursion
+  subgraph Composition["Composition roots"]
+    SESSION["fractal.engine.session"]
+    RECUR["fractal.engine.recursion"]
+  end
 
-runtime spine
-  fractal.engine.session-loop
-  fractal.engine.kernel
+  subgraph Runtime["Runtime spine"]
+    LOOP["fractal.engine.session-loop"]
+    KERNEL["fractal.engine.kernel"]
+  end
 
-ports and shared services
-  fractal.engine.store
-  fractal.engine.adapter
-  fractal.engine.capability
-  fractal.engine.compaction
-  fractal.engine.live
-  fractal.engine.payload-io
+  subgraph Ports["Ports and shared services"]
+    STORE["fractal.engine.store"]
+    ADAPTER["fractal.engine.adapter"]
+    CAP["fractal.engine.capability"]
+    COMPACT["fractal.engine.compaction"]
+    LIVE["fractal.engine.live"]
+    PIO["fractal.engine.payload-io"]
+  end
 
-backends
-  fractal.engine.store.memory
-  fractal.engine.store.sqlite
-  fractal.engine.store.blobstore
-  fractal.engine.adapter.fake
-  fractal.engine.adapter.sdk
+  subgraph Backends["Backends"]
+    MEM["fractal.engine.store.memory"]
+    SQLITE["fractal.engine.store.sqlite"]
+    BLOB["fractal.engine.store.blobstore"]
+    FAKE["fractal.engine.adapter.fake"]
+    SDK["fractal.engine.adapter.sdk"]
+  end
 
-foundations
-  fractal.engine.payload
-  fractal.engine.cache
-  fractal.engine.prompt
-  fractal.engine.catalog
-  fractal.engine.concurrent
-  fractal.engine.time
+  subgraph Foundation["Foundations"]
+    PAYLOAD["fractal.engine.payload"]
+    CACHE["fractal.engine.cache"]
+    PROMPT["fractal.engine.prompt"]
+    CATALOG["fractal.engine.catalog"]
+    CONCUR["fractal.engine.concurrent"]
+    TIME["fractal.engine.time"]
+  end
+
+  CLI --> API
+  API --> SESSION
+  SESSION --> LOOP
+  SESSION --> RECUR
+  LOOP --> KERNEL
+  LOOP --> ADAPTER
+  LOOP --> STORE
+  LOOP --> LIVE
+  RECUR --> ADAPTER
+  RECUR --> STORE
+  STORE --> MEM
+  STORE --> SQLITE
+  SQLITE --> BLOB
+  ADAPTER --> FAKE
+  ADAPTER --> SDK
+  STORE --> PIO
+  PIO --> PAYLOAD
 ```
 
 The namespace graph is expected to remain acyclic. `test/fractal/engine/deps_acyclic_test.clj`
@@ -102,6 +127,31 @@ ids, head ids, event ids, and edge ids.
 
 ## Normal Turn Flow
 
+```mermaid
+sequenceDiagram
+  participant Caller
+  participant Session
+  participant Loop
+  participant Adapter
+  participant Kernel
+  participant Store
+
+  Caller->>Session: run-turn!
+  Session->>Store: turn started and user message
+  Session->>Loop: run step loop
+  Loop->>Adapter: provider request
+  Adapter-->>Loop: assistant message
+  Loop->>Kernel: evaluate fenced Clojure
+  Kernel-->>Loop: eval records and optional FINAL
+  Loop->>Store: assistant, evals, observation
+  alt FINAL
+    Loop->>Store: vars snapshot, terminal turn, head
+    Loop-->>Caller: final TurnResult
+  else more work
+    Loop->>Adapter: request with observation
+  end
+```
+
 1. `session/run-turn!` checks stop status and `:max-turns`, acquires the turn
    lock, optionally compacts, appends the user message, appends `:turn/started`,
    and delegates to `session-loop`.
@@ -129,6 +179,21 @@ ids, head ids, event ids, and edge ids.
 
 The recursive harness adds model-call host functions inside the SCI context. They
 are not top-level API functions.
+
+```mermaid
+flowchart LR
+  ROOT["Root session"] --> EXACT["Clojure exact work"]
+  ROOT --> LEAF["lm / map-lm leaf call"]
+  ROOT --> CHILD["rlm / map-rlm child session"]
+  ROOT --> ATTACH["attach-rlm derived child"]
+  CHILD --> CHILDHEAD["Child FINAL head"]
+  ATTACH --> DERIVEDHEAD["Derived child FINAL head"]
+  ROOT --> ROOTHEAD["Root current head"]
+  ROOTHEAD --> EDGE1["invocation edge"]
+  CHILDHEAD --> EDGE1
+  ROOTHEAD --> EDGE2["derivation edge"]
+  DERIVEDHEAD --> EDGE2
+```
 
 - `lm` and `map-lm` are leaf calls. They make bounded adapter calls and do not
   create sessions, heads, or lineage edges. `map-lm` preserves input order and
@@ -216,7 +281,7 @@ items are never persisted and are recoverable only through later durable state.
 
 ## Verification Pointers
 
-The current implementation details above are covered by:
+The architecture above is covered by:
 
 - `src/fractal/engine/session.clj`
 - `src/fractal/engine/session_loop.clj`
@@ -229,5 +294,4 @@ The current implementation details above are covered by:
 - `test/fractal/engine/store_sqlite_test.clj`
 - `test/fractal/engine/session_test.clj`
 - `test/fractal/engine/recursion_test.clj`
-- `test/fractal/engine/phase4_test.clj`
 - `test/fractal/engine/deps_acyclic_test.clj`

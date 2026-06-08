@@ -112,15 +112,45 @@ review.
 
 ## Release Status
 
-There is no release workflow documented or automated on this branch. Do not
-invent release commands in operational docs. A release process should be added
-only when the repository has an actual versioning, packaging, signing, and
-publishing decision.
+Release automation is tag-driven. A pushed `v*` tag runs
+`.github/workflows/release.yml` at the tagged commit:
 
-Until then, maintainers should report validation state in branch or pull-request
-notes:
+```mermaid
+flowchart LR
+  Tag["Push v* tag"] --> Tests["Offline tests"]
+  Tests --> Jar["Build library jar"]
+  Jar --> Clojars["Publish to Clojars"]
+  Clojars --> Uber["Build CLI uberjar"]
+  Uber --> Smoke["java -jar target/fractal.jar help"]
+  Smoke --> GH["GitHub release asset"]
+```
+
+1. run the offline suite;
+2. build the thin library jar;
+3. publish the library jar to Clojars;
+4. build and smoke-test the CLI uberjar;
+5. create a GitHub release with `target/fractal.jar`.
+
+Required repository secrets:
+
+- `CLOJARS_USERNAME`
+- `CLOJARS_PASSWORD`
+
+The release version is derived from the tag name without the leading `v`.
+
+Local package checks:
+
+```sh
+clojure -T:build jar
+clojure -T:build uber
+java -jar target/fractal.jar help
+```
+
+Do not push a release tag until the branch is intentionally ready to publish.
+For ordinary branches or pull-request notes, report:
 
 - offline suite command and result;
+- package build command and result when packaging changed;
 - optional live suite command and result, including skips;
 - CLI command matrix result when the control plane changed;
 - leash values for paid runs;

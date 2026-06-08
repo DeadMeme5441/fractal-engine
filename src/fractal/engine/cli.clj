@@ -23,7 +23,7 @@
   #{"help" "init" "config"
     "start" "run" "turn" "resume" "stop" "close" "compact" "wait"
     "status" "progress" "view" "events" "heads" "head" "edges" "tree"
-    "payload" "messages" "turns" "steps" "evals" "check" "report"})
+    "payload" "messages" "turns" "steps" "evals" "trace" "check" "report"})
 
 (def option-spec
   {"--config" :config
@@ -51,6 +51,7 @@
    "--message" :message
    "--message-file" :message-file
    "--since" :since
+   "--turn" :turn
    "--head" :head
    "--ref" :ref
    "--output" :output
@@ -65,7 +66,7 @@
    "--force" [:force true]})
 
 (def int-options #{:max-turns :max-steps :max-fanout :fanout-pool
-                   :leaf-concurrency :call-timeout-ms :since})
+                   :leaf-concurrency :call-timeout-ms :since :turn})
 (def keyword-options #{:store :adapter :provider :harness :capability
                        :child-provider :leaf-provider :output})
 
@@ -357,6 +358,33 @@
             :provider (get-in v [:session :session/provider])
             :model (get-in v [:session :session/model])})))
 
+(defn- trace-message? [turn-id m]
+  (and (= turn-id (:message/turn-id m))
+       (#{:assistant :observation} (:message/role m))))
+
+(defn- hydrated-trace-entry [h m]
+  (-> m
+      (select-keys [:message/id :message/role :message/turn-id])
+      (assoc :message/content (fe/read-payload h (:message/content-or-ref m)))))
+
+(defn- trace-view [h requested-turn-id]
+  (let [v (fe/view h)
+        turn-id (or requested-turn-id (:turn/id (final-turn v)))
+        turn (first (filter #(= turn-id (:turn/id %)) (:turns v)))]
+    (when-not turn
+      (throw (ex-info (str "turn not found: " turn-id)
+                      {:error/type :cli/turn-not-found :turn/id turn-id})))
+    {:session/id (:session-id h)
+     :turn/id turn-id
+     :turn/status (:turn/status turn)
+     :turn/final-preview (:turn/final-preview turn)
+     :turn/final-ref (:turn/final-ref turn)
+     :turn/final-value (when (:turn/final-ref turn)
+                         (fe/read-payload h (:turn/final-ref turn)))
+     :trace (->> (:messages v)
+                 (filter #(trace-message? turn-id %))
+                 (mapv #(hydrated-trace-entry h %)))}))
+
 ;; ---------------------------------------------------------------------------
 ;; Commands
 ;; ---------------------------------------------------------------------------
@@ -380,7 +408,7 @@ Usage commands:
   wait      Report status; async cross-process waiting is not implemented yet.
 
 Inspection commands:
-  status progress view events heads head edges tree payload messages turns steps evals check report
+  status progress view events heads head edges tree payload messages turns steps evals trace check report
 
 Common options:
   --config FILE --profile NAME --session ID --store-dir DIR
@@ -547,6 +575,12 @@ Config files are EDN. They may be flat engine config maps or {:default-profile k
   (with-open-session opts false
     (fn [h] (assoc (check-view h) :command :check))))
 
+(defn- command-trace [opts args]
+  (let [turn-id (or (:turn opts)
+                    (some-> (first args) (parse-int* :turn)))]
+    (with-open-session opts false
+      (fn [h] (assoc (trace-view h turn-id) :ok true :command :trace)))))
+
 (defn- command-report [opts _args]
   (with-open-session opts false
     (fn [h] (assoc (report-view h) :ok true :command :report))))
@@ -576,6 +610,7 @@ Config files are EDN. They may be flat engine config maps or {:default-profile k
    "turns" (partial command-collection :turns :turns)
    "steps" (partial command-collection :steps :steps)
    "evals" (partial command-collection :evals :evals)
+   "trace" command-trace
    "check" command-check
    "report" command-report})
 

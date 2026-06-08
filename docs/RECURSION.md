@@ -13,6 +13,22 @@ state graph.
 
 The recursive harness gives the model ordinary Clojure plus this small surface:
 
+```mermaid
+flowchart TB
+  ROOT["Root session REPL"] --> FINAL["FINAL value"]
+  ROOT --> EXACT["Ordinary Clojure"]
+  ROOT --> LEAF["lm"]
+  ROOT --> LEAFS["map-lm"]
+  ROOT --> CHILD["rlm"]
+  ROOT --> CHILDS["map-rlm"]
+  ROOT --> ATTACH["attach-rlm"]
+  LEAF --> ONECALL["One bounded provider call"]
+  LEAFS --> MANYCALLS["Ordered bounded leaf calls"]
+  CHILD --> CHILDSESSION["Fresh child session"]
+  CHILDS --> MANYCHILDREN["Ordered child sessions"]
+  ATTACH --> DERIVED["Fresh child restored from selected head"]
+```
+
 | Function | Use it for |
 | --- | --- |
 | `FINAL` | Return the current turn's value and close the turn. |

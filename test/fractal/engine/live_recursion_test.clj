@@ -1,7 +1,7 @@
 (ns fractal.engine.live-recursion-test
   "OPTIONAL live end-to-end RLM proofs against the real codex provider via OAuth
-   (~/.codex/auth.json, provider :codex-backend, model gpt-5.5). ^:live, so these
-   are EXCLUDED from `clojure -M:test` and run only via `clojure -M:live-test`.
+   (provider :codex-backend, model gpt-5.5). ^:live, so these are EXCLUDED from
+   `clojure -M:test` and run only via `clojure -M:live-test`.
    Every test is creds-guarded ((codex-backend-available?)) so the suite never
    makes a paid call without OAuth creds present. Each prints a compact result
    line so a human can eyeball the real recursion.
@@ -166,7 +166,7 @@
     (fe/stop-session! s)))
 
 ;; ===========================================================================
-;; 6. PARTIAL-FAILURE RESILIENCE (live) — a budgeted lane cannot hurt siblings
+;; 6. PARTIAL-FAILURE RESILIENCE (live) — a budgeted lane cannot hurt other lanes
 ;; ===========================================================================
 
 (deflive map-rlm-partial-failure
