@@ -2,145 +2,184 @@
 
 ## What fractal-engine is
 
-A small **recursive language-model compute engine**. A model is given a *programming
-environment* — a persistent Clojure REPL — and drives it: it writes fenced Clojure,
-the host evaluates the code and feeds back one compact **observation**, and the loop
-repeats until the model calls `(FINAL value)` to return a result. Some of the
-functions the model may call are *themselves* language models, so a hard problem can
-be decomposed into sub-problems, each handed to a fresh recursion of the same loop.
+A small recursive language-model compute engine. A model gets a persistent Clojure
+REPL, writes fenced Clojure, the host evaluates it, feeds back one compact
+observation, and repeats until the model calls `(FINAL value)`. The session then
+stays live for later turns with its vars intact.
 
-## Why this shape (the RLM thesis)
+The core claim is long-context, long-horizon work. Working state persists across
+many steps and turns, survives restart via durable reopen, can branch into children,
+and can be revisited through immutable published heads.
 
-Large contexts are expensive and lossy. Instead of stuffing everything into one
-window, fractal-engine lets the model **decide how to read its own input** — slicing
-with ordinary code, judging bounded pieces with cheap model calls, and handing whole
-sub-problems to fresh recursions. The model is an *operator*, not a chat partner. It
-is built in the spirit of Recursive Language Models (Alex Zhang et al.).
+v1 ships two harness modes under the same public API:
 
-The single mental model to hold: **it is a coding-harness agent loop whose only tool
-is "evaluate this Clojure in a durable REPL."**
+- `:clojure`: the plain durable session harness (`FINAL` + `inspect`)
+- `:rlm`: the recursive harness (`FINAL`, `inspect`, `lm`, `map-lm`, `rlm`,
+  `map-rlm`, `attach-rlm`)
 
+The engine is not a transcript-first chat loop. It is a programmable working-state
+engine in which the model uses code, not prompt prose, to decide what to read,
+compute, delegate, branch, resume, and return.
+
+## Why this shape
+
+Large contexts are expensive and lossy. Long-horizon work also needs continuity:
+state that survives exploration, delegation, correction, interruption, and restart.
+Instead of forcing every problem into one window, fractal-engine lets the model
+operate a live REPL with durable state:
+
+- deterministic work stays in Clojure
+- bounded judgment can go to a leaf model call
+- larger or uncertain subproblems can become child sessions
+- prior work can be resumed from immutable heads rather than replayed from scratch
+- a human operator can steer at the boundary while the agent executes inside the
+  durable state graph
+
+The model is the active operator inside the loop. The human operator supervises,
+steers, and inspects from outside the loop.
+
+The mental model is one loop:
+
+```text
+user -> llm -> ```clojure ...``` -> host evals -> observation -> llm -> ... -> (FINAL v) -> user
 ```
-user → llm → ```clojure …``` → host evals → observation → llm → … → (FINAL v) → user
-```
 
-There is **no separate "user turn" vs "tool-result turn"** code path. Every step is
-identical: take the whole message list, ask the model for the next assistant message,
-evaluate its code, append the result as the next message, repeat. The user's task is
-just `message[0]`; an observation is just `message[n]`. **`FINAL` is the model's reply
-to the user** — it ends a turn and hands control back; the next user message starts
-the next turn on the same live session.
+There is no separate "tool turn" path. A user message, an observation, and a child
+result are all just material in the same message stream.
+
+## Primary consumer and control plane
+
+The primary consumer is an agent with CLI or shell access, supervised by a human
+operator.
+
+- The **API** is the core programmatic surface.
+- A **CLI/readback seam**, when present, is a durable control plane over that API:
+  JSON-first, non-interactive, resumable, leashed, inspectable, and scriptable.
+- Human-readable summaries, chronicles, and reports are secondary readbacks for
+  operator steering; they do not replace machine-readable audit and control data.
+- The engine itself is therefore a stateful compute substrate, not a
+  consumer-facing terminal application.
+
+## Current v1 status
+
+All four planned architectural phases are now implemented.
+
+| Phase | Shipped result | Status |
+|-------|----------------|--------|
+| 1 | Session core: SCI REPL loop, capability sandbox, in-memory store, adapter seam, public API, live query, compaction | built |
+| 2 | Durable `SessionStore`: SQLite event log plus content-addressed BlobStore payloads, durable reopen via `resume-session!` | built |
+| 3 | Recursive harness: `lm`, `map-lm`, `rlm`, `map-rlm`, fan-out, child-session spawning, capability inheritance/clamping | built |
+| 4 | Durable recursion data model: immutable content-addressed heads, current-head publication, invocation and derivation lineage edges, `attach-rlm` | built |
+
+This document therefore describes the shipped v1 architecture, not a partial Phase 1
+proposal.
 
 ## The model-facing surface
 
-Inside a session's REPL the model has ordinary Clojure (a curated, sandboxed subset —
-see `04`) plus a small set of host-injected functions. The plain Clojure harness exposes
-only `FINAL` and `inspect`; the recursive harness adds the model-calling and reuse fns.
+| Fn | Available in | Meaning |
+|----|--------------|---------|
+| `(FINAL value)` | `:clojure`, `:rlm` | Emit the turn's output and end the turn. The session remains live. |
+| `(inspect x)` | `:clojure`, `:rlm` | Print a bounded view of a value into the next observation. Returns `nil`. |
+| `(lm input query [mode])` | `:rlm` | One bounded leaf-model call over one bounded input. `mode` is `:string` or `:edn`. |
+| `(map-lm inputs query [mode])` | `:rlm` | Parallel leaf fan-out over up to `:max-fanout` inputs, preserving order and returning sentinels for failed slots. |
+| `(rlm task)` | `:rlm` | Spawn a fresh child session, run its whole loop to `FINAL`, and return an envelope. |
+| `(map-rlm tasks [shared])` | `:rlm` | Parallel child-session fan-out over independent tasks. |
+| `(attach-rlm handle task [opts])` | `:rlm` | Restore a selected immutable source head into a fresh derived child, run one task, and return an envelope without advancing the source session. |
 
-| Fn | Kind | Phase | Meaning |
-|----|------|-------|---------|
-| `(FINAL value)` | — | **1** | Emit the turn's output and end the turn. The value is the reply. The session stays live for later turns. |
-| `(inspect x)` | — | **1** | Print a bounded, paginated view of a value (so the model can look inside a stubbed value). Returns `nil`. |
-| `(lm input query [mode])` | leaf | 3 | One bounded input → one model-judged output. A pure function whose body is a model. `mode` ∈ `:string`/`:edn`. |
-| `(map-lm inputs query [mode])` | leaf | 3 | `lm` mapped over ≤50 bounded inputs in one parallel fan-out, order preserved. |
-| `(rlm task)` | child | 3 | Hand one sub-problem to a fresh RLM session running this whole loop. Returns an *envelope*, not a bare value. |
-| `(map-rlm tasks [shared])` | child | 3 | Recursion mapped over ≤50 independent sub-problems. |
-| `(attach-rlm handle task [opts])` | reuse | 4 | Restore a prior session/head into a fresh derived child and run `task`; records a derivation edge without advancing the source session. |
+The contract is intentionally narrow:
 
-> Phase 1's REPL therefore exposes **plain Clojure + `FINAL` + `inspect`**, nothing
-> else. The four model-calling functions are added in Phase 3 as host fns injected
-> into the same SCI context; they require nothing new from the loop (see `03`, `11`).
+- the model gets ordinary Clojure plus these host fns
+- there is no magic context object, hidden mutable session map, or ambient handle
+- host-internal dynamic vars used for bookkeeping stay internal to the engine
 
-## The cheapness hierarchy (behavioural doctrine)
+## The processing doctrine
 
-The system prompt (see `12`) trains a strict order — *choosing the cheapest sufficient
-kind of processing for each transformation is the entire skill*:
+Choosing the cheapest sufficient kind of processing is the core skill:
 
-1. **Deterministic Clojure** — the base default. IO, parsing, regex, counting,
-   sorting, grouping, joining, shape checks. If Clojure can compute it, nothing else
-   should.
-2. **A leaf** (`lm`/`map-lm`) — one probabilistic transformation over an
-   *already-bounded* input. Only when genuine semantic judgement is needed.
-3. **A child** (`rlm`/`map-rlm`) — a full recursion, only when a surface is too large
-   or uncertain for the current step budget, needs its own inspect/judge loop, or has
-   genuinely independent lanes.
+1. **Deterministic Clojure first.** Parsing, counting, joins, filtering, shape
+   checks, exact aggregation, and validation belong here.
+2. **Leaf calls second.** Use `lm` or `map-lm` only for bounded semantic judgment
+   that Clojure cannot do directly.
+3. **Child sessions third.** Use `rlm` or `map-rlm` when the work needs its own
+   inspect/delegate loop, broader context, or naturally independent lanes.
+4. **Reuse before recompute.** If the needed state already exists in a published
+   head, prefer `attach-rlm` over rebuilding it.
 
-When in doubt, collapse to the cheaper kind.
+## Durability and lineage doctrine
+
+v1 is a long-horizon working-state engine, not just a transient recursive loop:
+
+- The semantic storage seam is `SessionStore`.
+- The canonical durable backend is a SQLite event log plus a global file BlobStore
+  for content-addressed payloads.
+- Large values are stored as payload refs; payload identity is content identity.
+- A finalized turn snapshots REPL vars, commits the turn, and publishes a new
+  immutable current head.
+- `resume-session!` restores from the published current head when one exists.
+- `rlm` and `map-rlm` record invocation lineage edges to child heads.
+- `attach-rlm` records a derivation lineage edge from a selected source head to a
+  fresh target head and does not mutate the source session.
+- Filesystem paths under the durable store are physical backends only. The logical
+  API is session ids, payload ids, head ids, and lineage-edge ids.
 
 ## Anti-goals
 
-- **Not a chat agent.** The model produces *the value the caller consumes*, via
-  `FINAL` — not prose for a transcript.
-- **The engine never speaks HTTP.** All provider access goes through the sibling
-  `clojure-llm-sdk`. The engine's only network seam is the adapter (`05`).
-- **No spending governor / no step budget beyond `max-steps`/`max-turns`.** Budget
-  enforcement, if needed, is an external concern (as the v1 evals harness did it).
-- **Storage is never woven into the loop.** The loop talks to a port (`02`).
-- **The REPL is not "full JVM + OS sandbox as the only line".** Capability is
-  controlled at the language layer via SCI; the OS sandbox is a backstop, not the
-  primary boundary (`04`).
+- **Not a transcript-first chat loop or end-user CLI shell.** `FINAL` returns the
+  value the caller consumes; CLI concerns are control-plane concerns above the API.
+- **Not a provider SDK.** Provider-specific networking stays behind the adapter seam.
+- **Not a hidden-context runtime.** The model does not program against a secret
+  engine object or context var.
+- **Not a filesystem-shaped API.** Paths are storage implementation details, not the
+  logical state model.
+- **Not a total-call or spend governor in v1.** The built controls are per-turn
+  limits, per-call deadlines, fan-out caps, compaction, and honest accounting.
+- **Not an alternate graph database design in v1.** The durable truth is the
+  SQLite event log plus content-addressed payloads unless a concrete future query
+  need justifies more.
 
-## The two-repo stack
+## System boundary
 
-fractal-engine sits on top of **`clojure-llm-sdk`** (a sibling repo, the provider SDK:
-one canonical API over many LLM providers — chat/embed/etc., with honest cost/cache
-accounting). The engine depends on it (`net.clojars.deadmeme5441/clojure-llm-sdk`)
-and uses **only its chat-completion text path**, narrowed behind the engine's own
-adapter port. The SDK's richness (tools, modalities, streaming parts) stays *below*
-the adapter boundary. See `05` and `08`.
+```text
+human operator
+  steers through reports, chronicles, and readback
 
+agents with shell access
+  execute through CLI/control plane and API
+
+fractal-engine
+  public API
+  durable session lifecycle and loop
+  recursion, branching, heads, lineage
+  SessionStore port
+  adapter port
+
+SessionStore backends:
+  - MemoryStore
+  - SQLite event log + BlobStore
+
+Adapter backends:
+  - fake adapter
+  - provider-backed adapter
 ```
-┌────────────────────────────────────────────┐
-│ fractal-engine  (this repo)                 │  recursive LM compute engine
-│   public API = the SDK (fractal.engine.api) │
-│   session loop · SCI eval kernel · store    │
-└───────────────┬────────────────────────────┘
-                │ adapter port (text-only chat)
-┌───────────────▼────────────────────────────┐
-│ clojure-llm-sdk  (../clojure-llm-sdk)       │  provider SDK — the only network seam
-└─────────────────────────────────────────────┘
-```
 
-## Phases
+The engine owns the recursive compute model, durable working state, and state-graph
+integrity. Provider calls and physical storage backends stay below stable ports.
 
-| Phase | Deliverable |
-|-------|-------------|
-| **1** | **The session core ("clojure harness").** One non-recursive session: the REPL loop (plain Clojure + `FINAL`/`inspect`), the SCI eval kernel, the capability sandbox, the in-memory state port, the adapter (sdk + fake), the public API surface, config, live-query, and compaction. **This spec's primary target.** |
-| 2 | Storage: a persistent `SessionStore` impl (SQLite + content-addressed blobs) under the same port. Datahike is dropped until a concrete query need appears. |
-| 3 | The RLM layer: the four model-calling host fns (`lm`/`map-lm`/`rlm`/`map-rlm`), leaf-vs-child distinction, fan-out concurrency. |
-| 4 | The recursion data model: invocation/derivation lineage edges; immutable heads; `attach-rlm`. |
-| — (parallel) | The public API *is* the SDK; the "rlm harness" extends the same surface as Phases 3–4 land. |
+## What v1 scope includes today
 
-## Phase-1 scope — IN / OUT
+- Session lifecycle, async and blocking turns, live query, and compaction
+- Capability-gated SCI evaluation with durable per-session vars
+- Memory and SQLite storage under one `SessionStore` contract
+- Content-addressed payload storage and payload hydration
+- Durable reopen via `resume-session!`
+- Recursive leaf and child host fns with capability inheritance and clamping
+- Immutable heads, current-head publication, durable lineage edges, and
+  `attach-rlm`
+- A stable public API that works for both harness modes
 
-**IN (build this):**
-- The uniform step loop + turn lifecycle (`01`, `07`).
-- The SCI eval kernel: ctx-per-session, `FINAL` (exception signal), `inspect`
-  (orchard), fenced-block extraction, batch eval, fit-or-stub observations (`03`).
-- The capability sandbox: per-session profile, the named lattice, SCI config mapping
-  (`04`).
-- The event-sourced state port + `MemoryStore` (`02`).
-- The adapter port + `SdkAdapter` + `FakeAdapter` (`05`).
-- The public API surface (`fractal.engine.api`) (`06`).
-- Config (`make-config`), single-writer concurrency, `run-turn!` / `run-turn-async!`,
-  deadline/timeout/retry passthrough (`07`).
-- The cache contract passthrough (`08`).
-- Live-query: snapshots, `progress`, `subscribe!`/`events-since`, opt-in token
-  streaming (`09`).
-- Compaction: token-estimate the transcript vs the model window (`ceil(chars/4)` over
-  hydrated `:message/content`, `:unknown-window-chars` fallback), then past `:compact-at`
-  fold it to one continuation frame — the concrete mechanism in `07` §4.
-- Offline testing via `FakeAdapter` + a RUNS/SEES dev harness (`10`).
+## Still outside this high-level spec
 
-**Built after Phase 1:**
-- Phase 2 added persistent storage (SQLite event log + file BlobStore) under the same
-  `SessionStore` port.
-- Phase 3 added the four model-calling fns (`lm`/`map-lm`/`rlm`/`map-rlm`).
-- Phase 4 added immutable heads, invocation/derivation lineage edges, and `attach-rlm`.
-
-**Still out of scope here:**
-- Fork as a public lifecycle operation. Durable cross-process `resume-session!` is built
-  for SQLite sessions.
-- Provenance/claim-checking, codebrain, the evals harness, a full CLEAN CLI — later /
-  open keep-drop decisions (`11`).
-- Native-image / babashka distribution — a *possible later* option SCI unlocks; not now.
+- A separate public fork-session lifecycle API
+- A total spend or total-call governor
+- Secondary indexes or alternate durable stores beyond the SQLite-plus-blob model
+- Packaging and deployment hardening choices beyond the core engine contract

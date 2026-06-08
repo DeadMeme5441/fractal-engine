@@ -1,98 +1,247 @@
-# 10 · Testing Strategy
+# 10 · Testing and Validation
 
-**All of Phase 1 builds and validates offline — no API keys, no spend.** The model is
-replaced by a deterministic `FakeAdapter`; the store is in-memory; the SCI kernel runs
-real Clojure. Live model runs are a separate, optional smoke check.
+Phases 1-4 are built. The default validation gate is still **offline-first**:
+`clojure -M:test` must pass with no credentials and no paid calls. Live-provider
+checks exist, but they are opt-in, credential-gated, and must stay clearly
+separate from the default path.
+
+The engine claim under test is not "can a model answer one prompt". It is
+**long-context, long-horizon recursive work**: persistent working state, restart /
+resume, branching through children and leaves, attach from prior cognitive state,
+operator steering, and durable state-graph integrity over time.
+
+This doc distinguishes three things:
+
+1. the **current checked-in default gate**;
+2. the **optional live-provider checks** that prove the real adapter/recursion path;
+3. the **higher tiers still manual or not yet automated**.
 
 ---
 
-## 1. `FakeAdapter` + `responder` (the backbone)
+## 1. Current validation ladder
 
-The `FakeAdapter` (05 §5) is a *pure function of the request*, so scripted multi-step
-runs are deterministic and order-independent (essential once fan-out arrives). Script a
-whole turn arc:
+| Tier | Command / shape | What it proves | Default path? |
+|---|---|---|---|
+| Offline suite | `clojure -M:test` | The implemented Phase 1-4 engine is correct under deterministic, no-spend conditions, including persistent state, recursion, resume, and Phase-4 graph integrity. `^:live` tests are excluded. | yes |
+| Hygiene check | `git diff --check` | No whitespace / patch-format damage in the current change set. | recommended on every branch |
+| Opt-in live suite | `clojure -M:live-test` | The real `SdkAdapter`, real provider auth, real recursion host fns, and real cost/cache/usage paths work end to end. Paid and slow. | no |
+| Second-provider smoke | manual live smoke on a second provider stack | The runtime is not accidentally coupled to one provider family. | no |
 
-```clojure
-(def respond
-  (fe/responder
-    [["count the errors" "```clojure\n(def n (count (filter #(str/includes? % \"ERROR\")\n                                  (str/split-lines (slurp \"log.txt\")))))\nn\n```"]
-     [#(str/includes? (last-user %) "Observation") "```clojure (FINAL {:errors n})```"]
-     [:default "```clojure (FINAL :ok)```"]]))
-```
+**Current implementation evidence.** The present Phase 1-4 line has already been
+validated with a green offline suite, a clean `git diff --check`, the checked-in
+live suite, and an additional manual second-provider smoke on `:vertex-gemini`.
+Treat that as current evidence, not as the required default gate for every edit.
 
-Each clause: `[match reply]` — `match` is a substring of the last user message, a
-predicate on the request, or `:default`; `reply` is an assistant string, a full call
-record, or a fn of the request. ⛔ Do **not** use a mutable response queue — undefined
-order under concurrency; the content-addressed responder is race-free.
+---
 
-## 2. The RUNS / SEES dev harness
+## 2. The required offline suite
 
-Port v1's "seeing harness" as a dev tool (under a `:dev`/`:seeing` path, never in the
-build): it drives the **real** session loop and prints, per step, what the model
-**RUNS** (`:assistant` messages — the code) beside what the engine **SEES** (the
-`:observation` messages — the fit-or-stub feedback), plus an untruncated FINAL the model
-only saw as a stub. This is the fastest way to tune the observation surface (`ok-fit`,
-`max-coll-size`) against realistic code. **The output format below is normative** (the
-dev harness must produce it): one `RUNS` block per `:assistant` message and one `SEES`
-block per `:observation`, in `:event/id` order, closing with the untruncated FINAL value
-(which the model itself only saw as a fit-or-stub).
+The default suite is now broader than "Phase 1 unit tests". It is the main proof
+that the full Phase 1-4 engine still holds together without spending money,
+including the long-horizon state machinery that later phases added.
 
-```
-──── fractal RUNS ────   (def files (->> (file-seq …) (mapv str)))
-──── fractal SEES ────   «vector, 412 items»
-──── fractal RUNS ────   (count files)
-──── fractal SEES ────   412
-──── FINAL (full, harness view) ────   {:n 412 …}
-```
+### Deterministic scripted provider
 
-## 3. Component tests
+Most offline multi-step and recursive proofs still lean on the `FakeAdapter` and
+`fe/responder`. The critical rule is unchanged: scripted replies should be a **pure
+function of the request**, not a mutable response queue. That keeps fan-out tests
+deterministic and order-independent even after recursion and parallel lanes arrive.
 
-- **State port (02).** `apply-event` purity; `fold(events) == read-state` structure;
-  store-assigned ids == folded counter max, always; persist-before-fold (Phase 2);
-  idempotent `create-session!` (second call preserves state); `verify-no-dangling-refs`;
-  **content-addressing: identical values intern to the identical ref (dedup), and the
-  ref id is `sha256:` over canonical bytes** (Merkle invariant, 02 §9).
-- **Eval kernel (03).** Vars persist across evals and turns (the `eval-string*` ctx);
-  batch semantics (error stops batch; FINAL ends turn; multi-block ids distinct via
-  `peek-next-id`); **a multi-form block REPL-interleaves** — a `require`/`in-ns`/`def` in
-  form 1 is visible to form 2 and the block value is the *last* form's value (the
-  `sci/eval-string*` interleave guarantee, 03 §2); **the per-step `(in-ns …)`
-  re-assertion holds** — a model `(in-ns …)` does not strand later host evals
-  (`eval-batch` re-asserts the session ns as its first action, 03 §2); stdout captured
-  via `sci/out`; fit-or-stub thresholds (small → whole, large → `«type, size»`);
-  `inspect` bounded + chrome-stripped; snapshot round-trips and marks unrestorables;
-  **restore via `sci/intern` round-trips a list value `(1 2 3)` correctly** (the
-  eval-string trap, 03 §6) — the snapshot/restore plumbing is pinned to SCI 0.8.43.
-- **Capability sandbox (04).** The **pinned SCI regression test** (04 §7) — interop
-  denied, `slurp`/`sh` absent, `#=` blocked, gated-slurp shadow survives `in-ns`,
-  `binding` allowed. Plus: `:default` reads a file but refuses `(slurp "http://…")` and
-  refuses `git`/`python3` via `sh`; `clamp` yields the meet; an override that loosens any
-  gate is rejected; a `:locked-down` child of a `:default` parent (inherit-and-clamp).
-- **Adapter (05).** `FakeAdapter` returns a well-formed call record; `:observation`→
-  `:user` mapping; honest `:unknown` when the responder omits usage; **the deadline lives
-  in `run-step!`** (07, `with-deadline :call-timeout-ms`), not inside any adapter — so a
-  slow **fake** responder trips it → `:status :timeout` (the same wrapper covers
-  `SdkAdapter`, which carries no internal deadline; `FakeAdapter` ignores `opts`).
-- **Runtime (07).** `run-turn!` blocks to FINAL and hydrates the value; `run-turn-async!`
-  delivers a `TurnResult` map (incl. on error); `:fractal/turn-in-flight` on a concurrent
-  turn; **release-before-deliver** (deref + immediate re-invoke does not spuriously throw
-  turn-in-flight); `:max-steps` → `:budget-exceeded`; `stop-session!` ordering (no
-  `:turn/*` event after `:session/stopped`).
-- **Compaction (07).** Fires over `:compact-at`; produces `[system, compact-frame,
-  …new…]` via `:compact-from-event-id`; the compact message id is store-stamped;
-  **vars are NOT cleared/restored during compaction** (an unrestorable var defined
-  before compaction is still usable after).
-- **Live query (09).** A subscriber sees events in `:event/id` order; a throwing
-  subscriber doesn't break writes; a slow subscriber doesn't stall writes; overflow drops
-  only transient deltas and emits a `:subscribe/gap`; `events-since` recovers the
-  backlog; reentrant `append-event!` from a callback throws `:subscribe/reentrant`.
+### Foundations and pure-value surfaces
 
-## 4. Determinism rules
+- `time_test` — time formatting contract.
+- `payload_test` — canonical bytes, `sha256:` refs, content-addressing, dedup.
+- `payload_io_test` — inline-vs-ref payload decisions, hydration, EDN-safe coercion.
+- `catalog_test` — model-catalog lookup and unknown-model tolerance.
+- `prompt_cache_test` — prompt stamping, stable cache id / scope id / TTL shape.
+- `observe_test` — fit-or-stub rendering, bounded inspect text, observation format.
+- `concurrent_test` — deadline wrapper, bounded fan-out, pool bounds, dynamic-binding
+  propagation.
 
-- No `Math/random`/`Date.now` in tested code paths where reproducibility matters; inject
-  clocks/ids where a test needs to pin them. (Real `sha256`/timestamps are fine in
-  production paths; tests that assert hashes use fixed input values.)
-- The pinned SCI regression test **and the snapshot/restore round-trip** (both pinned to
-  SCI 0.8.43) are **CI-blocking** on any `org.babashka/sci` bump.
-- No live provider call in any unit test. A single optional `live-smoke` test (behind a
-  flag + real key) exercises `SdkAdapter` end-to-end; it is never on the default path.
+### Sandbox and adversarial regressions
+
+- `sci_sandbox_test` — the pinned SCI behavior: interop denied, reader-eval blocked,
+  escape hatches withheld, gated `slurp` survives `in-ns`, multi-form REPL
+  interleaving holds, injected namespace catalog behaves as expected.
+- `capability_test` — profile ordering, clamp, loosening rejection, dangerous-class
+  validation, default-vs-locked-down runtime gates.
+- `review_fixes_test` — regressions found by adversarial review stay fixed:
+  infinite-seq bounding, file / URL path gating, case-insensitive scheme denial,
+  `io/copy` gating, invalid allow-all class grants, terminal stop delivery.
+
+### Store, kernel, runtime, and API
+
+- `store_test` — pure `apply-event`, folded structure, status transitions.
+- `store_memory_test` — id assignment, re-fold equivalence, idempotent create, dedup,
+  read-your-writes view, backlog recovery, `peek-next-id`, dangling-ref verification.
+- `blobstore_test` — on-disk blob ids, round-trips, dedup, missing-blob behavior.
+- `store_contract_test` — the shared `SessionStore` invariants executed against both
+  MemoryStore and SqliteStore, including Phase-4 head / edge behavior.
+- `store_sqlite_test` — persist-before-fold, batch atomicity, durable reopen, global
+  blob sharing, end-to-end resume after process restart.
+- `kernel_test` — block extraction, persistent vars, batch semantics, `FINAL`,
+  stdout capture, stripped eval records, snapshot / restore, large FINAL handling.
+- `session_test` — turn loop, multi-step REPL use, vars across turns, honest
+  accounting, no-fence recovery, max-steps, context-window abort, eval-error
+  recovery, async behavior, stop ordering, compaction behavior.
+- `compaction_test` — compaction thresholds and role-labeled transcript rendering.
+- `live_test` — live subscriber ordering, slow / throwing subscribers, overflow gap
+  policy, reentrancy rejection, pure progress projection.
+- `api_test` — the public API end-to-end example, progress, payload hydration,
+  event tailing.
+
+### Recursion and Phase 4
+
+- `recursion_test` — offline proofs for `lm`, `map-lm`, `rlm`, `map-rlm`, nested
+  recursion, fan-out caps, partial failure sentinels, capability inheritance and
+  clamp, hot-swap by config alone, `:locked-down` host-fn dropping, resume in `:rlm`
+  mode, durable child sessions.
+- `phase4_test` — immutable head publication, resume preferring `current-head`,
+  invocation lineage edges, and `attach-rlm` restoring from a selected prior head
+  into a fresh derived child.
+
+### Structural guard
+
+- `deps_acyclic_test` — the namespace graph stays acyclic and the deliberate layer
+  boundaries still hold.
+
+---
+
+## 3. Failure modes already pinned
+
+The suite now covers a meaningful set of "it broke in the real world" cases, not
+just happy-path construction.
+
+- **Sandbox escape attempts.** Interop, `#=` reader-eval, `eval`, `load-string`,
+  `requiring-resolve`, URL reads, case-variant schemes, `file:` prefix bypasses,
+  and `io/copy` file-argument escapes are pinned as denied.
+
+- **Capability mistakes.** A child cannot loosen its parent; invalid
+  `{:allow :all}` class grants are rejected; dangerous classes require explicit
+  unsafe intent.
+
+- **Turn-control failures.** Max steps return `:budget-exceeded`; a hard
+  context-window overflow aborts; a concurrent turn throws
+  `:fractal/turn-in-flight`; max turns fail before the busy CAS; async turn
+  results are delivered without leaving the session spuriously busy.
+
+- **Recovery after model mistakes.** A missing code fence yields the "no fence"
+  nudge; an eval error becomes an observation and the turn can recover on a later
+  step; a multi-form block still behaves like a REPL.
+
+- **Live-query backpressure.** A throwing or slow subscriber cannot stall the
+  writer; overflow drops only transient deltas and emits a `:subscribe/gap`;
+  reentrant append from a callback is rejected.
+
+- **Durability and store consistency.** The store assigns ids; fold reproduces the
+  view; append batches are atomic; durable writes happen before the view advances;
+  missing blobs are handled explicitly; resume after reopen restores vars and
+  continues the session.
+
+- **Phase-4 lineage mistakes.** `publish-head!` rejects stale expected bases;
+  `resume-session!` restores from `current-head`; successful child work produces
+  durable invocation / derivation edges; `attach-rlm` restores from the selected
+  source head without advancing the source session.
+
+- **Recursive partial failure.** One bad leaf parse or one budget-exhausted child
+  lane turns into an index-aligned sentinel; sibling lanes still return normally.
+
+---
+
+## 4. Optional live-provider testing
+
+The checked-in live suite exists to prove the real provider path, not to replace the
+offline gate.
+
+### `clojure -M:live-test`
+
+This suite currently has two shapes:
+
+- `live_recursion_test` — live recursion proofs over a real OAuth-backed provider:
+  leaf judgment, map-lm order at the fan-out cap, single-child `rlm`, independent
+  `map-rlm` lanes, nested recursion, partial-failure resilience, cheapness
+  adherence, hot-swap, capability clamp, and honest cost separation across the
+  tree.
+
+- `live_smoke_test` — a smaller non-recursive live smoke over a second provider
+  style, proving that a real model can drive the REPL to `FINAL` through the real
+  `SdkAdapter`.
+
+Two important truths about the current live suite:
+
+1. it is **real-provider / real-engine** testing, with paid calls and real auth;
+2. many of the recursion mechanism tests invoke `lm` / `map-lm` / `rlm` /
+   `map-rlm` directly inside a live session's SCI ctx for determinism, instead of
+   always starting from a natural user prompt at the root.
+
+That direct-host-fn shape is intentional today: it keeps the ground truth crisp
+while still exercising the real provider, the real adapter, the real child-session
+machinery, and the real storage/event pipeline.
+
+### Second-provider live smoke
+
+The current Phase-4 line has also been manually smoked on `:vertex-gemini`. That
+extra run is useful because it proves the recursion/runtime path is not only green
+on the checked-in live provider family. It is **evidence**, not yet a checked-in
+default lane.
+
+### Manual RUNS / SEES harness
+
+A `:dev` RUNS / SEES harness still exists for human inspection. It drives the real
+session loop and prints what the model **RUNS** beside what the engine **SEES**,
+plus the full FINAL value. It is useful for tuning observation shape and for
+understanding multi-step / recursive behavior, but it is a manual diagnostic tool,
+not an automated gate.
+
+---
+
+## 5. What remains manual or unguarded
+
+The test story is materially stronger now, but it is not yet a full long-horizon
+recursive continuity program.
+
+- **No always-on multi-provider matrix.** One checked-in live provider family and one
+  smaller live smoke exist; broader provider drift still needs explicit manual runs.
+
+- **Most live recursion proofs are mechanism-first, not root-prompt-first.** Only a
+  subset of live tests force the root model to choose the whole decomposition from a
+  natural user request. More of those are needed for genuine end-to-end confidence.
+
+- **No crash / process-kill fault injection mid-turn.** Resume after committed turns is
+  covered; interrupted live turns, restart in the middle of recursion, and partial
+  provider-call failure around durable boundaries still need explicit fault testing.
+
+- **No sustained load / performance / cost regression gate.** The suite proves
+  correctness under bounded fan-out and durable reopen, but not long-running store
+  growth, large-blob churn, or cost-envelope stability over time.
+
+- **The RUNS / SEES harness is a developer tool, not a tested contract.** It is useful
+  for observation-surface tuning, but its exact printed output is not currently
+  asserted by an automated test.
+
+- **Prompt quality is only partly pinned.** Cache ids and prompt stamping are tested,
+  but real-provider behavior quality still depends on live scenario choice and manual
+  judgment.
+
+---
+
+## 6. Recommended future tiers (not current gates)
+
+If the goal is **genuine end-to-end long-horizon testing**, the next layers should be:
+
+1. **Root-prompt live scenarios** on at least two provider families, where the test
+   starts from a natural user request and asserts not just the final value but also
+   the stored session / head / edge shape.
+
+2. **Operator-steered continuity scenarios** across many turns: stop / resume, branch
+   from a prior head, attach into fresh children, and continue work without losing
+   the working state or corrupting lineage.
+
+3. **Durability fault-injection scenarios**: commit boundary crashes, resume after
+   interrupted recursion, and attached-child restore after restart.
+
+4. **Load / performance / cost scenarios**: larger fan-outs, many durable sessions,
+   big payload churn, and explicit time / cost envelopes.
+
+The rule stays the same: keep the default gate deterministic and offline, and make
+the live tiers explicit about what they prove and what they still do not prove.

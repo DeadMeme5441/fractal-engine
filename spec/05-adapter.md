@@ -1,261 +1,274 @@
 # 05 · Adapter (the LLM boundary)
 
-The adapter is the engine's **only network seam**. It is a narrow port: a flat message
-list in, the next assistant message out. The engine never speaks HTTP — it asks an
-`LlmAdapter`, and the only real impl wraps the sibling `clojure-llm-sdk`. The adapter
-knows nothing about turns, steps, the REPL, observations, or `FINAL`. It is called the
-**same way every step** (the uniform loop — there is no user-turn vs tool-turn split).
-`fractal.engine.adapter` (the **port**, zero engine deps) · `.sdk` / `.fake` (impls) ·
-`.request` (request assembly, §4).
+The adapter is the engine's **only network seam**. The engine never speaks HTTP or
+provider-native tool protocols; it hands a narrowed request to an `LlmAdapter` and gets
+back one assistant response as a normalized call record. Everything above that seam is
+turns, steps, REPL state, recursion, and the durable API / CLI control plane used by
+agents; everything below it is the sibling SDK.
+`fractal.engine.adapter` (port) · `.sdk` / `.fake` (impls) · `.request` (request assembly).
 
 ---
 
-## 1. The protocol
+## 1. The port: protocol, request, opts, response
 
 ```clojure
 (defprotocol LlmAdapter
   (-complete [adapter request opts]
-    "request → the per-step call record. See shapes below."))
+    "request -> normalized call record"))
 ```
 
-> The 3-arity (request **and** opts) is deliberate. A pure `request → message` arity
-> can't carry the streaming callback or retry policy — those are per-call runtime
-> concerns, not part of the canonical request. (The wall-clock **deadline is not an
-> opt**: `run-step!` wraps the whole `-complete` call in `with-deadline :call-timeout-ms`,
-> covering every impl — §2, §5, 07, GD18.)
+`fractal.engine.adapter` is intentionally **port-only**: the protocol plus the honest
+`:unknown` default sub-shapes for usage, cost, and cache. It has **zero engine deps**.
 
-> **Port-only (GD10).** `fractal.engine.adapter` is *just* the protocol + the
-> request/call-record shapes, with **zero engine deps** (no store/cache/prompt/payload).
-> Request *assembly* lives in `fractal.engine.adapter.request` (§4); the impls live in
-> `.sdk` (§2/§6) and `.fake` (§5).
-
-### Request (a NARROWED, text-only projection of the SDK's canonical request)
+### Request: narrowed wire shape
 
 ```clojure
-{:model    "claude-opus-4-8"
- :messages [{:role :system    :content "…assembled system prompt…"}
-            {:role :user      :content "…the task…"}
-            {:role :assistant :content "```clojure (def x …)```"}
-            {:role :user      :content "Observation:\n…"}]   ; :observation already mapped → :user
- :cache    {:enabled? true :ttl "1h" :scope-id "fr:…"}}      ; opaque passthrough (08)
+{:model    "model-id"
+ :messages [{:role :system    :content "assembled doctrine + overlays"}
+            {:role :user      :content "task"}
+            {:role :assistant :content "```clojure ...```"}
+            {:role :user      :content "Observation:\n..."}]
+ :cache    {:enabled? true :ttl "1h" :scope-id "fr:agent:..."}}
 ```
 
-- **Text only.** The model writes Clojure as plain fenced text in its assistant message.
-  **No provider tool-calling.** The SDK's tools/parts/modalities richness stays *below*
-  this boundary.
-- Roles the adapter sees: `:system`, `:user`, `:assistant`. The engine's internal
-  `:observation` role is mapped to `:user` (+ `"Observation:\n"`) during request assembly
-  (§4), *before* the adapter — the adapter never sees `:observation`.
-- **Wire shape, not the engine's.** `:messages` is the **final wire map** (`:role`/
-  `:content`), produced by `build-request` (§4) from the engine's namespaced `:message/*`
-  entities (02 §1) — hydrate, `observation->user`, then a final map to `:role`/`:content`
-  (GD11). The adapter never sees `:message/content-or-ref` / `:message/role`.
+Facts the adapter relies on:
 
-### Opts (per-call runtime)
+- the request is **text-only**; there is no provider tool-calling at this boundary;
+- the adapter sees only `:system`, `:user`, and `:assistant`;
+- the engine's internal `:observation` role is rewritten to a `:user` message with the
+  `"Observation:\n"` prefix before the adapter is called;
+- `:cache` is an **opaque passthrough** owned by the engine and interpreted by the SDK.
+
+### Opts: per-call runtime controls
 
 ```clojure
-{:retry      nil      ; nil/false one-shot · true → SDK default policy · map → merged
- :stream?    false    ; default off — see §3
- :on-delta   nil}     ; 1-arg fn called per content fragment when :stream? true
+{:retry    true|false|nil|map
+ :stream?  false
+ :on-delta (fn [fragment])}
 ```
 
-> The wall-clock **deadline is applied by `run-step!`** (07), *outside* `-complete`, via
-> `with-deadline :call-timeout-ms` — once, around the whole call, covering both the SDK
-> retry loop and the fake (GD18). The adapter never sees a `:timeout-ms`.
+The adapter does **not** own the wall-clock timeout. `session-loop/adapter-call` wraps the
+entire `-complete` call in `with-deadline :call-timeout-ms`, so the same timeout covers:
 
-### Response = the per-step **call record** (honest `:unknown`, see 08)
+- the real SDK adapter;
+- the fake adapter;
+- the SDK's internal retry loop when retry is enabled.
+
+### Response: normalized call record
 
 ```clojure
-{:text          "…assistant text, possibly with fenced clojure…"
- :finish-reason :stop                ; :stop | :length | :content-filter | :unknown | …
- :usage  {:usage/status :known       ; or :unknown — absent counts are :unknown, never 0
-          :usage/input-tokens 1234 :usage/output-tokens 56
-          :usage/cached-input-tokens 1000 :usage/cache-write-tokens 0}
- :cost   {:cost/status :known :cost/usd 0.0123}   ; or {:cost/status :unknown :cost/usd :unknown}
- :model  "claude-opus-4-8"
- :provider :anthropic
- :cache  {:cache/status :hit :cache/cached-tokens 1000 :cache/cache-write-tokens 0}}  ; BARE :cache key (GD30, 08 §5)
+{:text          "assistant text"
+ :finish-reason :stop|:length|:content-filter|:unknown|...
+ :usage         {:usage/status :known|:unknown
+                 :usage/input-tokens ...
+                 :usage/output-tokens ...
+                 :usage/cached-input-tokens ...
+                 :usage/cache-write-tokens ...}
+ :cost          {:cost/status :known|:unknown
+                 :cost/usd ...}
+ :model         "model-id"
+ :provider      :provider-id
+ :cache         {:cache/status :hit|:miss|:unknown
+                 :cache/cached-tokens ...
+                 :cache/cache-write-tokens ...}}
 ```
 
-The loop stores this (sans `:text` — the text becomes the `:assistant` message) as
-`:step/response`, carrying the **bare `:cache`** key (GD30). See 02 §1, 08.
+The engine stores this on `:step/response` **without** `:text`; the text becomes the
+assistant message. The cache field is the **bare `:cache` key**, not the SDK's
+`:response/cache` namespaced field.
 
 ---
 
-## 2. `SdkAdapter` (the real one)
+## 2. Runtime failure semantics
 
-Maps the narrowed request onto `llm.sdk/complete` (the §6 contract). The wall-clock
-deadline is **not here** — `run-step!` wraps the whole call (07, GD18):
+The adapter port itself does not prescribe turn outcomes; `session-loop/run-step!` does.
+The current behaviour is:
+
+- `adapter/-complete` succeeds -> step continues with the returned call record;
+- `with-deadline` times out -> terminal `TurnResult` status `:timeout`,
+  `:error/type :fractal/deadline`;
+- any other throwable from the adapter or SDK -> terminal `TurnResult` status `:error`,
+  `:error/type :provider/failed`.
+
+For non-timeout failures, the loop runs `kernel/err->map` over the cause chain first, so
+the message and any structured data survive, then it stamps the top-level type as
+`:provider/failed`.
+
+This means:
+
+- provider errors terminate the current turn;
+- timeout is distinguished from general provider failure;
+- the adapter implementations themselves stay simple and do not know about turn status.
+
+---
+
+## 3. Provider and model selection live above the port
+
+The adapter port does not choose models or providers. The composition root in
+`fractal.engine.session` does.
+
+### Root session
+
+`resolve-provider` applies the current rules:
+
+1. `:adapter :fake` -> provider is `:fake`;
+2. explicit `cfg :provider` wins;
+3. otherwise resolve the provider from the model id via `fractal.engine.catalog`;
+4. unknown model/provider resolution throws `:config/unknown-model`.
+
+`start-session!` then builds:
+
+- the **root adapter** from the resolved root provider;
+- the **leaf adapter**:
+  - reuse the root adapter when `:leaf-model` and `:leaf-provider` match the root;
+  - otherwise build a dedicated adapter for the leaf provider/model.
+
+### Child and attached child sessions
+
+`spawn-child!` and `spawn-attached!` re-resolve the child side from config:
+
+- child model defaults to `:child-model` or the root `:model`;
+- explicit `:child-provider` wins;
+- otherwise the child provider is resolved against the child model, with one special
+  inheritance rule: if the child model equals the parent's model, an explicit parent
+  provider can be reused.
+
+Children then reset their **leaf defaults** to the child's own model/provider. A child
+does not inherit the parent's leaf adapter choice.
+
+The result is a fully config-driven split across **root**, **leaf**, and **child**
+provider/model selection, with all actual calls still going through the same adapter port.
+
+---
+
+## 4. `SdkAdapter`
+
+`fractal.engine.adapter.sdk/SdkAdapter` is the only implementation that crosses the
+network. It wraps `llm.sdk/complete`.
 
 ```clojure
-(defrecord SdkAdapter [provider-id provider-config]   ; provider-config = cfg :provider/config (D9), threaded at start-session!
+(defrecord SdkAdapter [provider-id provider-config]
   LlmAdapter
-  (-complete [_ request {:keys [retry stream? on-delta]}]   ; no :timeout-ms — the deadline is in run-step (07, GD18)
+  (-complete [_ request {:keys [retry stream? on-delta]}]
     (let [resp (llm.sdk/complete
                  provider-id
-                 (->sdk-request request)     ; canonical SDK request (messages, cache, model) — §6
+                 (->sdk-request request)
                  :stream?  stream?
-                 :on-event (when stream? (fn [ev] (when-let [d (content-delta ev)]
-                                                    (on-delta d))))
-                 :retry    (when-not stream? retry)   ; ⛔ streaming ⇒ NO retry (§3)
-                 :config   (sdk-config provider-id provider-config))]   ; D9: nil/empty ⇒ SDK env defaults
-      (sdk-response->call-record resp request))))   ; §6: Response → the §1 bare-:cache call record
+                 :on-event (when stream? ...)
+                 :retry    (when-not stream? retry)
+                 :config   (sdk-config provider-config))]
+      (sdk-response->call-record resp request))))
 ```
 
-- `provider-id` is resolved from the model id via the **catalog**
-  (`catalog/provider-from-model-id`, 01/GD19) at `start-session!` (07, GD20) and recorded
-  on the session (`:session/provider`). Static catalog lookups are allowed outside the
-  adapter; only *completions* go through `complete` (GD20).
-- The SDK already does honest cost/cache (`:cost/usd :unknown` etc.) and per-provider
-  cache marker placement — `SdkAdapter` just forwards the opaque `:cache` passthrough (08)
-  and `sdk-response->call-record` (§6) copies the SDK's response usage/cost/cache into the
-  call record, normalizing to the engine's `:usage/status` shape (absent ⇒ `:unknown`) and
-  the **bare `:cache`** key (GD30).
-- **`sdk-config` (D9).** Returns the SDK `:config` map for `provider-id`: the caller's
-  `cfg :provider/config` override (`{:api-key …}` | `{:auth-token …}`) when present, else
-  `nil`/empty — in which case the SDK falls back to its **own env-var defaults**. The
-  override is threaded onto the `SdkAdapter` (as `provider-config`) at `start-session!`
-  (§6); credentials never live in the engine, and `make-config` only carries the opaque
-  `cfg :provider/config` it is handed.
+### Current `SdkAdapter` contract
 
-## 3. Streaming ⟂ retry (opt-in, default OFF)
+- `provider-config` is the opaque `cfg :provider/config` map; when nil/empty, the SDK
+  falls back to its own environment/auth defaults.
+- `->sdk-request` converts the engine wire request into the SDK request using the SDK's
+  **namespaced message keys**:
 
-The SDK **cannot retry a streaming call** (a partially consumed stream can't be
-resumed). So these two are mutually exclusive, surfaced as a deliberate config choice:
+  ```clojure
+  {:request/model    "model-id"
+   :request/messages [{:message/role :system
+                       :message/content "text"} ...]
+   :request/cache    {:enabled? true :ttl "1h" :scope-id "fr:agent:..."}}
+  ```
 
-| `:stream?` | path | retry | live deltas |
-|------------|------|-------|-------------|
-| `false` (default) | non-streaming, retrying | yes (per `:retry`) | none |
-| `true` | streaming | **no** | `:on-delta` per fragment → live dispatch (09) |
+- `:request/cache` is omitted when the engine request has no cache map.
+- `sdk-response->call-record`:
+  - concatenates `:response/parts` text parts into `:text`;
+  - normalizes missing usage/cost/cache to honest `:unknown`;
+  - maps `:response/cache` to the engine's bare `:cache` key;
+  - falls back to the request model when the SDK response omits `:response/model`.
 
-Either way, **durable events are identical** — they derive from the *completed*
-assistant message, not the deltas. Token deltas are transient (09); they are never
-persisted as per-token events.
+### Streaming and retry are mutually exclusive
 
-> **How `:on-delta` is wired (GD29).** `run-step!` (07) passes an `:on-delta` closure that
-> calls `(notify-transient store sid {:event/type :delta/token :text frag
-> :step/id *current-step-id*})` — a **transient** signal (no `:event/id`, never folded),
-> routed through the live dispatch under the drop-transient/gap policy (02 §4, 09). The
-> adapter only invokes the callback per fragment; it never touches the store.
+The current implementation disables SDK retry when `:stream? true` because a partially
+consumed stream cannot be retried safely.
 
-## 4. Request assembly (`fractal.engine.adapter.request/build-request`, called by run-step!)
+| `:stream?` | retry passed to SDK | live deltas |
+|------------|---------------------|-------------|
+| `false`    | yes                 | none |
+| `true`     | no                  | `:on-delta` receives each `:stream/content-delta` fragment |
 
-Lives in its **own** namespace (GD10): the port (§1) stays engine-dep-free, while
-`adapter.request` requires `cache` (08), `prompt` (12), and `payload-io` (02 §3) — so it
-sits at **L3**, built after them (01/11, GD19). `run-step!` calls it with the handle's
-store, the strong `current-view`, and cfg:
+The engine publishes those deltas as **transient** live events
+`{:event/type :delta/token :text frag :step/id ...}`. They are not durable artifacts.
+
+---
+
+## 5. Request assembly (`fractal.engine.adapter.request`)
+
+The request builder is intentionally outside the port namespace because it depends on
+engine concerns: prompt text, cache scope, payload hydration, and transcript compaction.
 
 ```clojure
 (defn build-request [store view cfg]
   {:model    (:model cfg)
-   :messages (->> (kept-messages view)                              ; compaction-aware; derived from :events (07 §4, see below)
-                  (map #(payload-io/hydrate-message store %))       ; :message/content-or-ref → :message/content (02 §3, GD11)
-                  (map observation->user)                           ; :observation → :user (+ "Observation:\n") — still namespaced
-                  (cons (system-message view cfg))                  ; prepend the assembled :system message
-                  (map to-wire))                                    ; FINAL: namespaced :message/* → {:role :content} wire map (GD11)
-   :cache    (cache/build-cache-opts view cfg)})                    ; opaque {:enabled? :ttl :scope-id} (08)
+   :messages (->> (store/kept-messages view)
+                  (map #(payload-io/hydrate-message store %))
+                  (map observation->user)
+                  (cons (system-message view cfg))
+                  (mapv to-wire))
+   :cache    (cache/build-cache-opts view cfg)})
 ```
 
-- `hydrate-message`, `observation->user`, and `system-message` all operate on the engine's
-  **namespaced** message shape (`:message/role`/`:message/content`); `to-wire` is the *last*
-  step and is the only thing that emits the adapter's `:role`/`:content` wire map (§1, GD11).
-- `kept-messages` applies compaction over the **log**, because message entities carry no
-  `:event/id` (and `:message/id` is a *different* counter): it collects the `:message` of
-  every message-bearing event (`:message/appended` / `:session/compacted`) in `(:events
-  view)` whose `:event/id ≥ (:compact-from-event-id view)` (nil ⇒ all). The compact frame's
-  own `:session/compacted` event-id *equals* the boundary, so it and everything after
-  survive — the provider sees `[system, compact-frame, …new…]`. ⛔ Do NOT prune over
-  `(:messages view)` directly (you'd have no event id to compare). (02 §1/§2, 07 §4)
-- `hydrate-message` (payload-io, 02 §3) dereferences `:message/content-or-ref` and **renames
-  it to `:message/content`** — the same hydrated shape the compaction formatter consumes (07, GD11).
+### Current assembly rules
 
-**System message assembly order (documented):**
-`base doctrine prompt (12)` ++ `cfg :system-overlay` ++ `session :session/system-overlay`
-(`start-session!` sets `:session/system-overlay` from `opts :system-overlay` — 02 §1, 06, GD32).
-The overlays specialize a session's behavior; they do not add model-facing functions.
+- `store/kept-messages` is the compaction-aware transcript view.
+- `payload-io/hydrate-message` resolves `:message/content-or-ref` into
+  `:message/content`.
+- `observation->user` rewrites internal observation messages before the adapter sees them.
+- `system-message` concatenates, in order:
+  1. the base doctrine prompt chosen by `:harness`;
+  2. `cfg :system-overlay`;
+  3. `session :session/system-overlay`.
+- `to-wire` is the last step that drops the engine's namespaced message shape.
 
-## 5. `FakeAdapter` (offline, deterministic — the test backbone)
+The adapter therefore receives exactly one assembled system message plus the kept
+transcript. There is no hidden tool state or side channel at this boundary.
 
-`FakeAdapter` short-circuits the network so **all of Phase 1 builds and tests with no
-API keys and no spend**. It ignores `opts` internally (no streaming/retry) — but
-`run-step!`'s `with-deadline` still wraps the fake call too, so timeout behavior is
-uniform across impls (GD18). Construct it with a **responder**: a fn of the request → an
-assistant-message string (or a full call record). The recommended form is
-content-addressed — *not* a mutable response queue — so it is race-free under future
-fan-out:
-
-```clojure
-(defn fake-adapter [respond-fn]   ; respond-fn : request → string | call-record
-  (reify LlmAdapter
-    (-complete [_ request _opts]
-      (let [r (respond-fn request)]
-        (if (map? r) r (text->call-record r request))))))   ; provider :fake, usage :unknown
-```
-
-A `responder` helper builds `respond-fn` from `[[match reply] …]` clauses (match =
-substring of the last user message, a predicate on the request, or `:default`; reply =
-a string, a call-record, or a fn of the request). Because it is a pure fn of the
-request, scripted runs are deterministic and order-independent. See 10.
-
-> `FakeAdapter`'s `:provider` is `:fake` and its `:usage`/`:cost`/`:cache` (the **bare**
-> `:cache` key, GD30) are `:unknown` (honest) unless the responder supplies a full record.
-> Provider resolution (07, GD20) returns `:fake` for the fake adapter rather than
-> catalog-resolving the model id.
+One related Phase 3/4 truth: a child or attached-child task is **not** a different system
+prompt. Recursion uses the same `:rlm` doctrine prompt and adds the child assignment as a
+normal **user message frame** (`prompt/child-invocation-frame`).
 
 ---
 
-## 6. Construction (the composition root) + the SDK contract
+## 6. `FakeAdapter`
 
-### Where adapters are built (GD5)
-
-`make-config` records **only the adapter choice keyword** (`:adapter :sdk | :fake`); it
-never constructs an instance and never requires `.sdk`/`.fake`. `start-session!` (07) is
-the **sole composition root**: it builds the adapter instance — `SdkAdapter` from the
-catalog-resolved `provider-id` (GD20) **+ the `cfg :provider/config` credential override
-threaded in as `provider-config` (D9; `nil`/empty ⇒ SDK env defaults)**, or `fake-adapter`
-from `cfg :fake/respond` — and
-stashes both the **adapter** and **cfg** on the **handle** (02 §5, 06). `run-step!` reads
-`(:adapter handle)` / `(:cfg handle)`; nothing inside the loop constructs an adapter.
-
-### The SDK contract (`clojure-llm-sdk` 0.2.3 — verified; pinned in `deps.edn`) (GD21)
-
-The only impl that crosses the network. Pinned facts (re-verify on every bump — 04 has the
-SCI regression test; this contract is its adapter-side analogue):
-
-**`(llm.sdk/complete provider-id request & opts)`** — opts: `:stream?` (bool), `:on-event`
-(1-arg fn), `:retry` (nil/true/map), `:config` (`{:api-key … | :auth-token …}`).
-
-**Request** — `->sdk-request` builds it from the §1 narrowed request:
+`fractal.engine.adapter.fake/fake-adapter` is the offline, deterministic test adapter.
 
 ```clojure
-{:request/model    "claude-opus-4-8"
- :request/messages [{:role :system|:user|:assistant :content "…"}]   ; content is a STRING
- :request/cache    {:enabled? true :ttl "5m"|"1h" :scope-id "fr:…"}} ; the §1/08 passthrough, verbatim
+(defn fake-adapter [respond-fn]
+  (reify LlmAdapter
+    (-complete [_ request _opts]
+      (let [r (respond-fn request)]
+        (if (map? r) r (text->call-record r request))))))
 ```
 
-**Response**:
+Important current behaviour:
 
-```clojure
-{:response/provider      :anthropic
- :response/model         "claude-…"
- :response/parts         [{:text "…"} …]      ; assistant text = concat of each TextPart's :text
- :response/finish-reason :stop
- :response/usage         {:input … :output … :cached-input … :cache-write …}
- :response/cost          {:usd <number>|:unknown :estimated? <bool>}
- :response/cache         {:status :hit|:miss|:unknown :cached-tokens … :cache-write-tokens …}}
-```
+- `respond-fn` is a **pure function of the request**, not a mutable queue;
+- it may return either assistant text or a full call record;
+- default text responses normalize to provider `:fake` and honest `:unknown`
+  usage/cost/cache;
+- it ignores streaming and retry opts internally, but the outer timeout wrapper still
+  applies.
 
-**Streaming**: text arrives as `:event/delta` on `:stream/content-delta` events;
-`content-delta` extracts the fragment for `:on-delta` (§3).
+`fake/responder` builds a `respond-fn` from ordered clauses matching against the last user
+message, a predicate, or `:default`.
 
-**Catalog** (`fractal.engine.catalog`, an engine-free static wrapper — 01/GD19):
-`provider-from-model-id` over `model-info` → `{:model … :provider …}`; `context-window`
-over `model-context-length` → tokens (int) | nil. Used for provider resolution at
-`start-session!` (GD20) and the model context window (resolved into cfg by `make-config`,
-read by compaction — 07). These static lookups are allowed **outside** the adapter — only
-*completions* go through `complete` (GD20).
+---
 
-**`sdk-response->call-record`** maps a Response onto the §1 call record: `:text` from
-`:response/parts`, `:usage` (+ `:usage/status`), `:cost` (+ `:cost/status`),
-`:response/cache` → the **bare `:cache`** (GD30, 08 §5), plus
-`:model` / `:provider` / `:finish-reason`.
+## 7. Pinned SDK boundary
+
+The repo currently pins `net.clojars.deadmeme5441/clojure-llm-sdk` **0.2.3** in
+`deps.edn`. The adapter-side tests pin the parts of that contract the engine relies on:
+
+- request messages use `:message/role` / `:message/content`;
+- cache passthrough survives as `:request/cache`;
+- response text is built from `:response/parts`;
+- absent usage/cost/cache become honest `:unknown`;
+- `:response/cache` maps onto the engine's bare `:cache`.
+
+Any SDK bump that changes those truths should be treated like an interface change: re-run
+the tests and update this spec to the new ground truth before relying on it.

@@ -1,198 +1,216 @@
 # 04 · Capability Sandbox
 
-The model writes arbitrary Clojure that the host evaluates. Because the kernel is SCI
-(03), capability is **denied by default** — no Java interop, no file IO, no shell, no
-network — and granted **explicitly** by a per-session **capability profile**. This
-replaces v1's "full JVM + an OS seatbelt as the only line" with first-class,
-language-layer capability control. `fractal.engine.capability`.
+The model writes arbitrary Clojure and the host evaluates it inside **SCI**, not JVM
+`eval`. Capability is therefore a **language-layer contract**: deny by default, then
+grant only what a per-session **capability profile** explicitly allows.
+`fractal.engine.capability`.
 
-> The core sandbox thesis was **empirically verified against SCI 0.8.43**: with
-> `:classes {}`, static *and* instance interop are denied; there is no built-in
-> `slurp`/`sh`; var shadows hold; `#=` reader-eval is blocked. These facts are
-> **version-dependent** — a pinned regression test (§7) guards them; re-run it on every
-> SCI bump.
+Two implementation facts matter for the rest of the spec:
+
+- the **kernel** owns the per-session SCI namespace and re-binds `sci/ns` on every eval;
+- **capability** owns the injected host vars (`FINAL`, `inspect`, gated IO, recursion fns)
+  and the deny set.
+
+That split is deliberate: capability never depends on the kernel, and the gated vars
+survive a model `(in-ns …)` because they live in injected `clojure.core` /
+`clojure.java.io` / `clojure.java.shell` namespaces, not in a one-off scratch ns.
+
+> The core sandbox thesis is pinned to **SCI 0.8.43**. CI runs a dedicated regression
+> file (`test/fractal/engine/sci_sandbox_test.clj`) that guards the verified facts after
+> every SCI bump.
 
 ---
 
 ## 1. A capability profile is data
 
 ```clojure
-{:capability/name   :default            ; for audit/recording
- :cap/fs-read       {:paths ["/work"]}  ; :deny | :allow | {:paths [canonical-prefixes]}
- :cap/fs-write      :deny               ; :deny | :allow | {:paths [...]}
- :cap/shell         {:commands #{"grep" "cat" …}} ; :deny | :allow | {:commands #{names}}
- :cap/network       :deny               ; :deny | :allow  (URL schemes in reads/sh)
- :ns/granted        #{clojure.string clojure.edn …}  ; a FILTER over the engine ns catalog
- :cap/java-classes  {}                  ; explicit class whitelist (NEVER {:allow :all})
- :engine-fns        #{:FINAL :inspect}} ; which host fns are injected (lm/rlm/attach gated here)
+{:capability/name  :default
+ :cap/fs-read      {:paths ["/work"]}     ; :deny | :allow | {:paths [canonical-prefixes]}
+ :cap/fs-write     :deny                  ; :deny | :allow | {:paths [...]}
+ :cap/shell        {:commands #{"grep" "cat" ...}} ; :deny | :allow | {:commands #{...}}
+ :cap/network      :deny                  ; :deny | :allow
+ :ns/granted       #{clojure.core clojure.string clojure.edn ...}
+ :cap/java-classes {}                     ; explicit finite whitelist only
+ :engine-fns       #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}}
 ```
 
-Gates are independent **dimensions**; a profile is their product. There is no single
-"level" — `:locked-down`/`:default`/`:trusted` are just **named profile values** (§3).
+The gates are independent dimensions. There is no single scalar "level";
+`:locked-down`, `:default`, and `:trusted` are just named profile values.
 
 ---
 
 ## 2. Mapping a profile onto SCI (`sci-opts`)
 
-`(capability/sci-opts profile engine-fn-impls)` → the map passed to `sci/init` (03).
-`engine-fn-impls` is `{:FINAL fn :inspect fn …}`, supplied by the wiring layer
-(`session`, 03) — capability takes it as **data** and never depends on the kernel.
+`(capability/sci-opts profile engine-fn-impls)` returns the map passed to `sci/init`.
+`engine-fn-impls` is supplied by the wiring layer as plain data.
 
 ```clojure
-{:namespaces { 'fractal.session.<id>
-               (merge (select-keys engine-fn-impls (:engine-fns profile)) ; FINAL/inspect[/lm/rlm/attach], gated by profile
-                      (gated-io-fns profile))                             ; capability's own slurp/spit/sh/file-seq
-               'clojure.pprint …, 'clojure.data …, … }                   ; copy-ns'd catalog ns ∩ :ns/granted (string/edn/set/walk are SCI defaults — free)
- :classes    (build-class-map profile)                                   ; explicit whitelist; never :all
- :deny       deny-set                                                    ; §5
- :ns-aliases { … }}
+{:namespaces
+ {'clojure.core
+  (merge (engine-fn-vars profile engine-fn-impls) ; FINAL/inspect[/lm/...], filtered by :engine-fns
+         (gated-io-vars profile))                 ; slurp/spit/file-seq/sh
+
+  'clojure.java.io
+  (gated-io-ns profile)                           ; file/reader/input-stream/as-url/copy
+
+  'clojure.java.shell
+  {'sh (gated-sh profile)}
+
+  ;; plus the copy-ns catalog entries that are granted by :ns/granted
+  ...}
+
+ :classes (:cap/java-classes profile)
+ :deny    deny-set}
 ```
 
-> `:engine-fns` (the names) gates which host fns are injected — so `:locked-down`
-> dropping `:lm`/`:rlm` simply omits them from the `select-keys`. The gated IO fns
-> (`slurp`/`spit`/`sh`/`file-seq`) are capability's own (the gates live here, §2).
+The **session namespace is not built here**. `kernel/new-ctx` creates the session ns
+after `sci/init`, and every eval re-binds `sci/ns` to that ns. Capability only defines
+what symbols are reachable once execution is in that session.
 
-Key construction rules (each fixes a verified hole):
+### Construction rules pinned by the code and tests
 
-- **`slurp`/`spit` are ALWAYS host-injected and gated** — SCI has **no built-in
-  `slurp`** (probed: `Could not resolve symbol: slurp`). There is no "allow mode passes
-  through to the built-in" — that built-in does not exist. `:cap/fs-read :allow` injects
-  an unrestricted-local-file `slurp` that still applies the network gate; `{:paths …}`
-  adds a path check; `:deny` injects a `slurp` that throws.
-- **Network-aware read gate.** The injected `slurp`/`io/reader`/`io/input-stream`/
-  `io/as-url`/`io/copy` reject any arg whose URI scheme ∈ `{http https ftp jar file://host}`
-  **unless `:cap/network` allows** — independent of the fs path gate. (Closes
-  `slurp`-of-URL exfil; `:default` (`network :deny`) refuses `(slurp "http://…")`.)
-- **`sh` is gated by an allowlist of genuinely non-exec/non-net/non-write commands.**
-  `:default` allows: `#{grep cat head tail wc sort uniq cut tr comm ls stat file diff
-  jq md5sum sha256sum date echo}`. **EXCLUDE** `find awk sed git python3 ruby node
-  clojure clj tee cp mv rm dd xargs env` — each grants arbitrary exec/write/network and
-  defeats the gate. Use Clojure `file-seq` (gated io), not `find`. Interpreters live
-  only in `:trusted` (`:cap/shell :allow`).
-  > Mitigating fact: `clojure.java.shell/sh` uses `ProcessBuilder` with **no shell**, so
-  > `|`/`>`/`;`/`$()` in args are inert — only programs that *themselves* exec/network
-  > are the vector. The command-NAME allowlist is therefore meaningful *iff* every
-  > interpreter/`-exec` tool is excluded.
-- **Path gate = canonicalized path-boundary**, never string-prefix: canonicalize the
-  requested path and each allowed prefix, admit iff `requested == prefix` OR
-  `requested startsWith (prefix + File/separator)`. (`/work` must not admit
-  `/work-secret`.) Store prefixes canonical/absolute.
-- **`:ns/granted` is a filter over a fixed engine catalog** of injectable namespaces.
-  `require` resolves a name iff it is **in the catalog AND in `:ns/granted`**. The
-  always-injected `clojure.java.io`/`clojure.java.shell` are implicitly granted (gated
-  at the *var* level, not the ns level). The catalog has **two tiers**:
-  `clojure.string`/`clojure.edn`/`clojure.set`/`clojure.walk` are **SCI defaults** (built
-  in — resolvable without injection); `clojure.pprint`/`clojure.data`/`clojure.zip`/
-  `clojure.core.protocols` are **not** SCI defaults and are made injectable by compiling
-  them into `:namespaces` via SCI's **`copy-ns`** (`clojure.core` is always present).
-  `sci-opts` selects `:ns/granted ∩ catalog`: copy-ns'd entries are emitted into
-  `:namespaces`; default entries cost nothing. `:default` catalog grant:
-  `#{clojure.core clojure.string clojure.edn clojure.set clojure.walk clojure.pprint
-  clojure.data clojure.zip clojure.core.protocols}` + implicit io/shell.
-- **Dangerous `:cap/java-classes` THROW, not warn.** `validate-profile!` throws if the
-  whitelist contains `java.net.*`, `java.lang.ProcessBuilder`, `java.lang.Runtime`,
-  `java.lang.Thread`, `java.lang.reflect.*`, `java.lang.ClassLoader`, `jdk.*`, `sun.*` —
-  unless an explicit `:capability/unsafe true` co-marker is present. `:default`/
-  `:locked-down` reject the unsafe marker entirely. `build-class-map` may **never** emit
-  `{:allow :all}` (which would defeat the whole sandbox); assert a finite explicit map.
+- **`slurp`/`spit`/`file-seq`/`sh` are always injected host vars.**
+  SCI has no built-in `slurp` to "fall back to", so even `:allow` mode still goes
+  through the engine's gated host fns.
+- **The read gate classifies the resolved target, not the raw argument string.**
+  `File`, `URL`, `file:` URLs, uppercase schemes, and plain strings are all normalized
+  the same way `clojure.java.io` would normalize them. This closes confused-deputy
+  holes such as a `file:` URL bypassing a string-only check.
+- **The path gate is canonical path-boundary logic, never string-prefix logic.**
+  A request is allowed only when the canonical requested path equals an allowed prefix or
+  sits under it as a real descendant. `/work` must not admit `/work-secret`.
+- **`clojure.java.io/file` is intentionally ungated.**
+  It is only a constructor. Reads and writes are gated when code actually uses
+  `slurp`, `reader`, `input-stream`, `copy`, `spit`, or shell.
+- **Network is a separate gate from file access.**
+  `http`, `https`, `ftp`, `jar`, and hosted `file://…` URLs are treated as network.
+  Local `file:/abs/path` and `file:///abs/path` URLs are treated as file reads/writes.
+- **Shell is a command-name allowlist, not a shell parser sandbox.**
+  `clojure.java.shell/sh` uses `ProcessBuilder` without a shell, so `|`, `>`, `;`, and
+  `$()` are inert. The meaningful boundary is therefore the allowed executable set.
+  `:default` allows only genuinely non-exec / non-net / non-write tools:
+  `#{grep cat head tail wc sort uniq cut tr comm ls stat file diff jq md5sum sha256sum date echo}`.
+- **Namespace reachability is split between SCI defaults and copy-ns extras.**
+  `clojure.string`, `clojure.edn`, `clojure.set`, and `clojure.walk` are SCI defaults.
+  `clojure.pprint`, `clojure.data`, `clojure.zip`, and `clojure.core.protocols` are
+  compiled into the catalog with `sci/copy-ns` and emitted only when granted.
+- **Java interop is an explicit finite whitelist.**
+  `validate-profile!` rejects non-map class whitelists, rejects non-symbol keys, rejects
+  dangerous classes unless `:capability/unsafe true` is present, and rejects the unsafe
+  marker entirely on `:default` and `:locked-down`.
 
 ---
 
-## 3. The named profiles (a lattice)
+## 3. Named profiles
 
 ```clojure
-:locked-down  ; max sandbox: fs-read :deny (or a tight :paths), fs-write :deny,
-              ; shell :deny, network :deny, java-classes {}, engine-fns #{:FINAL :inspect}
-:default      ; the RLM workhorse: fs-read {:paths [workdir]}, fs-write :deny,
-              ; shell {:commands <the safe set>}, network :deny, the :default ns grant,
-              ; engine-fns #{:FINAL :inspect :lm :map-lm :rlm :map-rlm :attach-rlm}
-:trusted      ; fs-read :allow, fs-write {:paths [workdir]}, shell :allow, network :allow,
-              ; broader ns grant, engine-fns (all)
+:locked-down
+;; no fs read/write, no shell, no network, no interop, no recursion/model egress
+;; :engine-fns #{:FINAL :inspect}
+
+:default
+;; reads only the current workdir, denies writes and network, allows the safe shell set,
+;; grants the default namespace catalog, :engine-fns includes FINAL/inspect/lm/map-lm/rlm/map-rlm/attach-rlm
+
+:trusted
+;; fs-read :allow, fs-write {:paths [workdir]}, shell :allow, network :allow,
+;; same namespace catalog as :default, same :engine-fns as :default
 ```
 
-**`:locked-down` ⇒ `:engine-fns #{:FINAL :inspect}` (no `lm`/`rlm`/`attach-rlm`).** This is a
-deliberate security boundary: `lm`/`map-lm`/`rlm`/`map-rlm` are **unfilterable egress to
-the provider** — the capability profile cannot constrain *what they send*. So the
-maximum-sandbox profile closes that channel by removing them. Consequence (accept it):
-"max sandbox" and "can recurse/delegate" are mutually exclusive. (A middle "lm/rlm via
-an approval path" profile may be added later; not now.)
+Important composition truth:
 
-> The RLM thesis **requires easy file reads** (the model reads its own input). So
-> `:default` must keep `fs-read` open to the work area even while gating writes/network/
-> shell. Do not lock reads down by default.
+- `:trusted` is broader in **IO/network**, not in namespace catalog or Java interop.
+- `:locked-down` removes `lm`/`map-lm`/`rlm`/`map-rlm`/`attach-rlm` because those are
+  unfilterable provider egress. A maximum-sandbox session cannot also delegate.
 
-### Clamp + inheritance (composition)
+Harness mode and capability compose cleanly:
 
-- **`clamp(a, b)` = the meet** over every gate (the more-restrictive of each), computed
-  per dimension: **`:deny` annihilates** (meet with anything ⇒ `:deny`); **`:allow` is
-  identity** (meet with anything ⇒ the other operand); two **`{:paths …}`** meet by
-  **prefix-intersection** (keep each canonical prefix admitted by *both* boundaries — a
-  prefix of one that lies within the other); two **`{:commands …}`** (and the `:ns/granted`
-  grant-sets) meet by **set-intersection**; two **`:cap/java-classes`** maps meet by
-  **key-intersection** (keep only classes whitelisted in both). Ordering:
-  `:deny < {subset of paths/commands} < :allow`; grant-sets ordered by ⊆ (smaller =
-  more restrictive); java-classes ⊆.
-- **Universal inherit-and-clamp for ALL child spawns** (Phase 3/4: `rlm`/`map-rlm`/fork/
-  branch/`attach-rlm`): `child = clamp(parent-resolved, child-override)`. Engine-default
-  applies **only to root sessions**. (Closes the escalation: a `:locked-down` parent
-  cannot `(rlm "read /etc/secret")` into a `:default` child.)
-- **`attach-rlm` rejects** when the caller profile `<` the target-session profile on any
-  gate (a low-priv caller may not drive a high-priv session).
-- **Override = REPLACE per gate, never union grant-sets.** `validate-profile!` rejects
-  any override that is not ≤ base on **every** gate (the per-gate restrictiveness
-  lattice). The same predicate gates child clamping.
+- `:harness :clojure` assembles only `FINAL` and `inspect` before capability filtering.
+- `:harness :rlm` assembles the recursion fns too, then `:engine-fns` filters them.
+- Therefore a `:locked-down` session running in `:harness :rlm` still exposes only
+  `FINAL` and `inspect`.
 
 ---
 
-## 4. Configuration + audit
+## 4. Clamp and inheritance
 
-- Engine config carries a **default profile**; a session may pass a **per-session
-  override** (clamped/validated against the default). See `make-config` (07).
-- The resolved profile **name** is recorded on the session (`:session/capability`, 02)
-  and the full profile value is available for audit — a run's capability posture is
-  inspectable. (⚠ denied paths/args may flow into the audit log via error ex-data; note
-  for log handling.)
+`clamp(a, b)` is the per-gate **meet**: the more restrictive of the two profiles.
 
-## 5. The `:deny` set
+- `:deny` annihilates.
+- `:allow` is identity.
+- two `{:paths ...}` gates intersect by mutual containment of canonical prefixes.
+- two `{:commands ...}` gates intersect by set intersection.
+- `:ns/granted`, `:engine-fns`, and Java-class keys intersect by set/key intersection.
+- network is binary: if either side is `:deny`, the result is `:deny`.
+
+### Where the engine applies that meet today
+
+- **Root session override**: `start-session!` uses `resolve-override`.
+  A root/session override that loosens any gate beyond the configured base is rejected.
+- **Fresh child spawn (`rlm` / `map-rlm`)**: `spawn-child!` uses the parent profile as the
+  default child profile, or `clamp(parent, override)` when an override is supplied.
+  A loosening override is therefore **silently tightened** to the parent boundary rather
+  than rejected; a stricter override narrows the child further.
+- **Attach (`attach-rlm`)**:
+  1. resolve the source session/head;
+  2. reject the attach if the source profile is more privileged than the caller
+     (`:fractal/attach-capability-rejected`);
+  3. compute `base = clamp(caller, source)`;
+  4. apply any attach override via `resolve-override`, so loosening beyond `base` is
+     rejected here.
+
+Attach is therefore stricter than plain child spawn: it must satisfy both the caller's
+boundary and the source session's boundary.
+
+---
+
+## 5. Configuration and audit
+
+- `make-config` validates the configured default profile and stores the validated profile
+  value under `:capability`, plus its name under `:capability/name`.
+- `start-session!`, `resume-session!`, `spawn-child!`, and `spawn-attached!` keep the
+  full resolved profile on the **live handle** as `:capability`.
+- The durable session entity records only the **resolved profile name** at
+  `:session/capability`.
+
+So the durable audit trail tells you which named posture a session ran under, while the
+live handle carries the fully resolved gate map the runtime is enforcing.
+
+---
+
+## 6. The deny set
 
 ```clojure
-#{eval clojure.core/eval resolve ns-resolve requiring-resolve find-ns find-var intern
-  load-string load-file load}
+#{eval clojure.core/eval resolve ns-resolve requiring-resolve
+  find-ns find-var intern load-string load-file load}
 ```
-Plus keep `*read-eval*` **false** (SCI default; blocks `#=`). (There is **no**
-`read-string-with-eval` symbol to deny — reader-eval is already shut off by `*read-eval*`
-false, so do not add it back to the set.) ⛔ Do **not** put
-`binding` in `:deny` — SCI's `binding` only rebinds SCI dynvars (it cannot escape the
-sandbox), and the model legitimately rebinds `*print-length*`/`*out*`. (Probed:
-denying `binding` breaks `(binding [*print-length* 3] …)` for zero security gain.)
 
-## 6. The OS sandbox is a BACKSTOP
+Additional pinned truths:
 
-Now that the language layer gates capability, an OS-level sandbox (seatbelt on macOS,
-Landlock/seccomp on Linux) is a **defense-in-depth backstop**, not the primary
-boundary, and is **out of Phase-1 scope** (note it for later). Residual truths to
-record (not solve now): the OS sandbox does **not** filter network — true network
-isolation needs a netns/container/proxy at deploy; and `lm`/`rlm` remain unfilterable
-provider egress regardless of OS sandboxing (a deployment trust assumption).
+- `*read-eval*` stays false, so `#=` reader-eval is already blocked.
+- there is no `read-string-with-eval` symbol to deny.
+- `binding` is intentionally **not** denied; rebinding SCI dynamic vars such as
+  `*print-length*` is legitimate and tested.
 
-## 7. The pinned regression test (REQUIRED)
+---
 
-A test (`10`) that asserts, against the pinned SCI version, with `:classes {}`:
-- instance interop on a host-leaked `File` throws (`Method … on class java.io.File not allowed`);
-- static interop (`System`/`Runtime`) is unresolvable;
-- `#=` reader-eval throws; `read-string` of `#=(…)` does not execute;
-- `requiring-resolve` cannot reach an un-injected namespace;
-- the **gated `slurp` shadow survives an `in-ns`** (a model `(in-ns …)` must not revert
-  `slurp` to a built-in — there is none, but the test pins the behavior);
-- the **`sci/eval-string*` REPL-interleaving guarantee** (03 §2): a multi-form block
-  reads-then-evals one form at a time, so a `(require …)`/`(in-ns …)`/`(def …)` in form 1
-  is visible to form 2, and the block's reported value is the **last form's value**
-  (`last-form-value`);
-- a model **`(in-ns …)` does not strand later host evals** (03 §2, the per-step in-ns
-  re-assertion): a block that switches ns still leaves the *next* step's host evals
-  landing back in the session ns (eval-batch re-asserts `(in-ns '<session-ns>)` as its
-  first action each step);
-- `binding` of a dynvar **works** (it is not denied).
+## 7. The pinned regression tests
 
-These facts are load-bearing and version-dependent. **CI must run this test and block
-release on failure after any `org.babashka/sci` bump.**
+`test/fractal/engine/sci_sandbox_test.clj` and `test/fractal/engine/capability_test.clj`
+pin the current behaviour:
+
+- instance interop on a host-leaked `File` is denied when `:classes {}`;
+- static interop (`System`, `Runtime`) is unresolvable;
+- `#=` reader-eval is blocked;
+- the deny set blocks `eval`, `load-string`, and `requiring-resolve` escapes;
+- the gated `slurp` shadow survives `(in-ns …)`;
+- a multi-form `sci/eval-string*` block reads/evals one form at a time and returns the
+  last form's value;
+- `binding` works;
+- `:default` can read a local file in the work area, but rejects URL reads, out-of-tree
+  file reads, `git`, and interpreters such as `python3`;
+- `clojure.pprint` and `clojure.data` are reachable when granted; `clojure.zip` is not
+  reachable from `:locked-down`.
+
+These are load-bearing, version-sensitive facts. CI should continue to block SCI upgrades
+unless those tests pass and the spec is intentionally updated with the new truth.

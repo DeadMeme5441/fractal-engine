@@ -1,165 +1,349 @@
-# 06 · Public API (the SDK surface)
+# 06 · Public API
 
-`fractal.engine.api` is **the SDK** — the supported public surface for embedding the
-engine as a library. It is thin: it delegates to the internals (`session`,
-`session-loop`, `store`, `live`, `payload-io`) and exposes nothing else. Phase 1 ships the
-**"clojure harness"** (drive a single non-recursive session). The **"rlm harness"**
-(Phase 3/4) **extends this same surface** — recursion is internal, so these signatures
-do not change.
+`fractal.engine.api` is the supported embedding surface for the engine. The
+runtime, agent-facing CLI control plane, and audit/readback tools should build
+on this layer instead of reaching into internals.
+
+The intended consumers are:
+
+- agents with shell and CLI access
+- supervising humans reading reports, chronicles, and summaries
+- automation that needs a stable, scriptable control plane
+
+That is why the surface stays small, explicit, JSON-friendly, resumable, and
+readback-oriented. The CLI is not framed as an end-user interactive product
+surface here; it is a durable control-plane seam over this API.
 
 ---
 
-## 1. Config
+## 1. Exported functions
+
+Current public functions:
 
 ```clojure
-(make-config opts) → cfg      ; normalize engine config (see 07 for the full shape)
+(make-config opts)
+
+(start-session! cfg)
+(start-session! cfg opts)
+
+(run-turn! handle msg)
+(run-turn-async! handle msg)
+
+(resume-session! cfg sid)
+(resume-session! cfg sid opts)
+
+(stop-session! handle)
+(stop-session! handle opts)
+
+(close-session! handle)
+(compact-session! handle)
+
+(view handle)
+(progress handle)
+(event-stream handle)
+(events-since handle ev-id)
+(read-payload handle ref-or-value)
+(subscribe! handle callback)
+
+(responder clauses) ; fake-adapter test helper
 ```
 
-`make-config` records only the adapter *choice* (a keyword, `:sdk`/`:fake`) — it never
-constructs the `LlmAdapter` and never requires the adapter impls. `start-session!` is the
-sole composition root that builds the adapter instance (§2).
+The public API is intentionally lifecycle/run/read focused. Model-facing host
+functions live inside the session REPL, not here.
 
-## 2. Session lifecycle
+---
+
+## 2. Config
+
+`make-config` normalizes and validates runtime config. It:
+
+- validates required fields and enumerated options
+- resolves the default capability profile
+- resolves `:context-window` from the model catalog or sets `:unknown`
+- records adapter choice and runtime knobs
+- does **not** construct the adapter instance
+
+Adapter construction happens later in `start-session!` or `resume-session!`,
+which are the composition roots.
+
+---
+
+## 3. Session lifecycle
+
+### `start-session!`
 
 ```clojure
-(start-session! cfg)            → handle    ; also (start-session! cfg opts) for :id/:system-overlay/:capability
-(run-turn!       handle msg)    → TurnResult ; BLOCKING; runs steps until FINAL; returns the reply
-(run-turn-async! handle msg)    → TurnHandle ; background; deref (:promise th) for the TurnResult
-(stop-session!   handle)        → handle     ; request stop; optional (stop-session! handle {:wait? true})
-(compact-session! handle)       → handle     ; force compaction now (07); usually automatic
+(start-session! cfg)
+(start-session! cfg {:id ... :capability ... :system-overlay ...})
 ```
 
-- `start-session!` is the **sole composition root**: it creates the store session,
-  resolves the provider via the SDK catalog (or `:fake` for the fake adapter),
-  **constructs the `LlmAdapter`** (sdk from the catalog provider-id; fake from cfg
-  `:fake/respond`) and stashes `cfg` + the adapter on the handle, builds the SCI ctx from
-  the resolved capability profile, sets `:session/system-overlay` from `opts` (records
-  `:session/started`), and returns a **handle** (02 §5). `make-config` records only the
-  adapter *choice* keyword — it never constructs the instance. `opts`: `:id`, `:capability`
-  (a per-session profile override, clamped to the cfg default — 04), `:system-overlay`
-  (extra session-level system text).
-- `run-turn!` first runs the **session gate before CAS**: if `:max-turns` is set and
-  reached it **throws** `ex-info` `{:error/type :fractal/session-turn-limit}`; if the
-  session status is `:stop-requested`/`:stopped`/`:error` it returns a `TurnResult`
-  `{:status :error :error {:error/type :fractal/session-stopped …}}`. Otherwise it
-  CAS-acquires the turn-lock, compacts if flagged (07 §2/§4), opens the turn (appends
-  `:user` + `:turn/started`), runs the step loop, releases the lock, and returns a
-  `TurnResult` (the FINAL value **hydrated**).
-- `run-turn-async!` runs the **same session gate on the caller thread** (max-turns ⇒
-  **throws** `:fractal/session-turn-limit` synchronously, before the future is spawned; a
-  stopped session ⇒ a `:fractal/session-stopped` error `TurnResult`), CAS-acquires the
-  lock, compacts if flagged, then opens the turn **synchronously** (to capture the
-  store-assigned turn id into the `TurnHandle`) and runs the loop on a daemon future. The
-  future delivers a `TurnResult` map (an error becomes `{:status :error …}`, never an
-  escaping throw) and releases the lock **before delivering** the promise (so a caller that
-  derefs then re-invokes can't hit a stale busy flag). (Concurrency details: 07.)
-- A second concurrent turn on a busy session throws `:fractal/turn-in-flight`.
-- `stop-session!` writes `:session/stop-requested` immediately (non-blocking, safe from a
-  `finally`/shutdown hook). If the session is **idle** (no turn in flight) it also appends
-  `:session/stopped` right away; if a turn is **in flight** it appends only
-  `:session/stop-requested`, and the **loop** appends `:session/stopped` at the next step
-  boundary. `:wait? true` blocks on the turn-lock for synchronous teardown, then appends
-  `:session/stopped`.
-- `compact-session!` CAS-acquires the turn-lock (throws `:fractal/turn-in-flight` if a
-  turn is in flight) and compacts under the held lock in a `try/finally`, releasing it
-  after. Automatic compaction also runs inside `run-turn!`/`run-turn-async!` when flagged
-  (07 §4).
+Behavior:
 
-> **resume / fork** are `^:alpha`/Phase-2 (cross-process resume needs the persistent
-> store). In Phase 1, simply retain the handle — the live SCI ctx and view are on it. An
-> in-process `resume-session!` may be exposed `^:alpha` (a status flip reusing the live
-> ctx) but is redundant with holding the handle; prefer to **defer it to Phase 2**.
+- builds the store from `cfg :store`
+- resolves provider and constructs the adapter
+- creates the store session
+- builds the SCI context
+- appends `:session/started`
+- returns a handle
 
-## 3. Reads (pure projections — no provider calls)
+The session handle is the control-plane token for later API calls.
+
+### `resume-session!`
 
 ```clojure
-(view     handle)            → the strong current view (02 §5)    ; via the store port: (current-view store sid)
-(progress handle)           → a ref-free live snapshot (09)       ; reads current-view, then live/progress
-(event-stream handle)       → the ordered event log
-(events-since handle ev-id) → events with :event/id > ev-id (09)
-(read-payload handle ref-or-value) → hydrated value              ; PUBLIC (see below)
+(resume-session! cfg sid)
+(resume-session! cfg sid opts)
 ```
 
-⛔ **`read-payload` is PUBLIC and load-bearing.** The read/live surface returns content
-as opaque payload-refs (02 §3): `view` returns `:messages` whose content may be a ref;
-events carry `:final-ref`/`:result-ref`/`:content-or-ref`/`:vars-ref`. A caller hydrates
-any of these through `read-payload` (a non-ref arg passes through unchanged). Callers
-never branch on the ref tag. `read-payload` is the thin `api` wrapper that takes the
-**handle** and delegates to `fractal.engine.payload-io/read-payload` against the handle's
-store (the pure `fractal.engine.payload` ns is store-free — the store-coupled hydrate
-lives in `payload-io`, 02 §3).
+Status:
 
-## 4. Live query
+- public but `^:alpha`
+- supported only for `:store :sqlite`
+
+Behavior:
+
+1. reopens the durable store
+2. folds the persisted event log into a fresh in-memory view
+3. rebuilds a fresh SCI context
+4. restores vars from the current head's vars snapshot when present
+5. falls back to top-level `:vars-ref` only if no current head exists
+
+Failure cases throw:
+
+- unsupported store
+- unknown session id
+- configuration/provider setup errors
+
+### `stop-session!`
 
 ```clojure
-(subscribe! handle callback) → unsubscribe-fn   ; callback gets each event + transient delta (09)
+(stop-session! handle)
+(stop-session! handle {:wait? true})
 ```
-See 09 for delivery guarantees, the durable-vs-transient split, and the gap marker.
 
-## 5. `TurnResult`
+Behavior:
+
+- appends `:session/stop-requested` immediately
+- if no turn is running, also appends `:session/stopped`
+- if a turn is running, the loop appends `:session/stopped` at the next step
+  boundary
+- `:wait? true` blocks until the session is idle, then ensures stopped status
+
+### `close-session!`
+
+Releases process-local resources:
+
+- memory store: stops the live dispatcher
+- sqlite store: closes the JDBC connection and stops dispatchers
+
+This is the process/control-plane shutdown seam. A closed durable session can be
+reopened later with `resume-session!`.
+
+### `compact-session!`
+
+Forces compaction immediately under the same rules the runtime uses for automatic
+compaction.
+
+Behavior:
+
+- acquires the turn lock
+- throws `:fractal/turn-in-flight` if a turn is already running
+- performs a model call to summarize the transcript
+- appends one `:session/compacted` event
+- publishes a `:compaction` head
+
+Compaction failures propagate as throws; this function does not wrap them in a
+`TurnResult`.
+
+---
+
+## 4. Turn execution
+
+### `run-turn!`
 
 ```clojure
-{:status        :final | :error | :timeout | :budget-exceeded
- :session/id    "s-…"
- :turn/id       7
- :turn/final-value <hydrated FINAL value>   ; present on :final
- :turn/usage    {:usage/status :known|:unknown …}   ; honest (08); summed over steps, :unknown-aware
- :turn/cost     {:cost/status  :known|:unknown :cost/usd …}
- :turn/cache    {:cache/status :hit|:miss|:unknown        ; honest (08); :unknown-aware rollup
-                 :cache/cached-tokens <int>|:unknown :cache/cache-write-tokens <int>|:unknown}
- :step-count    4                                         ; derived (filter :steps on :turn/id) — no id list stored
- :error         nil | {:error/type … :error/message … :error/data …}}
+(run-turn! handle msg) => TurnResult
 ```
 
-- **Honest accounting.** Usage/cost/cache that the provider didn't report are
-  `:unknown`, never `0`. Per-turn rollups sum per-step values **`:unknown`-aware** (any
-  `:unknown` summand ⇒ the rollup is `:unknown`, not a fabricated total). Budget logic
-  gates on `:known`.
-- **Projected from the turn entity.** `:turn/usage`/`:turn/cost`/`:turn/cache` are read
-  straight off the committed turn (02 §1), as are `:status`/`:turn/id`/`:error`.
-  `:step-count` is **derived** by filtering `:steps` on `:turn/id` — the turn carries no
-  step-id list.
-- **Namespaced errors.** `:error` (when present) is the uniform error map
-  `{:error/type … :error/message … :error/data …}` (02/03); the same shape an `ex-info`
-  throws and that `:turn/error`/`:eval/error`/`:session/error` carry.
-- The async path delivers the **same** `TurnResult` shape on failure (full keys), not a
-  bare error.
+Execution order:
 
-## 6. The rlm-extension seam (why the surface is stable)
+1. reject reentrant subscriber-driven calls
+2. reject stopped/error sessions
+3. enforce `:max-turns`
+4. acquire the turn lock
+5. auto-compact if needed
+6. append the user message and open the turn
+7. run the step loop to termination
+8. release the turn lock
 
-When Phases 3/4 land, the public surface above **does not change shape**:
-- `(rlm …)`/`(map-rlm …)` appear *inside* a session's REPL (injected host fns, 03/04);
-  callers of the API don't see new functions.
-- `:turn/usage`/`:turn/cost` are **SELF-ONLY** (root-session steps) — *even in Phase 3*.
-  Subtree (child) token/cost rollups are exposed via a *separate* `session-tree`
-  read fn, not by silently changing the meaning of `:turn/usage`. This freezes the
-  field's meaning so the extension is genuinely non-breaking.
+Returned failure vs thrown failure is deliberate.
 
-## 7. End-to-end usage (Phase 1, with the fake adapter — no keys)
+#### Returns a `TurnResult` for modeled terminal outcomes
+
+- normal final completion
+- provider failure during the step loop
+- deadline timeout during the step loop
+- `:max-steps` exhaustion
+- hard abort on context window
+- stopped session rejection
+
+#### Throws
+
+- `:fractal/session-turn-limit` before opening a new turn
+- `:fractal/turn-in-flight` if another turn already owns the session
+- auto-compaction failure before a turn is opened
+- pre-turn configuration/provider failures
+- unexpected uncaught internal exceptions on the synchronous path
+
+That distinction matters to control-plane callers:
+
+- no opened turn means a direct throw
+- modeled opened-turn failures settle as a `TurnResult`
+- the sync path still exposes uncaught internal failures as throws
+
+### `run-turn-async!`
 
 ```clojure
-(require '[fractal.engine.api :as fe])
-
-(def cfg (fe/make-config {:adapter :fake
-                          :fake/respond (fe/responder
-                                          [[:default "```clojure (FINAL {:answer 42})```"]])
-                          :model "fake-model"
-                          :capability :default}))
-
-(def s (fe/start-session! cfg))
-
-;; blocking
-(def res (fe/run-turn! s "What is 6 times 7?"))
-(:status res)            ;=> :final
-(:turn/final-value res)  ;=> {:answer 42}
-
-;; async + live observation
-(def th (fe/run-turn-async! s "Now classify these…"))
-(def unsub (fe/subscribe! s (fn [ev] (println :live (:event/type ev)))))
-@(:promise th)           ;=> a TurnResult
-(unsub)
-(fe/stop-session! s)
+(run-turn-async! handle msg) => {:turn/id ... :promise p}
 ```
 
-The session stays live across turns; `def`'d REPL vars persist; each `run-turn!`
-returns when the model calls `FINAL`.
+The async path uses the same runtime semantics with one important split:
+
+- pre-turn gates still run on the caller thread
+- the step loop runs on a background future
+
+Caller-thread behavior:
+
+- stopped session: returns a handle whose promise is already delivered with an
+  error `TurnResult`
+- `:max-turns`, `:turn-in-flight`, and pre-open auto-compaction failures throw
+  synchronously
+- successful pre-open path returns a real store-assigned `:turn/id`
+
+Promise behavior:
+
+- always delivers a full `TurnResult`
+- never delivers a bare exception object
+- releases the turn lock before promise delivery
+
+This is the intended surface for agents that need a resumable background run
+plus concurrent progress/readback.
+
+---
+
+## 5. Turn result contract
+
+The stable result shape is:
+
+```clojure
+{:status          :final | :error | :timeout | :budget-exceeded
+ :session/id      "s-..."
+ :turn/id         7 | nil
+ :turn/final-value <hydrated value> ; on :final only
+ :turn/usage      {:usage/status ...}
+ :turn/cost       {:cost/status ...}
+ :turn/cache      {:cache/status ...}
+ :step-count      4
+ :error           nil | {:error/type ... :error/message ... :error/data ...}}
+```
+
+Semantics:
+
+- `:turn/final-value` is hydrated through the payload seam
+- `:step-count` is derived from folded steps for that turn
+- `:turn/usage`, `:turn/cost`, and `:turn/cache` are projected from the
+  committed turn entity
+- root turn accounting stays self-only even when child sessions were invoked;
+  child accounting lives on recursion envelopes
+
+Status mapping used by the runtime:
+
+- `:final` for successful `FINAL`
+- `:timeout` for `:fractal/deadline`
+- `:budget-exceeded` for `:fractal/max-steps` or `:fractal/context-window`
+- `:error` for other terminal failures
+
+The async promise delivers the same shape.
+
+---
+
+## 6. Read and audit surface
+
+These calls do not make provider requests:
+
+```clojure
+(view handle)
+(progress handle)
+(event-stream handle)
+(events-since handle ev-id)
+(read-payload handle ref-or-value)
+(subscribe! handle callback)
+```
+
+### `view`
+
+- returns the strong folded view from `current-view`
+- may contain payload refs for large values
+- exposes heads, current-head, edges, events, and transcript projection data
+
+### `progress`
+
+- pure derivation over the folded view
+- cheap to poll
+- designed for control-plane status checks and JSON reporting
+
+### `event-stream` and `events-since`
+
+- expose durable ordered events
+- `events-since` is the gap-recovery seam for live subscribers
+- callers should treat the event stream as the canonical audit surface
+
+### `read-payload`
+
+Load-bearing public function:
+
+- dereferences payload refs through the handle's store
+- passes non-ref values through unchanged
+- is the supported way for CLI/readback tools to hydrate large final values,
+  messages, eval results, and vars snapshots
+
+### `subscribe!`
+
+- attaches a live callback for durable events and transient deltas
+- is the push side of the live-query seam
+- must be paired with `events-since` for gap recovery
+
+---
+
+## 7. Model-facing surface is inside the session, not the API
+
+The public API deliberately does **not** export `FINAL`, `lm`, `map-lm`, `rlm`,
+`map-rlm`, or `attach-rlm` as top-level functions.
+
+Those are host functions injected into the session SCI context:
+
+- `FINAL`
+- `lm`
+- `map-lm`
+- `rlm`
+- `map-rlm`
+- `attach-rlm`
+
+This keeps the outer control plane small while preserving the model-facing
+language surface inside the session runtime.
+
+---
+
+## 8. Control-plane guidance
+
+The current implementation is aligned for an agent-supervised control plane:
+
+- API calls are explicit and side-effectful in clear places
+- async turns expose durable ids and promise settlement
+- resume is durable-store based
+- live readback is event-first
+- payload hydration is explicit
+- human-readable summaries can be layered on top, but JSON-first/state-first
+  reporting should be treated as primary
+
+That is the framing downstream CLI and automation specs should use.

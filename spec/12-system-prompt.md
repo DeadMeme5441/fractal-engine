@@ -1,145 +1,254 @@
 # 12 · System Prompt
 
-The behavioural core lives in `fractal.engine.prompt`. The **clojure-harness prompt**
-below is the operator doctrine for a sandboxed REPL whose only host fns are `FINAL` and
-`inspect`; the **recursive harness prompt** in code adds the leaf/child/attach doctrine
-when `:harness :rlm` injects `lm`/`map-lm`/`rlm`/`map-rlm`/`attach-rlm`. The compaction
-prompt remains shared.
+The behavioural core lives in `fractal.engine.prompt`. These prompts are the doctrine for
+**agents doing long-context, long-horizon recursive work** through the engine's API / CLI
+control plane while a human operator supervises, steers, and consumes reports. The prompt
+teaches:
 
-Stamp the prompt with name + version + a content hash (`{:prompt/name :prompt/version
-:prompt/hash}`) so runs are reproducible and the prompt is auditable.
+- persistent working state in REPL vars across steps and turns;
+- truthful readback from observed state rather than performance for a transcript;
+- branching into children when a sub-problem needs its own loop;
+- leaf calls for bounded semantic judgment;
+- attach from a prior immutable cognitive state into a fresh derived child;
+- operator steering, resumability, and state-graph integrity over time.
 
----
+The namespace currently defines four stamped prompt values:
 
-## 1. Phase-1 system prompt (verbatim — `:fractal-engine/repl-p1`, v1)
+```clojure
+prompt/repl-p1    ; :fractal-engine/repl-p1, version 1
+prompt/repl-rlm   ; :fractal-engine/repl-rlm, version 1
+prompt/leaf       ; :fractal-engine/leaf, version 1
+prompt/compaction ; :fractal-engine/compaction, version 1
+```
 
-> You are an operator with a live Clojure REPL. Given the caller's input, complete the
-> task fully — do not gold-plate, but do not leave it half-done. Do real work in the
-> REPL, and return one precise value with `FINAL`.
->
-> Be an operator, not a commentator. Bind values, inspect them, transform them, and
-> return compact data. Do not perform for the transcript — produce the value the caller
-> can consume. The cheapest sufficient processing is the default: solve it directly in
-> Clojure. Most tasks are smaller than they first look — start by solving directly.
->
-> **How the host runs you.**
-> - Reply in plain assistant text containing fenced ```clojure code blocks. The host
->   evaluates your fenced blocks in order and returns one compact observation. Read it
->   before deciding the next move. Do not use any tool-call or function-call mechanism —
->   the host only evaluates text fences.
-> - Several blocks in one reply are evaluated as one batch with one combined
->   observation. If you must see a result before deciding, bind it with `def` and
->   inspect it on the next step; do not call `FINAL` in the same batch as work you have
->   not yet seen.
-> - The host reads complete s-expressions, not lines: a multi-line `def`/`defn`/`let` is
->   one form; line breaks inside a form never matter. A syntax/macroexpand error means
->   that one form is malformed — check parens, destructuring, and arity — not that your
->   code was split across lines.
-> - Prefer several small evals over one huge brittle eval. If a block errors, the host
->   stops that batch at the error; read it, repair the Clojure, and continue from the
->   state that already exists — your prior `def`s remain.
->
-> **Reading observations — peek deliberately.**
-> - The host does not dump values at you. After a batch you get whatever you printed to
->   stdout, the status of each form, and for each return value **either the whole value**
->   (when small enough to show) **or a one-line `«type, size»` stub** such as
->   `«vector, 600 items»` or `«string, 9430 chars»` — the stub gives kind and size, not
->   contents.
-> - To look inside a stubbed value, call `(inspect x)`: it prints a bounded, paginated
->   view — class, count, a window of the contents, and `…` for what it elides. Or slice
->   the live var — `(nth v i)`, `(:k m)`, `(subs s a b)`, `(take n v)` — and print or
->   inspect the smaller piece. Your REPL vars are durable working memory and the value is
->   always live there; peek deliberately rather than reprinting a whole large value.
->
-> **Your environment.** You have Clojure core plus common namespaces (`clojure.string`,
-> `clojure.edn`, `clojure.set`, `clojure.walk`, and more). You may read files with
-> `slurp` within your working area. Arbitrary Java interop, network, and shell are
-> restricted — work from the input you are given and the files you are permitted to read.
->
-> **Returning a value.**
-> - `(FINAL value)` emits the output of the current turn and ends it. The session stays
->   live for later turns; your vars persist. `FINAL` is your return value — not a
->   progress note, not a message to a human, not a place to display raw material.
-> - If the caller requested specific keys or a shape, return exactly that shape inside
->   `(FINAL …)`. Do not add confirmations like "done" or "here is the result" unless that
->   literal text is the requested value.
-> - Build `FINAL` from the result vars you populated, not from prior expectation. Every
->   field and every evidence quote must be lifted from a var or observation in this
->   session; if you cannot locate support, drop the claim or mark it `:missing`. When
->   your expectation conflicts with what a var actually holds, trust the var.
-> - If you cannot support a field from observed data, omit it when optional or put it in
->   `:missing`/`:unknowns` when required. Never backfill a neat-looking field.
->
-> **Exact-answer discipline.** For counting, frequency, ranking, comparison, set
-> membership, or exact extraction, keep an auditable ledger var and compute the aggregate
-> deterministically in Clojure. Before `FINAL` on an exact task, check in Clojure that
-> your `:answer` matches the ledger and does not contradict your method or checks. If the
-> check fails, repair the computation; do not `FINAL`.
->
-> **Working method — pick what the task needs.**
-> - Trivial and exact: compute it in Clojure and `FINAL`. Skip ceremony.
-> - Large or uncertain: scout first (sizes, structure, partitions, stated counts), build
->   a Clojure representation and validate it against any stated counts or schema, then
->   compute, verify (re-check counts, re-ground load-bearing claims), and `FINAL` a
->   compact value. Keep vars for the raw material, the representation, your checks, and
->   any assumptions.
-> - If the host warns that the step budget is nearly spent, stop exploring and `FINAL`
->   the best calibrated value from your existing vars and observations, with explicit
->   missingness.
-
-*(A small caller-supplied `:system-overlay` may be appended to specialize a session; it
-adds behavior text, not functions. — 05 §4.)*
+Each value carries `{:prompt/name :prompt/version :prompt/hash :prompt/text}`. The stamps
+are tested for reproducibility. The current wire request, however, sends **only the prompt
+text**; the metadata is not yet embedded in request or session artifacts.
 
 ---
 
-## 2. Two-step worked example (include in the prompt; trims the model's ramp-up)
+## 1. Harness selection
 
-> Cheap turn — an exact question that needs no decomposition:
-> ```clojure
-> (require '[clojure.string :as s])
-> (def lines (s/split-lines (slurp "report.txt")))
-> (FINAL {:errors (count (filter #(s/includes? % "ERROR") lines))})
-> ```
-> One representation, one deterministic count, done.
->
-> Decomposed turn — represent and validate first, bind everything, check before FINAL:
-> ```clojure
-> (require '[clojure.string :as s])
-> (def raw (slurp "inbox.txt"))
-> (def records (->> (s/split raw #"(?m)^---$") (map s/trim) (remove s/blank?) vec))
-> {:parsed (count records) :first (first records)}   ; read the observation before going on
-> ```
-> Then compute over the bound `records`, keep a ledger, assert `:answer` against it, and
-> `FINAL` a compact value.
+`prompt/system-prompt` selects the base doctrine by harness mode:
+
+- `:clojure` -> `:fractal-engine/repl-p1`
+- `:rlm` -> `:fractal-engine/repl-rlm`
+- 0-arg call defaults to `:clojure` for back-compat
+
+This is a config-only hot swap. The prompt choice and the injected host-fn surface move
+together:
+
+- `:clojure` means a plain coding harness with `FINAL` and `inspect`;
+- `:rlm` means the recursive harness doctrine, with the recursion fns injected subject to
+  capability gating.
+
+Root and child sessions running in `:rlm` use the **same** recursive doctrine prompt. A
+child is not a separate prompt family.
 
 ---
 
-## 3. Compaction prompt (`:fractal-engine/compaction`, v1)
+## 2. The plain Clojure harness prompt (`:fractal-engine/repl-p1`, v1)
 
-Sent to the **root model** when a session's transcript is being compacted (07 §4). It
-returns plain prose — no code fences, no function calls — which becomes ONE synthetic
-`:user` continuation frame.
+The Phase 1 prompt is still the exact doctrine for non-recursive work:
 
-> You are compacting a long working session into a single continuation briefing. Rewrite
-> the conversation so far into one self-contained summary that lets the work continue
-> without the full history. Preserve: the caller's task and the exact return shape
-> requested; every load-bearing fact, decision, count, and intermediate result the rest
-> of the work depends on; the names and meanings of the important REPL vars that are
-> still live (they remain defined — do not restate their full contents, just what they
-> hold); and any open questions or unresolved uncertainty. Drop: chatter, superseded
-> attempts, and anything already captured in a live var. Write it as a briefing to your
-> future self, in plain text. Do not include code fences.
+- you are an **operator** with a live Clojure REPL, not a commentator;
+- default to the **cheapest sufficient processing**, which is usually direct Clojure;
+- reply in plain assistant text containing fenced `clojure` blocks only;
+- the host evaluates fenced blocks in order and returns one compact observation;
+- if you need to see a result before deciding, bind it with `def` and inspect it on the
+  next step instead of calling `FINAL` speculatively;
+- observations are fit-or-stub: small values may be shown whole, larger values appear as
+  bounded type/size stubs until inspected;
+- `inspect` is the deliberate peek tool for large live values;
+- REPL vars are the working memory and remain live across **steps and turns**;
+- `FINAL` ends the current turn but does not destroy the session state;
+- `FINAL` must be built from vars and observations in the current session, not from prior
+  expectation.
 
-> Note: compaction rewrites the *transcript* the model sees; the REPL vars are untouched
-> and stay live (07 §4). The briefing names them so the model knows what it still has.
+The prompt explicitly pushes **exact-answer discipline**:
+
+- counting, ranking, comparisons, and exact extraction should be computed in Clojure;
+- keep an auditable ledger var;
+- verify the final answer against that ledger before returning.
+
+The worked examples embedded in `repl-p1-text` teach the same pattern: represent, inspect,
+compute, verify, `FINAL`.
 
 ---
 
-## 4. Recursive-harness note
+## 3. The recursive harness prompt (`:fractal-engine/repl-rlm`, v1)
 
-When the rlm harness is selected, the prompt gains the full recursion doctrine: the host
-function surface; the processing hierarchy (deterministic Clojure < a leaf < a child <
-attach/reuse); envelopes for `rlm`/`map-rlm`/`attach-rlm`; partial-fanout handling
-(`:fractal/failed` sentinels); the `≤50` fan-out cap + chunking; immutable head handles
-for `attach-rlm`; and the smell tests (`(count (map-lm …))` = a model doing exact work).
-The Phase-1 prompt above remains complete for the plain clojure harness.
+When `:harness :rlm` is selected, the base doctrine becomes `:fractal-engine/repl-rlm`.
+It keeps the same REPL mechanics as the plain harness, but adds the long-horizon recursive
+operator doctrine.
+
+### Core processing hierarchy
+
+The recursive prompt teaches one ordering principle:
+
+1. **deterministic Clojure** first for exact work;
+2. a **leaf** for one bounded probabilistic judgment;
+3. a **child** for a sub-problem that needs its own inspect/judge loop;
+4. **attach/reuse** when prior cognitive state is the right starting point.
+
+The model is told to escalate only when the work in front of it proves the cheaper kind
+is insufficient.
+
+### Host-fn surface named in the prompt
+
+The prompt names the full recursive surface:
+
+- `(lm input query [mode])`
+- `(map-lm inputs query [mode])`
+- `(rlm task)`
+- `(map-rlm tasks [shared-instruction])`
+- `(attach-rlm handle task [opts])`
+- `(FINAL value)`
+
+And it teaches the intended semantics:
+
+- `lm` / `map-lm` are **leaf** operations: bounded input, one model judgment, no REPL;
+- `rlm` / `map-rlm` create **fresh child sessions** that run the whole loop;
+- `attach-rlm` restores a prior session/head state into a **fresh derived child** and runs
+  one new task there;
+- `FINAL` is the only thing that returns a value to the caller.
+
+### Long-horizon state and branching
+
+This prompt is explicitly about state that lives over time:
+
+- the current session's vars persist across turns, so the model can build up durable
+  working state rather than restating context every step;
+- a child gets its **own** session state and may recurse again;
+- attach starts from a **prior immutable head** and produces a new branch rather than
+  mutating the source session;
+- the model is reminded that recursion spends real calls and should only be used where
+  the branching state is justified.
+
+### Envelopes, fan-out, and failure handling
+
+The recursive prompt teaches the current envelope/readback contract:
+
+```clojure
+{:rlm/result true
+ :rlm/value  <child FINAL>
+ :rlm/session <session handle>
+ :rlm/head    <immutable head handle>
+ :rlm/meta    <recognition data>}
+```
+
+It also teaches:
+
+- read a child result at `(:rlm/value env)`, not from a prose summary;
+- `:rlm/meta` is deterministic recognition data, not authoritative semantic truth;
+- `map-lm` and `map-rlm` are capped at **50** inputs per call;
+- oversized work should be chunked with `partition-all`;
+- partial fan-out failure returns index-aligned `{:fractal/failed true ...}` sentinels
+  instead of throwing away the whole batch.
+
+### Trust discipline
+
+The recursive doctrine is strict about truthfulness:
+
+- a leaf output or child `FINAL` is a **claim**, not a fact;
+- load-bearing delegated claims must be re-grounded before reuse;
+- exact totals and counts must still be computed in Clojure from returned values;
+- a child's summary is not proof that the child really observed what it claims.
+
+That is the current prompt-level guard against long-horizon drift as work branches,
+rejoins, resumes, and attaches over time.
+
+---
+
+## 4. The leaf prompt (`:fractal-engine/leaf`, v1)
+
+`prompt/leaf-prompt` is a separate prompt for leaf calls. It defines a leaf as:
+
+- one bounded input;
+- one query;
+- one output;
+- no REPL;
+- no tools;
+- no memory;
+- no world-discovery.
+
+The leaf prompt also requires:
+
+- return only the requested shape;
+- echo identity fields such as `:id`, `:index`, `:path`, `:handle`, or `:lane` when they
+  are present so the caller can merge results;
+- do not invent counts or unsupported facts;
+- in `:edn` mode, return exactly one schema-shaped EDN value with no prose, Markdown, or
+  acknowledgement text.
+
+This keeps leaves as the engine's bounded semantic primitive rather than mini-agents.
+
+---
+
+## 5. Child invocation frame and attach guidance
+
+`prompt/child-invocation-frame` is **not** a different system prompt. It is a user-message
+frame prepended to the child's assigned task.
+
+The frame tells the child:
+
+- you were invoked to settle **one sub-problem**;
+- do not solve the caller's larger mission unless asked;
+- you inherit none of the caller's vars, helpers, or working directory;
+- default to direct settlement: Clojure first, then one leaf, then deeper recursion only
+  when the task itself truly splits;
+- if an exact EDN shape is requested, `FINAL` exactly that shape.
+
+Attach uses this same invocation frame, with one important host-side nuance:
+
+- before the task turn runs, the engine restores the selected source head's vars snapshot
+  into the fresh attached child;
+- the source session/head is not advanced;
+- the attached child returns the same envelope shape as `rlm`.
+
+So attach is "start a new branch from prior settled cognitive state", not "resume in
+place" and not "let the caller reach into the source session mutably".
+
+---
+
+## 6. Compaction prompt (`:fractal-engine/compaction`, v1)
+
+The compaction prompt is sent to the **root model** when transcript compaction runs. Its
+job is to rewrite the visible transcript into one continuation briefing.
+
+The compaction contract is:
+
+- preserve the caller's task and requested return shape;
+- preserve load-bearing facts, decisions, counts, intermediate results, and open
+  questions;
+- preserve the **names and meanings** of important live REPL vars;
+- drop chatter and superseded attempts;
+- return plain prose with **no code fences**.
+
+This is crucial to the long-horizon story:
+
+- compaction rewrites the **transcript** the model sees;
+- it does **not** destroy the REPL vars;
+- the session's durable cognitive state remains in vars and heads, not in hidden context.
+
+---
+
+## 7. Overlays and no hidden context
+
+`adapter.request/system-message` assembles the final system text in this order:
+
+1. the harness-selected base doctrine prompt;
+2. `cfg :system-overlay`;
+3. `session :session/system-overlay`.
+
+Those overlays specialize behaviour. They do not add new model-facing functions.
+
+The current prompt contract therefore has no magic context channel:
+
+- the model sees the system prompt text plus the kept transcript;
+- durable working state lives in REPL vars and published heads;
+- children and attached children get explicit task frames;
+- compaction rewrites visible history instead of inventing hidden memory.
+
+That is the present behavioural contract for persistent, branching, supervised recursive
+work in fractal-engine.

@@ -1,35 +1,63 @@
-# 11 · Build Plan
+# 11 · Build Plan and Status
 
-The roadmap, then the historical **ordered Phase-1 task list**. Build bottom-up; each
-step is testable offline with the `FakeAdapter` (10) before the next. Phases 1-4 are
-now implemented; the task list remains as the construction record and layering guide.
+Phases 1-4 are implemented. This document is no longer just a "next tasks" note for
+the core engine. It now serves three jobs:
 
----
+1. a **status ledger** for what Phase 1-4 delivered;
+2. the **historical Phase-1 construction order**, still useful as a layering guide;
+3. a short list of work that remains **outside** core Phase 1-4 completeness.
 
-## Roadmap
+The key status truth is simple: **no core Phase 1-4 engine deliverable remains open in
+this tree.** The remaining work is validation hardening and longer-horizon
+operational proof.
 
-| Phase | Deliverable | Status |
-|-------|-------------|--------|
-| **1** | The session core — one non-recursive session, in-memory, sandboxed SCI REPL, the public API. | built |
-| 2 | Persistent `SessionStore` (SQLite + content-addressed blob store) under the same port. Datahike dropped until a real query need appears. | built |
-| 3 | The four model-calling host fns (`lm`/`map-lm`/`rlm`/`map-rlm`) + leaf-vs-child + fan-out. | built |
-| 4 | Recursion data model + the **Merkle DAG**: immutable heads (`publish-head!` + CAS), basis chains, invocation/derivation edges, `attach-rlm`. | built |
-
-Phase 1 is designed so each later phase is **additive** (02 §9, 06 §6): heads attach
-without restructuring; the rlm fns inject into the same SCI ctx; the public API surface
-doesn't change.
+The engine claim is: **persistent recursive working state over time**, with
+restart / resume, branching through children and leaves, attach from prior
+cognitive state, operator steering, and durable state-graph integrity.
 
 ---
 
-## Phase-1 task list (in order)
+## Roadmap status
 
-Each task: build the namespace(s), then its tests (10), then move on. "DoD" = definition
-of done.
+| Phase | Deliverable | Status | Main proof surfaces |
+|---|---|---|---|
+| **1** | The session core: sandboxed SCI REPL, deterministic turn loop, persistent working state within a session, public API, compaction, live query, fake + sdk adapters. | built | `session_test`, `kernel_test`, `api_test`, `live_test`, `deps_acyclic_test` |
+| **2** | Durable storage under the same `SessionStore` port: SQLite event log + content-addressed BlobStore + durable restart / `resume-session!`. | built | `store_contract_test`, `store_sqlite_test`, `blobstore_test` |
+| **3** | Recursive decomposition over time: `lm` / `map-lm` leaves, `rlm` / `map-rlm` children, harness hot-swap, fan-out, child capability inheritance, durable child sessions. | built | `recursion_test`, `live_recursion_test` |
+| **4** | The durable state graph: immutable heads, current-head publication, invocation / derivation lineage edges, attach from prior state via `attach-rlm`, current-head-based restore. | built | `phase4_test`, Phase-4 store invariants in `store_contract_test`, manual second-provider smoke |
 
-> **Order = a topological linearization of 01's Dependency-manifest** (L0→L5): every task
-> depends only on earlier ones, so each is testable offline before the next. A **CI
-> namespace-graph test** asserts the dependency graph stays acyclic (01); keep it green as
-> you add namespaces.
+### Current build-state notes
+
+- The engine is no longer in "Phase 1 only" shape. The spec should speak in terms of
+  the implemented Phase 1-4 line, not a future tense build-out.
+
+- The status lens is **state over time**: persistent vars, durable resume, recursive
+  children, branching from immutable heads, attach from prior state, and integrity of
+  the stored head / edge graph.
+
+- The **historical ordered Phase-1 list below is still worth keeping**. It remains the
+  cleanest layering guide for a rebuild, a large refactor, or a new implementation of
+  the same engine model.
+
+- The acyclic dependency test is now the guard that keeps that construction order
+  honest. The list is historical; the graph test is live.
+
+- Current validation has already gone beyond offline unit/integration proof. The
+  implemented line has a passing offline suite, a passing checked-in live suite, and a
+  separate manual live smoke on a second provider stack. That is evidence for the
+  status above, not a promise that repo-level end-to-end testing is finished.
+
+---
+
+## Historical Phase-1 construction order (complete)
+
+Each step below **was** the construction order. Keep it as the layering guide if
+rebuilding from scratch or doing a large architectural refactor. "DoD" means "what had
+to be true before moving on"; all of it is now reflected in the current tree.
+
+> **Order = a topological linearization of 01's dependency manifest** (L0→L5): every
+> task depends only on earlier ones, so each was testable offline before the next. The
+> CI namespace-graph test now asserts the dependency graph stays acyclic.
 
 ### 1. Foundations — `time`, `payload`, `concurrent`, `catalog`
 - `fractal.engine.time`: `now-str` (ISO-8601).
@@ -64,7 +92,7 @@ of done.
   dep** — `dispatch`, `schedule-notify` (non-blocking offer), `notify-transient`, the
   `*in-dispatch*` reentrancy guard, the bounded queue + `:drop-transient` + a
   `:subscribe/gap {:last-delivered-event-id N}` marker, and `progress` over a view value.
-- **DoD:** ordered delivery; a throwing/slow subscriber can't break or stall writes;
+- **DoD:** ordered delivery; a throwing/slow subscriber cannot break or stall writes;
   overflow drops only transient deltas and emits a gap carrying the last delivered id;
   `progress` derives a ref-free snapshot from a view value. (09)
 
@@ -192,23 +220,47 @@ of done.
 ### 11. Dev harness (recommended) — `dev/seeing`
 - The RUNS/SEES tool (10 §2). Behind a `:dev` path; never in the build.
 
-> After step 10, Phase 1 is complete: a fresh session can `clojure -M:test` green with no
-> keys, and `start-session!`/`run-turn!` drives a real SCI REPL to `FINAL` via the fake
-> (or a live `SdkAdapter` with a key). The **CI namespace-graph test** (01) blocks a merge
-> on any dependency cycle.
+> After step 10, Phase 1 **was** complete: a fresh session could run the full offline
+> suite green with no credentials, and `start-session!` / `run-turn!` could drive a real
+> SCI REPL to `FINAL` via the fake adapter (or a live `SdkAdapter` with credentials). The
+> namespace-graph test remains the guard against dependency cycles.
 
 ---
 
-## Open decisions deferred past Phase 1
+## Resolved after Phase 1
 
-- **Storage (P2):** built: SQLite event log + file BlobStore under the same
-  `SessionStore` + `intern-payload!`/`read-payload*` contract. Datahike is dropped until
-  a concrete query need proves a derived index is worth adding.
-- **The Merkle DAG (P4):** built: `publish-head!` (optimistic CAS), head fingerprints,
-  basis chains, invocation/derivation edges, and `attach-rlm`.
-- **Recursion (P3):** built: the four host fns; leaf-vs-child storage; fan-out
-  concurrency + `bound-fn` propagation; the full recursion system prompt (12).
-- **Keep/drop:** provenance/claim-checking (lean keep), codebrain (lean: external
-  consumer, like evals), the evals harness (external), a clean CLI. None decided.
-- **Distribution:** GraalVM native-image (SCI unlocks it) — gated on verifying the P2
-  storage backend compiles. Optional.
+These were once deferred decisions. They are no longer open in the current tree.
+
+- **Storage (Phase 2):** built: SQLite event log + file BlobStore under the same
+  `SessionStore` + `intern-payload!` / `read-payload*` contract. Datahike stayed out;
+  no concrete query need justified a second derived index.
+
+- **Recursion (Phase 3):** built: the four host fns, leaf-vs-child separation,
+  bounded fan-out, capability inheritance-and-clamp, and harness hot-swap by config alone.
+
+- **Merkle heads / lineage (Phase 4):** built: `publish-head!`, current-head restore,
+  immutable head fingerprints, invocation / derivation edges, and `attach-rlm`.
+
+---
+
+## Still outside core Phase 1-4 completeness
+
+This is the honest remaining plan. It is **not** missing engine implementation; it is
+what comes next if the goal is stronger confidence in long-horizon recursive work.
+
+- **Long-horizon validation hardening.** The next real lane is a stronger end-to-end
+  matrix for persistent recursive work: more root-prompt live scenarios, more than one
+  checked-in provider family, and explicit proofs for multi-turn continuity,
+  stop / resume, branch / attach, and durable graph integrity.
+
+- **Fault and recovery proof.** The engine already proves normal restart / resume after
+  committed work. What is still missing is harsher proof around interrupted recursion,
+  commit-boundary crashes, and recovery from partially completed live work without
+  corrupting the state graph.
+
+- **Load / cost / duration proof.** The engine correctness story is ahead of its
+  operational proof story. Larger fan-outs, longer-running sessions, heavier blob churn,
+  and explicit time / cost envelopes remain a separate validation lane.
+
+- **Packaging, if wanted later, is separate.** Distribution choices are not part of the
+  current engine claim and should not be confused with Phase 1-4 completeness.
