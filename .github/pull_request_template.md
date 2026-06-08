@@ -5,7 +5,6 @@
 ## Validation
 
 - [ ] `clojure -M:test`
-- [ ] `clojure -M:evals-test`
 - [ ] `git diff --check`
 - [ ] `git status --short --branch`
 

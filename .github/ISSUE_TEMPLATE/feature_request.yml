@@ -30,12 +30,12 @@ body:
     attributes:
       label: Primary Surface
       options:
-        - CLI
+        - agent control plane
         - Clojure API
         - compute engine
         - storage/index
         - event/trust layer
-        - eval harness
+        - live validation harness
         - docs
         - unsure
     validations:
