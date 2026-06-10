@@ -55,7 +55,9 @@
    "--head" :head
    "--ref" :ref
    "--output" :output
-   "--fake-final" :fake-final})
+   "--fake-final" :fake-final
+   "--wait-timeout-ms" :wait-timeout-ms
+   "--poll-ms" :poll-ms})
 
 (def flag-spec
   {"--json" [:output :json]
@@ -66,7 +68,8 @@
    "--force" [:force true]})
 
 (def int-options #{:max-turns :max-steps :max-fanout :fanout-pool
-                   :leaf-concurrency :call-timeout-ms :since :turn})
+                   :leaf-concurrency :call-timeout-ms :since :turn
+                   :wait-timeout-ms :poll-ms})
 (def keyword-options #{:store :adapter :provider :harness :capability
                        :child-provider :leaf-provider :output})
 
@@ -278,17 +281,22 @@
       :ok [h false]
       :missing [(fe/start-session! cfg {:id sid}) true])))
 
+(defn- summary*
+  "Summary fields from an explicit view value (so `wait` can summarize a FRESH
+   cross-process read-state fold instead of this process's open-time cache)."
+  [sid v]
+  {:session/id sid
+   :session/status (get-in v [:session :session/status])
+   :current-head (:current-head v)
+   :event-count (count (:events v))
+   :turn-count (count (:turns v))
+   :step-count (count (:steps v))
+   :eval-count (count (:evals v))
+   :head-count (count (:heads v))
+   :edge-count (count (:edges v))})
+
 (defn- summary [h]
-  (let [v (fe/view h)]
-    {:session/id (:session-id h)
-     :session/status (get-in v [:session :session/status])
-     :current-head (:current-head v)
-     :event-count (count (:events v))
-     :turn-count (count (:turns v))
-     :step-count (count (:steps v))
-     :eval-count (count (:evals v))
-     :head-count (count (:heads v))
-     :edge-count (count (:edges v))}))
+  (summary* (:session-id h) (fe/view h)))
 
 (defn- final-turn [v]
   (last (:turns v)))
@@ -405,7 +413,9 @@ Usage commands:
   stop      Request stop on a durable session.
   close     Reopen and immediately close resources.
   compact   Force compaction.
-  wait      Report status; async cross-process waiting is not implemented yet.
+  wait      Block until the session is idle or terminal (cross-process: polls
+            the durable log; --wait-timeout-ms N, --poll-ms N; nonzero exit on
+            timeout).
 
 Inspection commands:
   status progress view events heads head edges tree payload messages turns steps evals trace check report
@@ -502,13 +512,43 @@ Config files are EDN. They may be flat engine config maps or {:default-profile k
       (fe/compact-session! h)
       (assoc (summary h) :ok true :command :compact))))
 
-(defn- command-wait [opts _args]
-  (with-open-session opts false
-    (fn [h]
-      (assoc (summary h)
-             :ok true
-             :command :wait
-             :note "cross-process async waiting is not implemented; status was read after resume"))))
+(defn- command-wait
+  "Block until the session is idle (no :running turn) or terminal
+   (stopped/error), or until --wait-timeout-ms elapses. Polls the DURABLE log
+   via store/read-state, so a turn driven by ANOTHER process on the same store
+   dir is observed correctly. Exit is nonzero on timeout (:ok false)."
+  [opts _args]
+  (let [timeout-ms (or (:wait-timeout-ms opts) 600000)
+        poll-ms    (max 50 (or (:poll-ms opts) 500))
+        deadline   (+ (System/currentTimeMillis) timeout-ms)]
+    (with-open-session opts false
+      (fn [h]
+        (let [sid (:session-id h)]
+          (loop []
+            (let [v         (store/read-state (:store h) sid)
+                  turn      (last (:turns v))
+                  status    (get-in v [:session :session/status])
+                  in-flight (= :running (:turn/status turn))
+                  terminal? (contains? #{:stopped :error} status)]
+              (cond
+                (or terminal? (not in-flight))
+                (assoc (summary* sid v)
+                       :ok true :command :wait
+                       :turn/id (:turn/id turn)
+                       :turn/status (:turn/status turn)
+                       :in-flight false)
+
+                (>= (System/currentTimeMillis) deadline)
+                (assoc (summary* sid v)
+                       :ok false :command :wait
+                       :timed-out true
+                       :wait-timeout-ms timeout-ms
+                       :turn/id (:turn/id turn)
+                       :turn/status (:turn/status turn)
+                       :in-flight true)
+
+                :else
+                (do (Thread/sleep poll-ms) (recur))))))))))
 
 (defn- command-status [opts _args]
   (with-open-session opts false
@@ -631,7 +671,7 @@ Config files are EDN. They may be flat engine config maps or {:default-profile k
                                       {:error/type :cli/unknown-command :command command})))
                 out (f opts args)]
             (emit! opts out)
-            0)
+            (if (false? (:ok out)) 1 0))
           (catch Throwable e
             (emit! opts (err-map e))
             1))))))

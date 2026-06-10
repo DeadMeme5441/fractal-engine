@@ -102,7 +102,7 @@ Usage commands create, resume, mutate, or close durable runtime state:
 | `stop` | Request stop on a durable session. |
 | `close` | Reopen and immediately close resources. |
 | `compact` | Force session compaction through the engine API. |
-| `wait` | Reopen and report the latest session state; cross-process async waiting is not implemented. |
+| `wait` | Block until the session is idle or terminal, polling the durable log — works against a turn driven by another process. `--wait-timeout-ms N` (default 600000), `--poll-ms N` (default 500); nonzero exit with `:timed-out true` on timeout. |
 
 Inspection commands read durable state without making provider calls, except
 where the engine API being invoked explicitly does work such as compaction:
@@ -343,8 +343,10 @@ not open or address the session.
 ## Async Boundary
 
 `run-turn-async!` exists in the API, but this CLI is process-per-command. The
-current `wait` command reopens durable state and reports status; it does not
-attach to a background turn owned by another CLI process.
+`wait` command polls the durable event log (`read-state`), so it correctly
+observes and settles on a turn owned by ANOTHER process writing to the same
+store directory — without attaching to that process. Writing stays one process
+per session; `wait` is read-only.
 
 Background turn ownership belongs in a separate process-control adapter if this
 repo grows one. The current CLI contract is explicit process-per-command usage:

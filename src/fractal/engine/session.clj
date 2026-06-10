@@ -156,6 +156,16 @@
                               :session/provider       provider
                               :session/model          (:model cfg)
                               :session/capability     (:capability/name profile)
+                              ;; The FULL validated profile VALUE, so resume/attach can
+                              ;; rehydrate custom (non-built-in) profiles instead of
+                              ;; failing on name resolution. ⚠ :cap/java-classes values
+                              ;; are live Class objects that EDN-round-trip into bare
+                              ;; symbols — a persisted profile is therefore only ever
+                              ;; used on the b-side of clamp/profile<=? (key-set
+                              ;; comparisons); live Class values always come from the
+                              ;; caller's resolved profile (clamp's select-keys keeps
+                              ;; a's values).
+                              :session/capability-profile profile
                               :session/cache-id       sid
                               :session/system-overlay (:system-overlay opts)}
                              cfg)
@@ -186,11 +196,20 @@
                      {:error/type :config/unsupported-store :store (:store cfg)})))
    (let [store (build-store cfg)]
      (try
-       (let [profile  (resolve-profile-for-session cfg opts)
-             provider (resolve-provider cfg)
+       (let [provider (resolve-provider cfg)
              adapter  (build-adapter cfg provider)
              handle0  (store/create-session! store {:session/id sid})   ; folds the durable log
              view     (store/current-view store sid)
+             resolved (resolve-profile-for-session cfg opts)
+             ;; A persisted profile VALUE caps the resumed session at what it ran
+             ;; with: clamp(resolved, persisted) — never wider than the original
+             ;; session AND never wider than the caller's cfg. Name comes from the
+             ;; persisted side (the session's identity). Legacy sessions without a
+             ;; persisted value keep the cfg-resolved profile (old behavior).
+             persisted (get-in view [:session :session/capability-profile])
+             profile  (if persisted
+                        (capability/clamp resolved (capability/validate-profile! persisted))
+                        resolved)
              cache-id (or (:session/cache-id (:session view)) sid)      ; cache affinity (08)
              handle   (merge handle0
                              {:cfg cfg :adapter adapter :capability profile :cache-id cache-id}
@@ -424,6 +443,7 @@
                           :session/provider       child-prov
                           :session/model          child-model
                           :session/capability     (:capability/name child-prof)
+                          :session/capability-profile child-prof   ; full value (rehydration; see start-session!)
                           :session/cache-id       child-sid
                           :session/kind           :child
                           :session/system-overlay (:system-overlay child-opts)}
@@ -480,10 +500,19 @@
                          :session/id sid :head/id hid})))
       {:session/id sid :view view :head head})))
 
-(defn- source-profile [source]
-  (capability/validate-profile!
-    (capability/resolve-profile
-      (kw-capability (get-in source [:view :session :session/capability])))))
+(defn- source-profile
+  "The attach source's capability profile. Prefer the PERSISTED full profile
+   value (so sessions that ran with a custom — non-built-in — profile can be
+   attach sources at all); fall back to name resolution for legacy sessions
+   recorded before :session/capability-profile existed. The result is only used
+   on the b-side of profile<=?/clamp (key-set comparisons), so EDN-round-tripped
+   :cap/java-classes symbol values are harmless — live Class values come from
+   the caller's profile."
+  [source]
+  (let [sess (get-in source [:view :session])]
+    (capability/validate-profile!
+      (or (:session/capability-profile sess)
+          (capability/resolve-profile (kw-capability (:session/capability sess)))))))
 
 (defn spawn-attached!
   "Phase 4 attach composition root. Materializes a FRESH derived child from a
@@ -533,6 +562,7 @@
                            :session/provider       child-prov
                            :session/model          child-model
                            :session/capability     (:capability/name child-prof)
+                           :session/capability-profile child-prof   ; full value (rehydration; see start-session!)
                            :session/cache-id       child-sid
                            :session/kind           :attached-child
                            :session/source-session (:session/id source)
