@@ -103,6 +103,75 @@
           (cap/validate-profile! (assoc (cap/default-profile) :capability/unsafe true))))))
 
 ;; ---------------------------------------------------------------------------
+;; the :all class sentinel (explicit unsafe-marked interop opt-out)
+;; ---------------------------------------------------------------------------
+
+(def ^:private all-classes-profile
+  {:capability/name   :custom-unsafe-all
+   :capability/unsafe true
+   :cap/java-classes  :all
+   :cap/fs-read :deny :cap/fs-write :deny :cap/shell :deny :cap/network :deny
+   :ns/granted '#{clojure.core} :engine-fns #{:FINAL :inspect} :surface/fns #{}})
+
+(deftest all-classes-sentinel-validation
+  (testing ":all without :capability/unsafe is rejected"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unsafe"
+          (cap/validate-profile! (dissoc all-classes-profile :capability/unsafe)))))
+  (testing "the raw SCI {:allow :all} MAP directive stays rejected"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"class-name symbols"
+          (cap/validate-profile! (assoc all-classes-profile :cap/java-classes {:allow :all})))))
+  (testing ":all cannot ride on the built-in profile names (unsafe is rejected there)"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unsafe"
+          (cap/validate-profile! (assoc (cap/default-profile)
+                                        :cap/java-classes :all
+                                        :capability/unsafe true)))))
+  (testing "a well-formed :all profile validates"
+    (is (= :all (:cap/java-classes (cap/validate-profile! all-classes-profile))))))
+
+(deftest all-classes-sentinel-lattice
+  (testing ":all is the top of the class lattice"
+    (is (cap/profile<=? (cap/default-profile)
+                        (assoc (cap/default-profile) :cap/java-classes :all)))
+    (is (not (cap/profile<=? (assoc (cap/default-profile) :cap/java-classes :all)
+                             (cap/default-profile)))))
+  (testing ":all ∧ finite = finite (a's live values kept when a is finite)"
+    (let [finite (assoc all-classes-profile
+                        :capability/name :finite
+                        :cap/java-classes {'java.lang.Math java.lang.Math})
+          c (cap/clamp all-classes-profile finite)]
+      (is (= {'java.lang.Math java.lang.Math} (:cap/java-classes c)))
+      (is (not (:capability/unsafe c)) "no dangerous classes left ⇒ marker dropped")))
+  (testing ":all ∧ :all = :all, and the unsafe marker survives (clamp revalidates)"
+    (let [c (cap/clamp all-classes-profile all-classes-profile)]
+      (is (= :all (:cap/java-classes c)))
+      (is (true? (:capability/unsafe c)))
+      (is (map? (cap/validate-profile! c)))))
+  (testing "unsafe marker survives a finite clamp that still carries a dangerous class"
+    (let [p (assoc all-classes-profile
+                   :capability/name :u-thread
+                   :cap/java-classes {'java.lang.Thread java.lang.Thread})
+          c (cap/clamp p p)]
+      (is (true? (:capability/unsafe c)))
+      (is (map? (cap/validate-profile! c)) "clamped unsafe profile revalidates"))))
+
+(deftest all-classes-sentinel-runtime
+  (testing "an :all profile resolves and uses real JDK classes"
+    (let [ctx (ctx-for (cap/validate-profile! all-classes-profile))]
+      (is (number? (:val (run ctx "(java.lang.System/currentTimeMillis)"))))
+      (is (number? (:val (run ctx "(System/currentTimeMillis)")))
+          "java.lang simple names are imported, like real Clojure")
+      (is (inst? (:val (run ctx "(java.time.Instant/now)"))))
+      (is (= "HI" (:val (run ctx "(.toUpperCase \"hi\")"))))))
+  (testing "finite-class profiles still deny class-symbol RESOLUTION (the actual
+            SCI gate — instance reflection on values already in hand is open in
+            this pinned SCI version regardless of :classes)"
+    (let [ctx (ctx-for (cap/default-profile))]
+      (is (:thrown? (run ctx "(java.lang.System/currentTimeMillis)")))
+      (is (:thrown? (run ctx "(System/currentTimeMillis)")))
+      (is (:thrown? (run ctx "(java.time.Instant/now)")))
+      (is (:thrown? (run ctx "(java.lang.Runtime/getRuntime)"))))))
+
+;; ---------------------------------------------------------------------------
 ;; the gated runtime: :default reads a local file, refuses URL + git (04 §2, 10 §3)
 ;; ---------------------------------------------------------------------------
 

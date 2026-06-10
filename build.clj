@@ -11,7 +11,7 @@
 
 (def lib 'net.clojars.deadmeme5441/fractal-engine)
 (def version
-  (or (System/getenv "RELEASE_VERSION") "0.5.2"))
+  (or (System/getenv "RELEASE_VERSION") "0.5.3"))
 
 (def class-dir "target/classes")
 (def uber-file "target/fractal.jar")
