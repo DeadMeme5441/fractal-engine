@@ -244,26 +244,37 @@
 (defn- dangerous-class? [sym]
   (boolean (some #(re-find % (name sym)) dangerous-class-patterns)))
 
+(defn- classes-need-unsafe?
+  "True when a class grant requires the explicit :capability/unsafe co-marker:
+   the :all sentinel (it trivially includes every dangerous class) or any
+   dangerous class key in a finite map."
+  [classes]
+  (or (= :all classes)
+      (boolean (some dangerous-class? (keys classes)))))
+
 (defn validate-profile!
-  "Reject profiles that would breach the sandbox: a dangerous :cap/java-classes
-   entry without an explicit :capability/unsafe co-marker, the unsafe marker on
-   :default/:locked-down, or a non-map class whitelist. Returns the profile."
+  "Reject profiles that would breach the sandbox: dangerous :cap/java-classes
+   entries (or the :all sentinel) without an explicit :capability/unsafe
+   co-marker, the unsafe marker on :default/:locked-down, or a malformed class
+   whitelist. Returns the profile."
   [profile]
   (let [classes (:cap/java-classes profile)
         unsafe? (:capability/unsafe profile)
         surface-fns (or (:surface/fns profile) #{})]
-    (when-not (map? classes)
-      (throw (ex-info "capability :cap/java-classes must be an explicit finite map (never :all)"
+    (when-not (or (= :all classes) (map? classes))
+      (throw (ex-info "capability :cap/java-classes must be a finite symbol-keyed map, or :all (requires :capability/unsafe)"
                       {:error/type :capability/invalid :cap/java-classes classes})))
-    ;; ⛔ every key must be a class-name SYMBOL — reject the SCI `{:allow :all}`
-    ;; directive (and any non-class key), which would defeat the interop sandbox.
-    (when-not (every? symbol? (keys classes))
-      (throw (ex-info "capability :cap/java-classes must be keyed by class-name symbols (never :all / a directive)"
+    ;; ⛔ in the MAP form every key must be a class-name SYMBOL — the raw SCI
+    ;; `{:allow :all}` directive (and any non-class key) stays rejected; the
+    ;; only blanket grant is the profile-level `:all` sentinel above, which
+    ;; demands the unsafe co-marker and is banned on the built-in names.
+    (when (and (map? classes) (not (every? symbol? (keys classes))))
+      (throw (ex-info "capability :cap/java-classes must be keyed by class-name symbols (never a directive like {:allow :all})"
                       {:error/type :capability/invalid :cap/java-classes classes})))
-    (when (and (seq (filter dangerous-class? (keys classes))) (not unsafe?))
-      (throw (ex-info "capability whitelists a dangerous java class without :capability/unsafe"
+    (when (and (classes-need-unsafe? classes) (not unsafe?))
+      (throw (ex-info "capability grants dangerous java classes (or :all) without :capability/unsafe"
                       {:error/type :capability/unsafe-class
-                       :classes (filterv dangerous-class? (keys classes))})))
+                       :classes (if (= :all classes) :all (filterv dangerous-class? (keys classes)))})))
     (when (and unsafe? (#{:default :locked-down} (:capability/name profile)))
       (throw (ex-info "the :capability/unsafe marker is rejected on :default/:locked-down"
                       {:error/type :capability/unsafe-rejected
@@ -300,20 +311,38 @@
 
 (defn- meet-network [a b] (if (or (= :deny a) (= :deny b)) :deny :allow))
 
+(defn- meet-classes
+  ":all is the TOP of the class lattice: :all ∧ x = x, :all ∧ :all = :all. Two
+   finite maps meet by key intersection, keeping a's VALUES — the live Class
+   objects when a is the caller-side profile (an EDN-round-tripped persisted
+   profile is only ever passed as b; see session.clj)."
+  [a b]
+  (cond
+    (= :all a) b
+    (= :all b) a
+    :else (select-keys a (keys b))))
+
 (defn clamp
   "The MEET of two profiles — the more restrictive of each gate (04 §3).
    `clamp(parent, child)` is the universal inherit-and-clamp for every spawn /
-   per-session override."
+   per-session override. The :capability/unsafe marker survives the meet iff the
+   RESULT still needs it (dangerous classes / :all) and an input carried it —
+   so a clamped unsafe profile revalidates instead of tripping the unsafe gate."
   [a b]
-  {:capability/name  (:capability/name b)
-   :cap/fs-read      (meet-mode (:cap/fs-read a) (:cap/fs-read b) :paths)
-   :cap/fs-write     (meet-mode (:cap/fs-write a) (:cap/fs-write b) :paths)
-   :cap/shell        (meet-mode (:cap/shell a) (:cap/shell b) :commands)
-   :cap/network      (meet-network (:cap/network a) (:cap/network b))
-   :ns/granted       (set/intersection (:ns/granted a) (:ns/granted b))
-   :cap/java-classes (select-keys (:cap/java-classes a) (keys (:cap/java-classes b)))
-   :engine-fns       (set/intersection (:engine-fns a) (:engine-fns b))
-   :surface/fns      (set/intersection (surface-fns a) (surface-fns b))})
+  (let [classes (meet-classes (:cap/java-classes a) (:cap/java-classes b))
+        unsafe? (and (classes-need-unsafe? classes)
+                     (or (:capability/unsafe a) (:capability/unsafe b)))]
+    (cond->
+      {:capability/name  (:capability/name b)
+       :cap/fs-read      (meet-mode (:cap/fs-read a) (:cap/fs-read b) :paths)
+       :cap/fs-write     (meet-mode (:cap/fs-write a) (:cap/fs-write b) :paths)
+       :cap/shell        (meet-mode (:cap/shell a) (:cap/shell b) :commands)
+       :cap/network      (meet-network (:cap/network a) (:cap/network b))
+       :ns/granted       (set/intersection (:ns/granted a) (:ns/granted b))
+       :cap/java-classes classes
+       :engine-fns       (set/intersection (:engine-fns a) (:engine-fns b))
+       :surface/fns      (set/intersection (surface-fns a) (surface-fns b))}
+      unsafe? (assoc :capability/unsafe true))))
 
 (defn- gate<=? [a b kind]
   (cond
@@ -325,6 +354,15 @@
             :paths    (every? #(within? (:paths b) %) (:paths a))
             :commands (set/subset? (:commands a) (:commands b)))))
 
+(defn- classes<=?
+  "Class-grant restrictiveness: everything <= :all; :all <= only :all; finite
+   maps compare by key subset."
+  [a b]
+  (cond
+    (= :all b) true
+    (= :all a) false
+    :else (set/subset? (set (keys a)) (set (keys b)))))
+
 (defn profile<=?
   "True iff `a` is at least as restrictive as `b` on EVERY gate (the per-gate
    restrictiveness lattice, 04 §3) — the predicate that rejects a loosening
@@ -335,7 +373,7 @@
        (gate<=? (:cap/shell a) (:cap/shell b) :commands)
        (or (= :deny (:cap/network a)) (= :allow (:cap/network b)))
        (set/subset? (:ns/granted a) (:ns/granted b))
-       (set/subset? (set (keys (:cap/java-classes a))) (set (keys (:cap/java-classes b))))
+       (classes<=? (:cap/java-classes a) (:cap/java-classes b))
        (set/subset? (:engine-fns a) (:engine-fns b))
        (set/subset? (surface-fns a) (surface-fns b))))
 
@@ -361,6 +399,63 @@
    symbol to deny, and `binding` is deliberately NOT denied."
   '#{eval clojure.core/eval resolve ns-resolve requiring-resolve
      find-ns find-var intern load-string load-file load})
+
+;; ---------------------------------------------------------------------------
+;; The :all class catalog. SCI 0.8.43 resolves class SYMBOLS only through
+;; explicit :classes entries (+ imports) — {:allow :all} alone only widens
+;; reflective access to objects already in hand (verified against the pinned
+;; version). So :all enumerates the JDK's public java.*/javax.* classes from
+;; the boot image (jrt:/) ONCE per JVM and hands SCI the explicit map, the
+;; babashka approach. Classes are loaded WITHOUT initialization (no static
+;; initializers run at enumeration time).
+;; ---------------------------------------------------------------------------
+
+(defn- jrt-class-names []
+  (let [fs   (java.nio.file.FileSystems/getFileSystem (java.net.URI/create "jrt:/"))
+        root (.getPath fs "/modules" (make-array String 0))]
+    (with-open [stream (java.nio.file.Files/walk root (make-array java.nio.file.FileVisitOption 0))]
+      (->> (iterator-seq (.iterator stream))
+           (keep (fn [p]
+                   (let [s (str p)]
+                     (when (.endsWith s ".class")
+                       ;; /modules/<module>/java/lang/String.class → java.lang.String
+                       (let [parts (remove str/blank? (str/split s #"/"))
+                             cls   (drop 2 parts)]
+                         (when (seq cls)
+                           (let [cname (str/replace (str/join "." cls) #"\.class$" "")]
+                             (when (and (or (str/starts-with? cname "java.")
+                                            (str/starts-with? cname "javax."))
+                                        (not (str/ends-with? cname "package-info"))
+                                        (not (str/ends-with? cname "module-info")))
+                               cname))))))))
+           distinct
+           doall))))
+
+(def ^:private jdk-class-map
+  "Delayed {fqn-symbol Class} over the JDK's public java.*/javax.* classes.
+   Built once per JVM, only when an :all profile builds its first SCI ctx."
+  (delay
+    (into {}
+          (keep (fn [^String cname]
+                  (try
+                    (let [c (Class/forName cname false nil)]
+                      (when (java.lang.reflect.Modifier/isPublic (.getModifiers c))
+                        [(symbol cname) c]))
+                    (catch Throwable _ nil))))
+          (jrt-class-names))))
+
+(def ^:private java-lang-imports
+  "Simple-name → FQN imports for direct java.lang members (String, System,
+   Math, …), mirroring Clojure's default imports — :all profiles only."
+  (delay
+    (into {}
+          (keep (fn [[sym _]]
+                  (let [n (name sym)]
+                    (when (and (str/starts-with? n "java.lang.")
+                               (not (str/includes? (subs n 10) "."))
+                               (not (str/includes? n "$")))
+                      [(symbol (subs n 10)) sym]))))
+          @jdk-class-map)))
 
 (def ^:private copy-ns-catalog
   "The non-SCI-default namespaces, compiled into SCI namespaces via copy-ns (a
@@ -416,16 +511,22 @@
   "Map a validated profile + engine-fn impls onto the options passed to
    sci/init (03, 04 §2). Engine fns + gated IO live in clojure.core; the
    copy-ns'd catalog namespaces are emitted iff granted; classes are an explicit
-   finite whitelist (never :all); the deny set + `*read-eval* false` close the
-   remaining holes."
+   finite whitelist — or the profile-level :all sentinel (validated to carry
+   :capability/unsafe, never on :default/:locked-down), which maps to SCI's
+   {:allow :all} HERE and only here; the deny set + `*read-eval* false` close
+   the remaining holes."
   ([profile engine-fn-impls]
    (sci-opts profile engine-fn-impls {}))
   ([profile engine-fn-impls surface-namespaces]
-   {:namespaces (merge {'clojure.core      (merge (engine-fn-vars profile engine-fn-impls)
-                                                  (gated-io-vars profile))
-                        'clojure.java.io   (gated-io-ns profile)
-                        'clojure.java.shell {'sh (gated-sh profile)}}
-                       (select-keys copy-ns-catalog (:ns/granted profile))
-                       (surface-ns-vars profile surface-namespaces))
-    :classes    (:cap/java-classes profile)
-    :deny       deny-set}))
+   (let [all? (= :all (:cap/java-classes profile))]
+     (cond-> {:namespaces (merge {'clojure.core      (merge (engine-fn-vars profile engine-fn-impls)
+                                                            (gated-io-vars profile))
+                                  'clojure.java.io   (gated-io-ns profile)
+                                  'clojure.java.shell {'sh (gated-sh profile)}}
+                                 (select-keys copy-ns-catalog (:ns/granted profile))
+                                 (surface-ns-vars profile surface-namespaces))
+              :classes    (if all?
+                            (assoc @jdk-class-map :allow :all)
+                            (:cap/java-classes profile))
+              :deny       deny-set}
+       all? (assoc :imports @java-lang-imports)))))
