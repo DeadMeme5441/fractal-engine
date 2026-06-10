@@ -71,6 +71,21 @@
     (is (= :fractal/max-steps (:error/type (:error res))))
     (is (= 3 (:step-count res)))))
 
+(deftest nil-max-steps-means-unbounded
+  ;; :max-steps nil = no per-turn step cap (the same nil convention as
+  ;; :max-turns). Pre-fix this NPE'd at (>= step-n nil) on the first non-final
+  ;; step. The loop must run PAST the default (25) and settle on FINAL.
+  (let [calls (atom 0)
+        respond (fn [_req]
+                  (if (< (swap! calls inc) 30)
+                    "```clojure\n(def keep-going 1)\n```"
+                    "```clojure\n(FINAL :eventually)\n```"))
+        s (fe/start-session! (cfg respond :max-steps nil))
+        res (fe/run-turn! s "loop far past the default cap")]
+    (is (= :final (:status res)))
+    (is (= :eventually (:turn/final-value res)))
+    (is (= 30 (:step-count res)) "29 non-final steps + the FINAL step")))
+
 (deftest hard-abort-on-context-window
   (let [s (fe/start-session! (cfg (fe/responder [[:default "```clojure (FINAL :ok)```"]])
                                   :context {:compact-at 0.80 :hard-at 0.95 :unknown-window-chars 100}))

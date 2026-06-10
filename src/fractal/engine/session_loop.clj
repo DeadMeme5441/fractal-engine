@@ -248,7 +248,7 @@
         (case (:control outcome)
           :final    (commit-turn! handle turn-id (:final outcome) (:eval-records outcome))
           :terminal (:result outcome)
-          :continue (if (>= step-n max-steps)
+          :continue (if (and max-steps (>= step-n max-steps))
                       (finalize-turn! handle turn-id :budget-exceeded
                                       {:error/type :fractal/max-steps
                                        :error/message (str "max steps (" max-steps ") reached")})
