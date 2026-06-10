@@ -105,6 +105,17 @@
           (recur (conj! acc (deser (.getString rs 1))))
           (persistent! acc))))))
 
+(defn- load-events-since* [^Connection conn sid event-id]
+  (with-open [ps (.prepareStatement conn
+                   "SELECT event_edn FROM events WHERE session_id=? AND event_id>? ORDER BY event_id ASC")]
+    (.setString ps 1 sid)
+    (.setLong ps 2 (long event-id))
+    (with-open [rs (.executeQuery ps)]
+      (loop [acc (transient [])]
+        (if (.next rs)
+          (recur (conj! acc (deser (.getString rs 1))))
+          (persistent! acc))))))
+
 (defn- insert-session-row!* [^Connection conn sid]
   (with-open [ps (.prepareStatement conn
                    "INSERT OR IGNORE INTO sessions(session_id,created_at) VALUES (?,?)")]
@@ -223,7 +234,13 @@
     @(:view (get @sessions sid)))                   ; STRONG read-your-writes (the cache atom)
 
   (read-state [_ sid]
-    @(:view (get @sessions sid)))                   ; RELAXED contract (the cache satisfies it)
+    ;; RELAXED, CROSS-PROCESS-HONEST: re-fold the DURABLE log so a reader
+    ;; process observes events committed by a writer process after this store
+    ;; opened (WAL permits concurrent readers). O(log) per call — poll politely.
+    ;; current-view stays the in-process write-synchronous cache. The fold runs
+    ;; OUTSIDE db-lock (the lock only guards the shared Connection).
+    (let [events (locking db-lock (load-events* conn sid))]
+      (reduce store/apply-event (store/empty-view) events)))
 
   (peek-next-id [_ sid k]
     (inc (get-in @(:view (get @sessions sid)) [:counters k])))
@@ -235,8 +252,11 @@
     (live/subscribe (:dispatch (get @sessions sid)) callback))
 
   (events-since [_ sid event-id]
-    (->> (:events @(:view (get @sessions sid)))     ; served from the in-process cache (09)
-         (filterv (fn [ev] (> (:event/id ev) event-id))))))
+    ;; Served from the DURABLE log, not the in-process cache — so cross-process
+    ;; consumers (CLI wait, external subscribers catching up after a gap) see
+    ;; events committed by another process. Persist-before-fold guarantees the
+    ;; log is a superset of anything ever delivered live.
+    (locking db-lock (load-events-since* conn sid event-id))))
 
 ;; ---------------------------------------------------------------------------
 ;; Construction / teardown
