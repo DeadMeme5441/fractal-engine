@@ -88,27 +88,38 @@
                  :messages [{:role :system :content (prompt/compaction-prompt)}
                             {:role :user   :content (format-transcript msgs)}]
                  :cache    (cache/build-cache-opts view cfg)}
-        resp    (concurrent/with-deadline (:call-timeout-ms cfg)
-                  (adapter/-complete adapter req {:retry (:retry cfg) :stream? false}))
-        summary (:text resp)
-        snap    (kernel/snapshot-vars @(:sci-ctx handle) sid)
-        vars-ref (payload-io/maybe-intern store snap {:payload/kind :vars})
-        ;; the boundary == this :session/compacted event's own id (peek = assign,
-        ;; safe under the held turn-lock / single writer)
-        boundary (store/peek-next-id store sid :event)
-        compact-msg {:message/role :user
-                     :message/turn-id nil
-                     :message/content-or-ref (payload-io/maybe-intern store summary {:payload/kind :message})}]
-    (let [compact-ev (store/append-event! store sid
-                                           {:event/type :session/compacted
-                                            :vars-ref vars-ref
-                                            :compact-from-event-id boundary
-                                            :message compact-msg})]
-      (store/publish-head! store sid
-                           {:head/kind :compaction
-                            :head/to-event-id (:event/id compact-ev)
-                            :head/vars-ref vars-ref
-                            :head/final-ref nil
-                            :head/compact-from-event-id boundary
-                            :head/bundle-hash (get-in handle [:bundle :bundle/hash])}))
+        ;; R1 (hermes-fractal upstream): a failed compaction call SKIPS
+        ;; compaction (typed :compaction/failed event; the hard-abort gate
+        ;; still bounds the transcript) instead of killing the caller's turn —
+        ;; compaction fires exactly when the session is longest/most valuable.
+        resp    (try
+                  (concurrent/with-deadline (:call-timeout-ms cfg)
+                    (adapter/-complete adapter req {:retry (:retry cfg) :stream? false}))
+                  (catch Throwable t
+                    (store/append-event! store sid
+                                         {:event/type :compaction/failed
+                                          :error (kernel/err->map t)})
+                    nil))]
+    (when resp
+      (let [summary (:text resp)
+            snap    (kernel/snapshot-vars @(:sci-ctx handle) sid)
+            vars-ref (payload-io/maybe-intern store snap {:payload/kind :vars})
+            ;; the boundary == this :session/compacted event's own id (peek = assign,
+            ;; safe under the held turn-lock / single writer)
+            boundary (store/peek-next-id store sid :event)
+            compact-msg {:message/role :user
+                         :message/turn-id nil
+                         :message/content-or-ref (payload-io/maybe-intern store summary {:payload/kind :message})}
+            compact-ev (store/append-event! store sid
+                                            {:event/type :session/compacted
+                                             :vars-ref vars-ref
+                                             :compact-from-event-id boundary
+                                             :message compact-msg})]
+        (store/publish-head! store sid
+                             {:head/kind :compaction
+                              :head/to-event-id (:event/id compact-ev)
+                              :head/vars-ref vars-ref
+                              :head/final-ref nil
+                              :head/compact-from-event-id boundary
+                              :head/bundle-hash (get-in handle [:bundle :bundle/hash])})))
     handle))

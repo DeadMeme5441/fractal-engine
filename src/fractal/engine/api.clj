@@ -69,6 +69,17 @@
   ([cfg sid]      (session/resume-session! cfg sid))
   ([cfg sid opts] (session/resume-session! cfg sid opts)))
 
+(defn ^:alpha fork-session!
+  "^:alpha / U1 (hermes-fractal upstream) — HOST-side fork: a fresh session
+   materialized from a selected immutable head of a persisted `:store :sqlite`
+   session, REPL vars restored at zero token cost, the SOURCE NEVER ADVANCED.
+   opts {:head/id …} reaches a specific head (including a :turn-aborted
+   wreckage head — the only way); default is the latest non-aborted head.
+   Capability clamps to the narrower of cfg and the source; the fork must
+   re-present the source's surfaces (:bundle/allow-mismatch? to override)."
+  ([cfg source-sid]      (session/fork-session! cfg source-sid))
+  ([cfg source-sid opts] (session/fork-session! cfg source-sid opts)))
+
 (defn stop-session!
   ([handle]      (session/stop-session! handle))
   ([handle opts] (session/stop-session! handle opts)))
