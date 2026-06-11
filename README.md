@@ -309,6 +309,13 @@ the parent profile. The sandbox also gates `slurp`, `spit`, `file-seq`,
 `clojure.java.io` readers/streams/copy, `clojure.java.shell/sh`, namespace
 access, reader eval, dangerous classes, and known escape symbols.
 
+Eval results are realized (bounded) inside the eval guard: a lazy value whose
+realization throws — `(take 5 unbound-var)`, a poisoned `map` — degrades into
+the normal recoverable eval-error observation instead of killing the turn, and
+a child session's realization failure stays the child's own eval error rather
+than escaping to its parent. Unbounded/infinite seqs remain bounded throughout
+(capped elements per seq), so forcing never hangs the kernel.
+
 The runtime governor is also built. Configure it through:
 
 - `:max-steps` for per-turn loop depth;
@@ -363,7 +370,7 @@ The release version is derived from the tag name without the leading `v`.
 After a release is published, depend on the Clojars coordinate:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.5.4"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.5.5"}}}
 ```
 
 Then use the public facade:
