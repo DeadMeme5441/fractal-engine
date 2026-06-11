@@ -163,11 +163,23 @@
       (= :ok status)    (assoc :eval/raw-value (:value out))
       (= :final status) (assoc :eval/raw-value (:value out) :eval/raw-final (:value out)))))
 
+(defn- forced
+  "Realize every (possibly nested) lazy member of v INSIDE the eval guard, with
+   the same bounds the persistence path uses (payload-io/edn-safe: ≤100k elems
+   per seq, depth-capped) — so a lazy value whose realization throws degrades
+   into the normal recoverable :eval/error instead of escaping run-turn! later,
+   when the observation/persistence path first realizes it. Realization caches
+   in the seqs themselves; v is returned raw (identity kept for FINAL/preview)."
+  [v]
+  (payload-io/edn-safe v)
+  v)
+
 (defn eval-block
   "Evaluate one fenced block in the session's SCI ctx → a RAW eval record.
    sci/eval-string* REPL-interleaves the block's forms and returns the LAST
    form's value (verified). sci/out/err capture model IO; sci/ns pins the
-   session ns."
+   session ns. The value (FINAL's included) is bounded-FORCED inside the guard
+   — a poisoned lazy is an :eval/error here, never a turn-killing escape."
   [handle code block-index]
   (let [ctx    (deref (:sci-ctx handle))
         the-ns (the-session-ns ctx (:session-id handle))
@@ -177,9 +189,11 @@
         forms  (try (count-forms ctx code) (catch Throwable _ 0))
         out    (try
                  (sci/binding [sci/ns the-ns sci/out sw sci/err ew]
-                   {:value (sci/eval-string* ctx code)})
+                   {:value (forced (sci/eval-string* ctx code))})
                  (catch clojure.lang.ExceptionInfo e
-                   (or (when-let [f (unwrap-final e)] {:final true :value (:value f)})
+                   (or (when-let [f (unwrap-final e)]
+                         (try {:final true :value (forced (:value f))}
+                              (catch Throwable e' {:error (err->map e')})))
                        {:error (err->map e)}))
                  (catch Throwable e {:error (err->map e)}))]
     (build-eval-record code block-index out sw ew forms t0)))
