@@ -122,6 +122,8 @@ Every durable state change is an event:
 | `:step/put` | Replaces the matching step by `:step/id`. |
 | `:message/appended` | Appends a transcript message. |
 | `:eval/added` | Appends an eval record. |
+| `:leaf/called` | Appends a leaf (`lm`/`map-lm`) call record — request content, response, usage/cost. Always recorded: leaf spend is never invisible, and recorded leaves replay. |
+| `:surface/called` | Appends a surface-call record (opt-in via `:surface/record?`) — function, args hash, result-or-ref. The world-read replay seam. |
 | `:session/vars-snapshotted` | Updates `:vars-ref`. |
 | `:session/compacted` | Updates `:vars-ref`, updates the compaction boundary, and appends one compact message. |
 | `:head/published` | Adds a head and sets `:current-head`. |
@@ -286,6 +288,46 @@ Compaction is a durable state transition, not a destructive rewrite.
 
 This is why the compact continuation frame survives pruning. The projection is
 computed over events instead of mutating the historical `:messages` vector.
+
+## Store-Scoped Embedder Layer (0.6)
+
+Alongside the per-session event logs, the durable store carries ONE
+store-scoped embedder layer — so applications keep a single authority instead
+of a shadow database for state that is about engine facts:
+
+- **Facts** — opaque `{:fact/tag kw :fact/value edn}` records, stamped with a
+  monotonic store-scoped `:fact/id` + `:fact/at`. The engine orders, persists,
+  and serves them (`facts-since`) and NEVER interprets them: no schemas, no
+  queries. Application indexes are disposable projections folded from this
+  stream.
+- **Pins** — named durable pointers (`:pin/name` → `:pin/ref`) with
+  publish-head-style CAS via `:pin/expected-version` (absent ⇒ unconditional,
+  nil ⇒ must-not-exist, N ⇒ must equal). `current-head` remains the only
+  ANONYMOUS mutable continuation pointer; pins are the named ones.
+- Both are ref-validated at write (payload refs must resolve; a
+  `{:session/id … :head/id …}` pin ref must name a published head) and
+  EDN-coerced at write so a non-EDN member becomes an opaque marker instead of
+  poisoning later reads. Writes take the store-scope advisory lease.
+
+## Snapshot Reopen And The Writer Lease (0.6)
+
+**Snapshots.** On every head publication the sqlite store writes a view
+snapshot blob (events pruned to the message-bearing window kept-messages
+reads) indexed by head id in a `snapshots` table — deliberately OUTSIDE head
+content, so head ids stay impl-agnostic semantic identities. Reopen restores
+the latest head's snapshot and folds only the tail: O(tail) instead of O(log).
+The snapshot is a reopen ACCELERATOR, never a gate: writes are best-effort,
+and any missing piece falls back to the full deterministic re-fold. After a
+snapshot reopen the in-process view's `:events` is a bounded working window;
+`events-since`/`event-stream` still serve the full durable log.
+
+**Writer lease.** Writes are guarded by an advisory per-scope lease (scope = a
+session id, or the store scope for facts/pins): a second live writer fails
+typed with `:fractal/writer-lease-held`; a stale lease (heartbeat older than
+`:writer-lease-ttl-ms`, default 10 minutes) is reclaimed; a writer whose lease
+was taken over detects it on its next write as `:fractal/writer-lease-lost`.
+Reads (`read-state`, `events-since`, reopen folds) never take leases.
+`:writer-lease-steal?` is the explicit crashed-writer escape hatch.
 
 ## Failure Semantics
 

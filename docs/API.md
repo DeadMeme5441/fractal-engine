@@ -38,6 +38,7 @@ Exported functions:
 
 (fe/run-turn! handle msg)
 (fe/run-turn-async! handle msg)
+(fe/run-turn-with-contract! handle msg contract)
 
 (fe/resume-session! cfg sid)
 (fe/resume-session! cfg sid opts)
@@ -55,10 +56,31 @@ Exported functions:
 (fe/read-payload handle ref-or-value)
 (fe/subscribe! handle callback)
 
+;; embedder facts, pins, projections (0.6)
+(fe/append-fact! handle fact)
+(fe/facts-since handle fact-id)
+(fe/pin! handle pin)
+(fe/read-pin handle pin-name)
+(fe/list-pins handle)
+(fe/delegation-report handle turn-id)
+(fe/verify-claim source claim)
+
+;; recorded replay (0.6)
+(fe/replay-responder source sids)
+(fe/surface-calls source sid)
+(fe/open-sqlite-store dir)
+(fe/close-store! store)
+
 (fe/responder clauses)
 ```
 
 `responder` is a fake-adapter helper for tests and local examples.
+
+`event-stream` serves the session's FULL ordered event log from the durable
+store. After a durable reopen the in-process view holds a bounded working
+window of events (see snapshot reopen in
+[Storage And Heads](STORAGE_AND_HEADS.md)); the log remains the truth and this
+function reads the log.
 
 ## CLI Facade
 
@@ -114,9 +136,33 @@ Required or notable options:
  :context          {:compact-at 0.80
                     :hard-at 0.95
                     :unknown-window-chars 400000}
+ :observe          {:ok-fit 400 :final-fit 1200} ; fit-or-stub observation caps (chars)
+ :doctrine         nil                 ; stamped base-doctrine override, see below
+ :surface/record?      false           ; record surface calls as durable events
+ :surface/replay-calls nil             ; recorded calls to serve instead of live fns
+ :writer-lease-ttl-ms  nil             ; sqlite writer-lease staleness window (default 10 min)
+ :writer-lease-steal?  false           ; explicit crashed-writer lease takeover
  :system-overlay   nil
  :surfaces         []}
 ```
+
+`:doctrine` injects embedder-owned base doctrine text in place of the
+harness-selected built-in prompt, stamped with the engine's name/version/hash
+discipline and inherited by child sessions:
+
+```clojure
+:doctrine {:doctrine/name :myapp/frame
+           :doctrine/version 3
+           :doctrine/text "You are ..."}
+```
+
+The stamp (never the text) is part of the session's recorded bundle identity,
+so resume verifies the session reopens under the doctrine it ran with.
+
+`:observe` sets the observation window — how many characters of a return value
+the model sees whole before it gets a `«type, size»` stub and must inspect or
+slice deliberately. Narrow windows enforce a blind-root discipline; the
+defaults match prior releases.
 
 `make-config` throws `ex-info` for invalid config, including:
 
@@ -128,6 +174,9 @@ Required or notable options:
 :config/invalid-harness
 :config/invalid-store
 :config/missing-store-dir
+:config/invalid-doctrine
+:config/invalid-observe
+:config/invalid-surface-replay
 :capability/unknown-profile
 :capability/invalid
 ```
@@ -284,6 +333,23 @@ content-addressed payloads. Durable sessions can be closed and reopened with
 `:config/unsupported-store`. Resuming an unknown session id throws
 `:fractal/unknown-session`.
 
+Sessions record a BUNDLE identity — the content-addressed stamp of
+`{harness, doctrine, surfaces, capability}` they ran under — on the session
+row and on every published head (`:head/bundle-hash`). Resume verifies the
+configured world against it: a surface or doctrine mismatch throws a typed
+`:bundle/surface-mismatch` / `:bundle/doctrine-mismatch` instead of silently
+reopening the session in a different world. An intentional divergence (for
+example resuming across a doctrine upgrade) is an explicit opt-in:
+
+```clojure
+(fe/resume-session! cfg sid {:bundle/allow-mismatch? true})
+```
+
+Capability is NOT part of this equality check — it follows the clamp lattice
+(a resumed session is clamped to what it ran with; narrowing stays legal).
+Sessions recorded before bundles existed fall back to the legacy surface-stamp
+check (`:surface/mismatch`).
+
 ## Running Turns
 
 `run-turn!` is blocking:
@@ -354,6 +420,108 @@ Promise behavior:
 - unexpected async failures are converted to an internal error result when the
   future cannot otherwise settle
 
+## Contract Turns
+
+`run-turn-with-contract!` wraps `run-turn!` in a validate→correct→retry loop —
+the pattern every embedder otherwise hand-rolls. The engine interprets
+nothing: the contract is caller-supplied.
+
+```clojure
+(fe/run-turn-with-contract! handle "produce the report"
+  {:validate     (fn [turn-result]
+                   (when-not (:sections (:turn/final-value turn-result))
+                     "missing :sections"))          ; nil/false = accept
+   :max-attempts 3                                  ; total turns spent
+   :correction   (fn [rejection result] ...)})      ; optional; default restates
+```
+
+- `:validate` runs only on `:final` results; returning nil/false accepts.
+  Any truthy value is the rejection fed into the correction message.
+- On exhaustion the LAST result is returned with `:contract/rejected` and
+  `:contract/attempts` attached — never swallowed.
+- Non-`:final` terminals (timeout/budget/error) return immediately; a
+  correction message cannot fix a dead turn.
+
+## Embedder Facts, Pins, And Projections
+
+The durable store carries a STORE-scoped embedder layer so applications do not
+need a shadow database for state that is about engine facts:
+
+```clojure
+(fe/append-fact! handle {:fact/tag :run/scored :fact/value {...}})
+(fe/facts-since handle 0)
+
+(fe/pin! handle {:pin/name :incumbent
+                 :pin/ref  {:session/id sid :head/id head-id}
+                 :pin/meta {:why "current best"}
+                 :pin/expected-version 2})   ; optional CAS (nil ⇒ must not exist)
+(fe/read-pin handle :incumbent)
+(fe/list-pins handle)
+```
+
+- Facts are OPAQUE: a keyword `:fact/tag` plus any EDN `:fact/value`. The
+  engine orders, persists, and serves them (`facts-since` is the stream app
+  projections fold from) and never interprets them — no schemas, no queries.
+- Pins are named durable pointers with publish-head-style CAS
+  (`:fractal/pin-cas-failed` on a stale `:pin/expected-version`).
+- Both are ref-validated at write: payload refs must resolve and a
+  `{:session/id … :head/id …}` pin ref must name a published head
+  (`:fractal/dangling-ref` otherwise). Values are EDN-coerced at write, so a
+  non-EDN member becomes an opaque marker instead of poisoning later reads.
+
+Read projections answer the questions embedders otherwise scrape the log for:
+
+```clojure
+(fe/delegation-report handle turn-id)
+;; => {:turn/self {...} :delegation/edges [...]
+;;     :delegation/children [{:child/session-id ... :child/status ...
+;;                            :child/usage ... :child/cost ...}]
+;;     :delegation/children-cost {...}}   ; :unknown-aware, never fabricated
+
+(fe/verify-claim handle {:session/id sid :head/id head-id})
+;; => {:claim/kind :head :verified? true}
+```
+
+`verify-claim` accepts a payload ref, `{:session/id … :head/id …}`,
+`{:session/id … :edge/id …}`, or `{:session/id …}` — mechanical existence
+checks against the log for anything a model (or anyone) asserts exists.
+`delegation-report` re-folds child logs (O(subtree log) on sqlite); treat it
+as an inspection read and poll politely.
+
+## Recorded Replay
+
+Every provider step, every leaf call, and (opt-in) every surface call is in
+the durable log — so a recorded run can re-execute deterministically with no
+provider spend:
+
+```clojure
+;; record: any run against a sqlite store (leaf calls are always recorded;
+;; surface calls require :surface/record? true in the recording cfg)
+
+;; replay provider + leaf calls:
+(def respond (fe/replay-responder source ["root-sid" "child-sid"]))
+(def replay-cfg (fe/make-config {:adapter :fake :fake/respond respond
+                                 :model "fake-model" :harness :rlm}))
+
+;; replay world reads too:
+(def calls (into (fe/surface-calls source "root-sid")
+                 (fe/surface-calls source "child-sid")))
+;; ... :surface/replay-calls calls in the replay cfg; live fns are never invoked
+
+;; cross-run sources:
+(def store (fe/open-sqlite-store "var/recorded-run"))
+;; ... (fe/close-store! store)
+```
+
+- Step responses route by each session's first user message; leaf responses
+  route by leaf-request content; surface calls route by `(fn, args)`. Root and
+  `rlm` children replay as a tree.
+- Divergence and exhaustion fail typed (`:fractal/replay-*`,
+  `:surface/replay-*`) — a replay never silently invents a response.
+- The combinations matter: replay-everything = deterministic regression
+  re-execution; live adapter + replayed surfaces = evaluate a NEW prompt/model
+  against byte-identical world reads (the paired A/B harness).
+
 ## Lifecycle
 
 `stop-session!` requests a stop:
@@ -415,9 +583,10 @@ payload refs for large messages, final values, eval records, or snapshots.
  :last-event-id  8}
 ```
 
-`event-stream` returns the folded durable event list currently present in the
-view. `events-since` returns ordered durable events with `:event/id` greater
-than the supplied id.
+`event-stream` returns the session's full ordered event log from the durable
+store (after a snapshot reopen the in-process view's `:events` is a bounded
+working window — the log stays the truth). `events-since` returns ordered
+durable events with `:event/id` greater than the supplied id.
 
 `read-payload` is the supported hydration seam:
 
@@ -522,9 +691,13 @@ Rules:
 - Dynamic request prompt text lowers system-and-tail cache breakpoints to one,
   preserving the stable system cache point without caching dynamic tail text.
 - `:surface/prompts :leaf` renders into `lm` / `map-lm` leaf system prompts.
-- Public surface stamps are stored in session metadata. On durable resume,
-  configured surface stamps must match the persisted session stamps or
-  `resume-session!` throws `:surface/mismatch`.
+- Public surface stamps are stored in session metadata and in the session's
+  bundle identity. On durable resume, configured surfaces must match the
+  recorded world: bundle-recording sessions throw `:bundle/surface-mismatch`
+  (with `{:bundle/allow-mismatch? true}` as the explicit escape); legacy
+  sessions throw `:surface/mismatch`. On `attach-rlm`, the derived child must
+  re-present the SOURCE session's surfaces (its restored vars were created
+  against them) or attach fails typed, with the same explicit opt-out.
 
 Surface functions are trusted embedder code. The engine owns injection, gating,
 prompt truth, cache placement, and surface identity; embedders own auth,
