@@ -54,6 +54,8 @@ The Clojure API owns engine behavior:
 - `events-since`
 - `read-payload`
 - `subscribe!`
+- `list-pins` / `facts-since` (the store-scoped embedder layer)
+- `delegation-report` / `verify-claim` (read projections)
 
 CLI commands open or create a durable SDK session, perform one usage or
 inspection action, emit JSON or EDN, and close local resources. If a behavior is
@@ -125,8 +127,23 @@ where the engine API being invoked explicitly does work such as compaction:
 | `trace` | Hydrated assistant code and observation messages for one turn, plus final value when present. |
 | `check` | Store sanity check for known sessions and payload refs. |
 | `report` | Human-observable compact summary of the latest session state. |
+| `pins` | The store's named durable pins (embedder pointers to heads/sessions/payloads). |
+| `facts` | The store-scoped embedder fact stream since `--since N`. |
+| `delegation` | What a turn delegated: lineage edges plus per-child status/turns/usage/cost (`--turn N`; defaults to the latest turn). |
 
 `help` prints the command list and common options.
+
+Flags added in 0.6:
+
+- `--allow-bundle-mismatch` — explicit escape for resuming a session whose
+  recorded bundle (doctrine/surfaces) no longer matches the configured world,
+  e.g. across an intentional doctrine upgrade. Without it the resume fails
+  typed (`:bundle/doctrine-mismatch` / `:bundle/surface-mismatch`).
+- `--steal-lease` — explicit crashed-writer escape: take the sqlite advisory
+  writer lease even if a (dead) holder's heartbeat still looks live. The
+  ordinary second-writer collision stays a typed failure
+  (`:fractal/writer-lease-held`); a writer whose lease was stolen fails its
+  next write with `:fractal/writer-lease-lost`.
 
 ## Config Files
 

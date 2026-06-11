@@ -68,8 +68,8 @@ The command-line control plane is also built. It is a thin process seam over the
 API with usage commands (`init`, `config`, `start`, `run`, `turn`, `resume`,
 `stop`, `close`, `compact`, `wait`) and inspection commands (`status`,
 `progress`, `view`, `events`, `heads`, `head`, `edges`, `tree`, `payload`,
-`messages`, `turns`, `steps`, `evals`, `trace`, `check`, `report`). See
-[Agent Control Plane](AGENT_CONTROL_PLANE.md).
+`messages`, `turns`, `steps`, `evals`, `trace`, `check`, `report`, `pins`,
+`facts`, `delegation`). See [Agent Control Plane](AGENT_CONTROL_PLANE.md).
 
 ## Mental Model
 

@@ -92,6 +92,23 @@ git diff --cached
 Do not rely only on file names; leaks often appear inside otherwise ordinary
 Markdown or EDN summaries.
 
+## Writer Leases (0.6)
+
+Durable sqlite stores are guarded by an advisory writer lease per scope. The
+operational cases:
+
+- A second live writer on the same session/store fails typed with
+  `:fractal/writer-lease-held` — this is the design working, not a bug.
+- A CRASHED writer (kill -9, OOM) never releases its lease; the scope frees
+  itself after `:writer-lease-ttl-ms` (default 10 minutes), or immediately
+  with the explicit escape: `:writer-lease-steal? true` in config or
+  `--steal-lease` in the CLI. Steal only when the prior writer is known dead —
+  a stolen-from writer that is actually alive fails its next write with
+  `:fractal/writer-lease-lost` (loud, but its in-flight provider spend is
+  already gone).
+- Clean `close-session!`/`close-store!` releases leases immediately; prefer
+  letting commands finish over killing them.
+
 ## Live Run Cleanup
 
 After a live run:

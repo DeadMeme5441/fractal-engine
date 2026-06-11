@@ -100,6 +100,14 @@ Leaves do not get a REPL, persistent vars, child lineage, or a multi-step loop. 
 leaf is one provider call. If the task needs exploration, inspection, repair, or
 multi-step state, it is not a leaf.
 
+Every leaf call IS a durable `:leaf/called` event in the calling session's log
+(request content, response, usage/cost — failures included): leaf spend is
+never invisible, and recorded leaves replay through `fe/replay-responder`.
+Accounting follows: a turn's `:turn/usage` / `:turn/cost` are self-only where
+SELF means the turn's own steps PLUS its own leaf calls. Child subtrees still
+ride their envelopes' `:rlm/meta` and never fold into the parent's turn
+totals. `fe/delegation-report` joins both views per turn.
+
 Use `rlm` or `map-rlm` when a sub-problem needs its own working loop:
 
 - the lane has too much uncertainty for one leaf judgment
