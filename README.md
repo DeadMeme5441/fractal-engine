@@ -14,7 +14,9 @@ small runtime substrate for durable model-driven work:
 - recursive work happens through child sessions via `rlm` and `map-rlm`;
 - reusable prior state is derived through `attach-rlm`;
 - durable state is stored in SQLite plus content-addressed payload blobs;
-- every completed turn publishes an immutable head for resume and lineage.
+- every completed turn publishes an immutable head for resume and lineage;
+- aborted turns publish recoverable `:turn-aborted` wreckage heads, and hosts
+  can fork any head into a fresh session with `fork-session!`.
 
 ```mermaid
 flowchart LR
@@ -44,7 +46,8 @@ wrapper.
 | Provider adapter seam | Offline fake runs and live provider runs share the same runtime path. |
 | Recursive harness | `lm`, `map-lm`, `rlm`, `map-rlm`, and `attach-rlm` let the model choose bounded leaf judgment, child sessions, fan-out, or derived continuation. |
 | Durable storage | SQLite stores events and session rows; BlobStore stores content-addressed payload bytes. |
-| Immutable heads | Completed turns publish continuation heads used by resume, attach, and lineage inspection. |
+| Immutable heads | Completed turns publish continuation heads used by resume, attach, and lineage inspection. Aborted turns publish `:turn-aborted` wreckage heads so failed work stays recoverable (never a default resume basis). |
+| Host forks | `fork-session!` materializes a fresh session from any immutable head of a durable session — vars restored, source never advanced. |
 | Agent control plane | The CLI drives usage commands and read-only inspection commands with JSON/EDN output and explicit config files. |
 
 ## Requirements
@@ -155,8 +158,19 @@ process restart:
 ;; => 42
 ```
 
-Resume restores from the published current head. It does not replay provider
-calls or old evals.
+Resume restores from the latest successful head. It does not replay provider
+calls or old evals, and it never restores from a `:turn-aborted` wreckage head.
+
+Hosts can also fork any head into a fresh session without touching the source:
+
+```clojure
+(def fork (fe/fork-session! cfg "sdk-demo"))                 ; latest good head
+(def rec  (fe/fork-session! cfg "sdk-demo" {:head/id wreck})) ; explicit head,
+                                                              ; incl. wreckage
+```
+
+A failed turn's `TurnResult` carries the wreckage head id as
+`:turn/aborted-head` — fork it to inspect or repair what the dead turn built.
 
 ## Recursive Harness
 
@@ -371,7 +385,7 @@ The release version is derived from the tag name without the leading `v`.
 After a release is published, depend on the Clojars coordinate:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.6.0"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.7.0"}}}
 ```
 
 Then use the public facade:

@@ -6,6 +6,21 @@ recursive work over durable working state, with the session loop, the SCI eval
 kernel, restart/resume, branching, immutable heads, current-head publication, and
 lineage.
 
+> **0.7 addendum (hermes-fractal upstream seams).** Two additive seams extend
+> the recorded design; their full design record lives in
+> `../../hermes-fractal/spec/07-upstream-engine-changes.md`:
+> **(U1)** host-side `fork-session!` — the public fork-from-head lifecycle `06`
+> listed as out of v1 scope: a fresh session materialized from any immutable
+> head of a durable session, vars restored, source never advanced, capability
+> clamped against the caller's cfg, surfaces bundle-verified;
+> **(U2)** aborted-turn wreckage heads — every non-final terminal turn
+> publishes a best-effort `:head/kind :turn-aborted` head (vars at death) and
+> reports `:turn/aborted-head`; `store/current-resume-head` (latest non-aborted)
+> is now the sole DEFAULT restore selector for resume/attach/fork, so wreckage
+> is reachable only by explicit `:head/id`. Riders: compaction provider failure
+> degrades to a typed `:compaction/failed` skip; string inlining counts UTF-8
+> bytes. User docs: `../docs/STORAGE_AND_HEADS.md`, `../docs/API.md`.
+
 Some docs intentionally preserve build history because that history explains the
 layering. Read `00` and `01` as current-state truth. Read `11` as the construction
 record plus the remaining open decisions.

@@ -109,6 +109,19 @@ operational cases:
 - Clean `close-session!`/`close-store!` releases leases immediately; prefer
   letting commands finish over killing them.
 
+## Wreckage Heads and Host Forks (0.7)
+
+- A turn that ends `:timeout`/`:budget-exceeded`/`:error` publishes a
+  best-effort `:turn-aborted` wreckage head; the failed `TurnResult` carries
+  its id as `:turn/aborted-head`. Nothing is lost on abort.
+- Wreckage is never a default restore basis: resume and default attach/fork
+  select the latest NON-aborted head. To inspect or repair a dead turn, fork
+  the wreckage explicitly:
+  `(fe/fork-session! cfg sid {:head/id aborted-head-id})`.
+- Forks are ordinary sessions (`:session/kind :host-fork`) in the same store —
+  they take their own writer leases and must be `close-session!`d like any
+  handle. The source session gains no events from a fork.
+
 ## Live Run Cleanup
 
 After a live run:

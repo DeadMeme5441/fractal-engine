@@ -81,17 +81,25 @@ instead of smoothing it away.
 
 ## Branch And Head Semantics
 
-The current head is authoritative for resume. Resuming a durable session means
-continuing the same session from its current published state, not replaying old
-provider calls, old evals, or a loose transcript.
+The latest successful head is authoritative for resume. Resuming a durable
+session means continuing the same session from its last good published state,
+not replaying old provider calls, old evals, or a loose transcript. A
+`:turn-aborted` wreckage head (0.7) left by a failed turn never becomes the
+resume basis.
 
 Branching preserves alternatives:
 
 - `rlm` creates a fresh child from the caller's assignment.
 - `map-rlm` creates one fresh child per independent lane.
 - `attach-rlm` creates a fresh derived child from a selected prior session/head.
+- `fork-session!` (0.7) lets the HOST do the same from outside any session.
 - Older heads remain useful as attach points even after the source session's current
   head moves on.
+
+Failure no longer loses work (0.7): a turn that dies on timeout, budget, or
+provider failure publishes a wreckage head carrying its vars at death. Fork it
+by the `:turn/aborted-head` id from the failed TurnResult to inspect or repair
+what the dead turn had built, instead of re-running from scratch.
 
 This makes long-horizon work operator-friendly. A human can keep the root on the
 main line, inspect branch outcomes, discard weak branches, and later derive new work

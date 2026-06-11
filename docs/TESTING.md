@@ -152,7 +152,8 @@ unit tests. Useful specimens should cover:
 
 - many-turn continuity with persistent working state;
 - stop, close, resume, and continue from durable state;
-- branch or attach from a prior head without advancing the source;
+- branch, attach, or host-fork from a prior head without advancing the source;
+- abort a turn (budget/timeout) and recover its state from the wreckage head;
 - child and leaf decomposition under explicit fan-out and timeout limits;
 - agent-driven CLI usage with human-observed JSON or EDN artifacts;
 - partial failure where other lanes still produce usable results;

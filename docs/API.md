@@ -43,6 +43,9 @@ Exported functions:
 (fe/resume-session! cfg sid)
 (fe/resume-session! cfg sid opts)
 
+(fe/fork-session! cfg source-sid)        ; 0.7, alpha
+(fe/fork-session! cfg source-sid opts)
+
 (fe/stop-session! handle)
 (fe/stop-session! handle opts)
 
@@ -331,7 +334,37 @@ content-addressed payloads. Durable sessions can be closed and reopened with
 `resume-session!` is public but marked alpha. It currently requires
 `:store :sqlite`; using it with `:store :memory` throws
 `:config/unsupported-store`. Resuming an unknown session id throws
-`:fractal/unknown-session`.
+`:fractal/unknown-session`. Resume restores from the latest NON-aborted head —
+a `:turn-aborted` wreckage head left by a failed turn is never the resume
+basis.
+
+## Host Forks (0.7, alpha)
+
+`fork-session!` materializes a FRESH session from a selected immutable head of
+a persisted `:store :sqlite` session — REPL vars restored, the source never
+advanced. It is the host-side counterpart of the model-facing `attach-rlm`.
+
+```clojure
+;; fork the latest non-aborted head:
+(def fork (fe/fork-session! cfg source-session-id))
+
+;; fork a specific head — the only way to reach a :turn-aborted wreckage head:
+(def recovery (fe/fork-session! cfg source-session-id
+                                {:head/id (:turn/aborted-head failed-result)}))
+
+(fe/run-turn! fork "compute over the restored vars …")
+(fe/close-session! fork)
+```
+
+opts: `:head/id` (explicit source head), `:id` (fork session id),
+`:capability` (clamp-only override), `:system-overlay`,
+`:bundle/allow-mismatch?`.
+
+Typed failures: `:config/unsupported-store` (non-sqlite cfg),
+`:fractal/unknown-session`, `:fractal/unknown-head`,
+`:fractal/fork-capability-rejected` (the source ran more privileged than the
+caller's cfg), `:bundle/surface-mismatch` (the fork did not re-present the
+source's surfaces; `:bundle/allow-mismatch? true` is the explicit escape).
 
 Sessions record a BUNDLE identity — the content-addressed stamp of
 `{harness, doctrine, surfaces, capability}` they ran under — on the session
@@ -367,6 +400,7 @@ stopped and no new turn is opened.
  :session/id      "session-id"
  :turn/id         1
  :turn/final-value {:answer 42}     ; present only when :status is :final
+ :turn/aborted-head "sha256:..."    ; 0.7 — present on non-:final terminals
  :turn/usage      {:usage/status :known | :unknown, ...}
  :turn/cost       {:cost/status :known | :unknown, ...}
  :turn/cache      {:cache/status :hit | :miss | :unknown, ...}
@@ -382,14 +416,24 @@ Status meanings:
 - `:error`: provider failure, model/runtime error, stopped session, or another
   non-final terminal failure.
 
+Every non-`:final` terminal turn additionally publishes a best-effort
+`:turn-aborted` wreckage head and reports its id as `:turn/aborted-head` —
+the aborted turn's accumulated REPL state stays recoverable via
+`fork-session!`/`attach-rlm` with that explicit head id. Wreckage never
+becomes a default resume/attach basis. See
+[`STORAGE_AND_HEADS.md`](STORAGE_AND_HEADS.md).
+
 `run-turn!` throws for pre-turn failures, including:
 
 - `:fractal/session-turn-limit`
 - `:fractal/turn-in-flight`
 - `:subscribe/reentrant`
 - config/provider setup errors
-- auto-compaction errors before the turn opens
 - unexpected uncaught internal errors on the synchronous path
+
+A FAILED auto-compaction provider call no longer throws here (0.7): compaction
+is skipped, a typed `:compaction/failed` event is appended, and the turn
+proceeds — the hard context-window gate still bounds it.
 
 ## Async Turns
 

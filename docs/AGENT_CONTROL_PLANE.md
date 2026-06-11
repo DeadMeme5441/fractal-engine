@@ -115,7 +115,7 @@ where the engine API being invoked explicitly does work such as compaction:
 | `progress` | API progress projection. |
 | `view` | Full folded engine view. |
 | `events` | Durable events since `--since N`. |
-| `heads` | All heads plus current-head id. |
+| `heads` | All heads plus current-head id. `:head/kind` is `:turn-final`, `:compaction`, or `:turn-aborted` (0.7 wreckage — a failed turn's recoverable state; never a default resume basis). |
 | `head` | One head selected with `--head` or a positional id. |
 | `edges` | Lineage edges for recursion and derived sessions. |
 | `tree` | Known session tree assembled from durable lineage. |

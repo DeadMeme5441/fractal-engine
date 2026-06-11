@@ -161,9 +161,12 @@ It is different from nearby concepts:
 | Attach | Create a fresh derived child from selected source state without advancing the source. |
 
 The source session does not move under attach. Passing a session handle means
-"attach from that session's current head." Passing a head handle means "attach from
-this exact immutable point." That distinction matters when a later current head has
-moved past an older useful branch.
+"attach from that session's latest successful (non-aborted) head." Passing a head
+handle means "attach from this exact immutable point" — including a
+`:turn-aborted` wreckage head, which an explicit id is the only way to reach.
+That distinction matters when a later current head has moved past an older
+useful branch. (Hosts have the same operation outside any session:
+`fork-session!` — see `docs/API.md`.)
 
 Use attach when:
 

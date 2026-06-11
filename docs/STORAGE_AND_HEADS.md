@@ -177,7 +177,7 @@ A head is an immutable content-addressed continuation boundary:
  :head/session      "s-..."
  :head/basis        nil | "sha256:..."
  :head/event-range  [from-event-id to-event-id]
- :head/kind         :turn-final | :compaction
+ :head/kind         :turn-final | :compaction | :turn-aborted
  :head/turn-id      1 | nil
  :head/vars-ref     <inline-value-or-payload-ref>
  :head/final-ref    <inline-value-or-payload-ref> | nil
@@ -211,8 +211,21 @@ Compaction:
 3. Append one `:session/compacted` event.
 4. Publish a `:compaction` head whose event range ends at the compaction event.
 
-Non-final terminal outcomes do not publish heads. They still append terminal
-turn state so the durable event stream and view represent the failure.
+Non-final terminal outcome (timeout, budget-exceeded, error) — 0.7:
+
+1. Append the terminal `:turn/put` (status, error, honest rollups).
+2. Best-effort snapshot the live SCI vars (intern only — no
+   `:session/vars-snapshotted` event, so wreckage never contaminates the
+   legacy `:vars-ref` fallback).
+3. Publish a `:turn-aborted` WRECKAGE head carrying that snapshot.
+4. The `TurnResult` carries the wreckage head id as `:turn/aborted-head`.
+
+A wreckage head makes a dead turn's accumulated state recoverable instead of
+lost: fork or attach it by explicit `:head/id` to inspect or repair what the
+aborted turn had built. Wreckage is NEVER a default restore basis — resume,
+default attach, and default fork all select through `current-resume-head`,
+which skips `:turn-aborted` heads. If snapshotting itself fails, the abort
+still completes without a head (best-effort by design).
 
 ## Current Head and Resume
 
@@ -221,13 +234,16 @@ turn state so the durable event stream and view represent the failure.
 1. Opens a fresh store on the configured durable backend.
 2. Recreates the in-process slot by folding durable events.
 3. Builds a fresh SCI context.
-4. Restores vars from the folded current head's `:head/vars-ref`.
-5. Falls back to the top-level `:vars-ref` projection only if no current head is
-   available.
+4. Restores vars from the latest NON-aborted head's `:head/vars-ref`
+   (`store/current-resume-head` — `:turn-final` and `:compaction` heads
+   qualify; `:turn-aborted` wreckage is skipped).
+5. Falls back to the top-level `:vars-ref` projection only if no qualifying
+   head is available.
 
 This priority is deliberate. `:vars-ref` is useful projection state, but it is
-not a second mutable restore authority. If a later vars snapshot projection
-exists after a published head, resume still prefers the current head.
+not a second mutable restore authority — and a dead turn's wreckage must never
+silently become the session's continuation point. If a later vars snapshot
+projection exists after a published head, resume still prefers the head.
 
 ## Attach Semantics
 
@@ -235,8 +251,10 @@ exists after a published head, resume still prefers the current head.
 
 Source resolution:
 
-- A source session handle or session id selects that session's `current-head`.
-- A head map or explicit `:head/id` selects that immutable head.
+- A source session handle or session id selects that session's latest
+  non-aborted head (`current-resume-head`).
+- A head map or explicit `:head/id` selects that immutable head — including a
+  `:turn-aborted` wreckage head; the explicit id is the only way to reach one.
 - The selected source session and source head must exist.
 
 Execution:
@@ -250,6 +268,32 @@ Execution:
 
 The source session is not advanced. The source head is immutable and remains a
 historical continuation boundary.
+
+## Host Forks (0.7)
+
+`fork-session!` is the HOST-side counterpart of `attach-rlm`: the embedder
+(not a model inside a session) materializes a fresh session from a selected
+immutable head of a persisted `:store :sqlite` session, with the head's REPL
+vars restored and the source never advanced.
+
+```clojure
+(fe/fork-session! cfg source-sid)                      ; latest non-aborted head
+(fe/fork-session! cfg source-sid {:head/id "sha256:…"}) ; explicit head — incl. wreckage
+```
+
+Semantics, mirroring attach where a parent session would have stood:
+
+- Capability is `clamp(cfg-resolved, source-profile)`; a source MORE privileged
+  than the caller's cfg is rejected (`:fractal/fork-capability-rejected`).
+- The fork must re-present the source's surfaces
+  (`:bundle/surface-mismatch` otherwise; `:bundle/allow-mismatch?` is the
+  explicit escape).
+- The fork is a normal session (`:session/kind :host-fork`) with
+  `:session/source-session` / `:session/source-head-id` recorded, and a
+  `:derivation` / `:host-fork` lineage edge in the FORK's own log — the source
+  log gains no events.
+- Forking a `:turn-aborted` wreckage head by explicit id is the supported
+  recovery path for aborted work.
 
 ## Lineage Edges
 
@@ -359,9 +403,10 @@ Live delivery:
 
 Turn outcomes:
 
-- `:final` publishes a head.
+- `:final` publishes a `:turn-final` head.
 - `:timeout`, `:budget-exceeded`, `:error`, and stopped-session results settle
-  the turn without publishing a new head.
+  the turn and publish a best-effort `:turn-aborted` wreckage head (0.7) that
+  never becomes a default restore basis.
 
 ## Maintainer Checklist
 
@@ -370,10 +415,11 @@ When changing storage, heads, compaction, resume, or recursion:
 1. Keep SQLite event rows plus BlobStore payloads as the durable authority.
 2. Keep `apply-event` pure and deterministic.
 3. Keep `current-view` read-your-writes for runtime code.
-4. Keep `current-head` the sole mutable restore pointer.
-5. Keep `:vars-ref` as projection/fallback state.
+4. Keep `current-head` the sole mutable pointer — and `current-resume-head`
+   (latest non-aborted) the sole DEFAULT restore selector.
+5. Keep `:vars-ref` as projection/fallback state; never write wreckage into it.
 6. Keep head and edge ids content-addressed.
-7. Keep attach additive and source-preserving.
+7. Keep attach and fork additive and source-preserving.
 8. Keep filesystem paths out of logical identity.
 9. Prove MemoryStore and SqliteStore still satisfy the shared port contract.
 10. Prove SQLite failures do not advance folded state.

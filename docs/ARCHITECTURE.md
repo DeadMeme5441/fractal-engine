@@ -89,7 +89,7 @@ engine-free, and capability profiles take host function implementations as data.
 | `fractal.engine.api` | Supported Clojure API for config, lifecycle, reads, payload hydration, live subscriptions, and the fake responder helper. |
 | `fractal.engine.cli` | Agent-operable command seam over the public API. It handles CLI config files, JSON/EDN output, usage commands, and inspection commands without adding runtime semantics. |
 | `fractal.engine.session` | Sole composition root. It builds stores and adapters, resolves config, creates and resumes sessions, owns the turn lock, initializes SCI contexts, and spawns child or attached sessions. |
-| `fractal.engine.session-loop` | Turn and step spine: open turns, assemble requests, call adapters under deadline, append assistant/observation messages, finalize turns, and publish heads after successful `FINAL`. |
+| `fractal.engine.session-loop` | Turn and step spine: open turns, assemble requests, call adapters under deadline, append assistant/observation messages, finalize turns, publish `:turn-final` heads on `FINAL` and `:turn-aborted` wreckage heads on non-final terminals. |
 | `fractal.engine.kernel` | SCI evaluation mechanics, block extraction, eval records, `FINAL`, `inspect`, vars snapshotting, and vars restore. |
 | `fractal.engine.recursion` | Leaf calls, child calls, attached-child calls, fan-out behavior, recursive envelopes, and lineage-edge recording. It receives spawn/run/stop closures from `session` instead of requiring `session` directly. |
 | `fractal.engine.store` | `SessionStore` protocol, pure event fold, event taxonomy, head helpers, lineage-edge helpers, and payload-ref auditing. |
@@ -181,8 +181,11 @@ sequenceDiagram
    `:session/vars-snapshotted`, appends the terminal `:turn/put`, publishes a
    `:turn-final` head, hydrates the final value, and returns a final turn result.
 10. If timeout, provider failure, stop, context hard limit, or max steps occurs,
-    the loop appends a terminal `:turn/put` with a non-final status and returns a
-    non-final turn result. Non-final terminal paths do not publish heads.
+    the loop appends a terminal `:turn/put` with a non-final status, best-effort
+    snapshots the live vars, publishes a `:turn-aborted` WRECKAGE head (0.7),
+    and returns a non-final turn result carrying `:turn/aborted-head`. Wreckage
+    heads are reachable only by explicit `:head/id` (fork/attach) — never a
+    default resume basis.
 
 ## Recursive Flow
 
@@ -305,7 +308,9 @@ items are never persisted and are recoverable only through later durable state.
 - Head publication validates an optional expected basis and fails with a typed
   CAS error instead of silently replacing a changed current head.
 - Provider timeout, provider failure, eval error, stop, and budget exhaustion
-  settle the turn as non-final terminal results. They do not publish heads.
+  settle the turn as non-final terminal results, publishing a best-effort
+  `:turn-aborted` wreckage head (0.7) so the dead turn's state stays
+  recoverable without ever becoming a default restore basis.
 - Failed evals are recorded as `:eval/added` with an error map and are returned
   to the model as observations when the turn can continue.
 - Live delivery is off-lock. Slow or throwing subscribers cannot stall writes.
