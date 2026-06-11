@@ -6,7 +6,9 @@
    validation, stamping, capability filtering, prompt rendering, and resume
    compatibility; embedders own function behavior and world-specific effects."
   (:require [clojure.string :as str]
-            [fractal.engine.payload :as payload]))
+            [fractal.engine.payload :as payload]
+            [fractal.engine.payload-io :as payload-io]
+            [fractal.engine.store :as store]))
 
 (def ^:private reserved-ns-roots
   #{"clojure" "java" "javax" "sci" "fractal.engine"})
@@ -345,19 +347,127 @@
                        :surface/function (:surface/function entry)})))
     f))
 
+;; ---------------------------------------------------------------------------
+;; jz3b · surface-call recording + replay (the world-read replay seam)
+;; ---------------------------------------------------------------------------
+
+(defn- args-hash [args]
+  (payload/content-id (payload-io/edn-safe (vec args))))
+
+(defn- record-call!
+  "Append one durable :surface/called event for an invocation. Result bytes
+   persist via the normal inline-or-ref policy BEFORE the event references
+   them (blobs-before-events)."
+  [handle entry args outcome]
+  (store/append-event!
+    (:store handle) (:session-id handle)
+    {:event/type :surface/called
+     :call (cond-> {:surface/function (:surface/function entry)
+                    :call/args-hash   (args-hash args)}
+             (contains? outcome :result)
+             (assoc :call/status :ok
+                    :call/result-or-ref
+                    (payload-io/maybe-intern (:store handle) (:result outcome)
+                                             {:payload/kind :surface-result}))
+             (contains? outcome :error)
+             (assoc :call/status :error
+                    :call/error (:error outcome)))}))
+
+(defn- record-wrap
+  "Wrap a live surface fn so every call (result OR thrown error) is recorded
+   as a durable :surface/called event in the calling session's log."
+  [handle entry f]
+  (fn [& args]
+    (try
+      (let [result (apply f args)]
+        (record-call! handle entry args {:result result})
+        result)
+      (catch Throwable t
+        (record-call! handle entry args
+                      {:error {:error/type :surface/call-failed
+                               :error/message (or (ex-message t) (str (class t)))}})
+        (throw t)))))
+
+(defn- replay-queues
+  "{[fn-symbol args-hash] (atom {:calls [recorded …] :at 0})} — FIFO cursors
+   per (function, arguments) pair over the recorded calls (fe/surface-calls
+   shape, results already hydrated). Keying by ARGS (not call order) is what
+   lets a recursive TREE replay: each session re-derives the same calls and
+   routes itself, instead of every child rewinding the parent's tape."
+  [calls]
+  (-> (reduce (fn [m c]
+                (update m [(:surface/function c) (:call/args-hash c)] (fnil conj []) c))
+              {} calls)
+      (update-vals (fn [cs] (atom {:calls cs :at 0})))))
+
+(defn- take-next!
+  "Atomically take the next recorded call from a cursor atom, or nil when
+   exhausted (pure swap fn — retry-safe by construction)."
+  [cursor]
+  (let [[{:keys [calls at]} _] (swap-vals! cursor (fn [{:keys [calls at] :as s}]
+                                                    (if (< at (count calls))
+                                                      (assoc s :at (inc at))
+                                                      s)))]
+    (when (< at (count calls)) (nth calls at))))
+
+(defn- replay-fn
+  "A replacement surface fn serving recorded results per (fn, args) in
+   recording order. The live fn is NEVER invoked (and factories are never
+   constructed) in replay mode. Divergence (args never recorded), exhaustion
+   (more identical calls than recorded), and never-recorded functions all
+   fail typed."
+  [queues recorded-fns entry]
+  (let [fsym (:surface/function entry)]
+    (fn [& args]
+      (let [ah (args-hash args)
+            q  (get queues [fsym ah])
+            c  (some-> q take-next!)]
+        (cond
+          c (if (= :error (:call/status c))
+              (throw (ex-info (str "surface replay: recorded call failed: " fsym)
+                              (assoc (:call/error c) :surface/replayed? true)))
+              (:call/result c))
+
+          q (throw (ex-info (str "surface replay: recording exhausted for " fsym
+                                 " with these arguments")
+                            {:error/type :surface/replay-exhausted
+                             :surface/function fsym
+                             :call/args-hash ah}))
+
+          (contains? recorded-fns fsym)
+          (throw (ex-info (str "surface replay diverged: " fsym
+                               " called with arguments that were never recorded")
+                          {:error/type :surface/replay-divergence
+                           :surface/function fsym
+                           :call/actual-args-hash ah}))
+
+          :else
+          (throw (ex-info (str "surface replay: no recorded calls for " fsym)
+                          {:error/type :surface/replay-unknown-function
+                           :surface/function fsym})))))))
+
 (defn sci-namespaces [handle surfaces profile]
-  (or (apply merge
-             (keep (fn [surface]
-                     (let [ns-map (into {}
-                                        (keep (fn [[ns-sym fns]]
-                                                (let [exposed
-                                                      (into {}
-                                                            (keep (fn [[fn-sym entry]]
-                                                                    (when (allowed? profile (:surface/function entry))
-                                                                      [fn-sym (callable handle surface entry)])))
-                                                            fns)]
-                                                  (when (seq exposed) [ns-sym exposed]))))
-                                        (:surface/namespaces surface))]
-                       (when (seq ns-map) ns-map)))
-                   surfaces))
-      {}))
+  (let [cfg    (:cfg handle)
+        calls  (:surface/replay-calls cfg)
+        queues (some-> calls replay-queues)
+        rfns   (when calls (set (map :surface/function calls)))
+        wrap   (fn [surface entry]
+                 (cond
+                   queues                  (replay-fn queues rfns entry)
+                   (:surface/record? cfg)  (record-wrap handle entry (callable handle surface entry))
+                   :else                   (callable handle surface entry)))]
+    (or (apply merge
+               (keep (fn [surface]
+                       (let [ns-map (into {}
+                                          (keep (fn [[ns-sym fns]]
+                                                  (let [exposed
+                                                        (into {}
+                                                              (keep (fn [[fn-sym entry]]
+                                                                      (when (allowed? profile (:surface/function entry))
+                                                                        [fn-sym (wrap surface entry)])))
+                                                              fns)]
+                                                    (when (seq exposed) [ns-sym exposed]))))
+                                          (:surface/namespaces surface))]
+                         (when (seq ns-map) ns-map)))
+                     surfaces))
+        {})))

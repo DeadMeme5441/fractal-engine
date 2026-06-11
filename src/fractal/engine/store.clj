@@ -21,6 +21,8 @@
    :heads     []
    :current-head nil
    :edges     []
+   :surface-calls []          ; jz3b · recorded surface invocations (opt-in)
+   :leaf-calls []             ; leaf lm/map-lm calls (always recorded — spend is never invisible)
    :counters  {:event 0 :message 0 :turn 0 :step 0 :eval 0}
    :vars-ref  nil
    :compact-from-event-id nil
@@ -82,6 +84,8 @@
                                       (update :heads conj-by-id :head/id (:head ev))
                                       (assoc :current-head (:head/id (:head ev))))
         :lineage/edge-added       (update view :edges conj-by-id :edge/id (:edge ev))
+        :surface/called           (update view :surface-calls conj (:call ev))
+        :leaf/called              (update view :leaf-calls conj (:leaf ev))
         :session/vars-snapshotted (assoc view :vars-ref (:vars-ref ev))
         :session/compacted        (-> view
                                       (assoc :vars-ref (:vars-ref ev)
@@ -107,6 +111,16 @@
   "The immutable head with `head-id` in a folded view."
   [view head-id]
   (first (filter #(= head-id (:head/id %)) (:heads view))))
+
+(defn turn-by-id
+  "The turn entity with `turn-id` in a folded view."
+  [view turn-id]
+  (first (filter #(= turn-id (:turn/id %)) (:turns view))))
+
+(defn message-by-id
+  "The message entity with `message-id` in a folded view."
+  [view message-id]
+  (first (filter #(= message-id (:message/id %)) (:messages view))))
 
 (defn current-head
   "The folded current head map, or nil before the first published boundary."
@@ -156,6 +170,23 @@
   [edge]
   (let [content (-> edge (dissoc :edge/id) (assoc :edge/version edge-version))]
     (assoc content :edge/id (payload/content-id content))))
+
+(defn snapshot-view
+  "qbu · the view value a head snapshot persists: the full fold state with
+   (:events) PRUNED to exactly what later view derivations still need —
+   the message-bearing events (:message/appended | :session/compacted) at or
+   after the compact boundary (nil boundary ⇒ all message-bearing). That is
+   the precise window kept-messages reads; entity vectors, counters, heads,
+   edges, surface/leaf calls all survive whole. Reopen = this snapshot + a
+   fold of the events after its counter watermark."
+  [view]
+  (let [boundary (:compact-from-event-id view)]
+    (update view :events
+            (fn [evs]
+              (filterv (fn [{:keys [event/type event/id]}]
+                         (and (or (= :message/appended type) (= :session/compacted type))
+                              (or (nil? boundary) (>= id boundary))))
+                       evs)))))
 
 (defn kept-messages
   "The messages surviving compaction (a PURE view derivation, shared by
@@ -219,7 +250,122 @@
   (subscribe! [store sid callback]
     "→ unsubscribe fn. Delivers each event + transient delta (09).")
   (events-since [store sid event-id]
-    "→ ordered events with :event/id > event-id (backlog catch-up, 09)."))
+    "→ ordered events with :event/id > event-id (backlog catch-up, 09).")
+
+  ;; --- 88j · the STORE-SCOPED embedder fact layer ---------------------------
+  ;; One authority: domain state lives as opaque tagged facts + payloads in the
+  ;; SAME store; app indexes are disposable projections folded from this stream.
+  ;; The engine ORDERS, PERSISTS and SERVES these facts — it NEVER interprets
+  ;; them (no schemas, no queries; that bright line is the design).
+
+  (append-fact! [store fact]
+    "Append one store-scoped opaque fact {:fact/tag kw :fact/value edn}
+     (+ optional keys, all opaque). The store stamps :fact/id (monotonic,
+     store-scoped) + :fact/at. Payload-refs inside :fact/value must already
+     resolve (blobs-before-facts — dangling refs are rejected).")
+  (facts-since [store fact-id]
+    "→ ordered store-scoped facts with :fact/id > fact-id. THE read the
+     disposable app projections fold from.")
+  (pin! [store pin]
+    "Upsert the named durable pointer {:pin/name str|kw :pin/ref edn
+     (+ optional :pin/meta)}. CAS like publish-head!: when the pin carries
+     :pin/expected-version it must equal the current version (nil ⇒ the pin
+     must not exist yet) or a typed :fractal/pin-cas-failed throws. Payload-refs
+     inside :pin/ref must resolve; a {:session/id … :head/id …} ref must name a
+     published head. Returns the stamped pin (with :pin/version, :pin/at).")
+  (read-pin [store pin-name]
+    "→ the current stamped pin for pin-name, or nil.")
+  (list-pins [store]
+    "→ all current pins, sorted by name."))
+
+;; ---------------------------------------------------------------------------
+;; 88j · fact/pin helpers shared by the impls (PURE except the explicit
+;; store-read assertions; store.clj stays payload-only in its requires, so
+;; timestamps are the impls' job — helpers take them as arguments)
+;; ---------------------------------------------------------------------------
+
+(declare collect-refs)
+
+(def store-lease-scope
+  "bj1/88j · the advisory-lease scope for STORE-scoped writes (facts/pins) —
+   part of the cross-impl contract, distinct from every per-session scope (a
+   plain session id). Namespaced so a caller-supplied session id can't collide."
+  "fractal.engine/store-scope")
+
+(defn validate-fact!
+  "An appendable fact: a map with a keyword :fact/tag and a :fact/value key.
+   The engine never interprets either — this is shape, not schema."
+  [fact]
+  (when-not (map? fact)
+    (throw (ex-info "fact must be a map" {:error/type :fractal/invalid-fact :fact fact})))
+  (when-not (keyword? (:fact/tag fact))
+    (throw (ex-info "fact :fact/tag must be a keyword"
+                    {:error/type :fractal/invalid-fact :fact/tag (:fact/tag fact)})))
+  (when-not (contains? fact :fact/value)
+    (throw (ex-info "fact must carry a :fact/value (nil is fine; absent is not)"
+                    {:error/type :fractal/invalid-fact})))
+  fact)
+
+(defn pin-key
+  "Pins are keyed by the STRING form of :pin/name (kw or string accepted)."
+  [pin]
+  (let [n (:pin/name pin)]
+    (if (keyword? n) (subs (str n) 1) (str n))))
+
+(defn validate-pin!
+  [pin]
+  (when-not (map? pin)
+    (throw (ex-info "pin must be a map" {:error/type :fractal/invalid-pin :pin pin})))
+  (let [n (:pin/name pin)]
+    (when-not (or (keyword? n) (and (string? n) (seq n)))
+      (throw (ex-info "pin :pin/name must be a keyword or non-empty string"
+                      {:error/type :fractal/invalid-pin :pin/name n}))))
+  (when-not (contains? pin :pin/ref)
+    (throw (ex-info "pin must carry a :pin/ref" {:error/type :fractal/invalid-pin})))
+  pin)
+
+(defn prepare-pin
+  "CAS + stamp a pin against the current stored pin (mirrors prepare-head):
+   when the incoming pin CARRIES :pin/expected-version it must equal the
+   current version (nil ⇒ the pin must not exist) or :fractal/pin-cas-failed
+   throws. Returns the stamped pin (version bumped, :pin/at = now)."
+  [pin current now]
+  (let [expected (:pin/expected-version pin)]
+    (when (and (contains? pin :pin/expected-version)
+               (not= expected (:pin/version current)))
+      (throw (ex-info "pin version changed before write"
+                      {:error/type :fractal/pin-cas-failed
+                       :pin/name (:pin/name pin)
+                       :pin/expected-version expected
+                       :pin/current-version (:pin/version current)})))
+    (-> pin
+        (dissoc :pin/expected-version)
+        (assoc :pin/version (inc (or (:pin/version current) 0))
+               :pin/at now))))
+
+(defn assert-resolvable-refs!
+  "Every payload-ref reachable in `data` must already resolve in the store —
+   blobs persist BEFORE the facts/pins that reference them (the no-dangling-
+   refs invariant extended to the embedder fact layer)."
+  [store data]
+  (doseq [ref (distinct (collect-refs data))]
+    (when (nil? (read-payload* store ref))
+      (throw (ex-info "fact/pin references a payload that is not in the store"
+                      {:error/type :fractal/dangling-ref :payload/ref ref})))))
+
+(defn assert-pin-head!
+  "When :pin/ref names a head ({:session/id … :head/id …}), that head must be
+   published in that session's durable log. Mechanical existence — the engine
+   still interprets nothing else about the ref. An UNKNOWN session is a
+   dangling ref too (impls differ in how read-state fails on one — guard it)."
+  [store pin]
+  (let [ref (:pin/ref pin)]
+    (when (and (map? ref) (:head/id ref) (:session/id ref))
+      (let [view (try (read-state store (:session/id ref)) (catch Throwable _ nil))]
+        (when-not (and view (head-by-id view (:head/id ref)))
+          (throw (ex-info "pin references an unpublished head"
+                          {:error/type :fractal/dangling-ref
+                           :pin/ref ref})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Ref auditing (uses ONLY the pure payload-ref? — keeps store off payload-io)

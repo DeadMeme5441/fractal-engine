@@ -5,6 +5,7 @@
    drive the step loop. commit-turn!/finalize-turn! live in session-loop (GD4)."
   (:require [fractal.engine.adapter.fake :as fake]
             [fractal.engine.adapter.sdk :as sdk]
+            [fractal.engine.bundle :as bundle]
             [fractal.engine.capability :as capability]
             [fractal.engine.catalog :as catalog]
             [fractal.engine.compaction :as compaction]
@@ -128,7 +129,9 @@
   (case (:store cfg)
     :sqlite (sqlite/sqlite-store {:dir (:store/dir cfg)
                                   :live-opts {:bound (:live/queue-bound cfg)
-                                              :drop  (:live/drop cfg)}})
+                                              :drop  (:live/drop cfg)}
+                                  :writer-lease-ttl-ms (:writer-lease-ttl-ms cfg)
+                                  :writer-lease-steal? (:writer-lease-steal? cfg)})
     (mem/memory-store)))
 
 (defn- close-store-quietly!
@@ -148,6 +151,7 @@
              profile  (resolve-profile-for-session cfg opts)
              provider (resolve-provider cfg)
              adapter  (build-adapter cfg provider)
+             bndl     (bundle/stamp cfg profile)
              session-map (with-meta
                            (assoc-surface-stamps
                              {:session/id             sid
@@ -155,6 +159,7 @@
                               :session/created-at     (time/now-str)
                               :session/provider       provider
                               :session/model          (:model cfg)
+                              :session/bundle         bndl
                               :session/capability     (:capability/name profile)
                               ;; The FULL validated profile VALUE, so resume/attach can
                               ;; rehydrate custom (non-built-in) profiles instead of
@@ -172,7 +177,8 @@
                            (live-meta cfg))
              handle0 (store/create-session! store session-map)
              handle  (merge handle0
-                            {:cfg cfg :adapter adapter :capability profile :cache-id sid}
+                            {:cfg cfg :adapter adapter :capability profile :cache-id sid
+                             :bundle bndl}
                             (build-leaf cfg provider adapter))]
          (init-session-ctx! handle profile)
          (store/append-event! store sid {:event/type :session/started :session session-map})
@@ -210,15 +216,26 @@
              profile  (if persisted
                         (capability/clamp resolved (capability/validate-profile! persisted))
                         resolved)
+             bndl     (bundle/stamp cfg profile)
              cache-id (or (:session/cache-id (:session view)) sid)      ; cache affinity (08)
              handle   (merge handle0
-                             {:cfg cfg :adapter adapter :capability profile :cache-id cache-id}
+                             {:cfg cfg :adapter adapter :capability profile :cache-id cache-id
+                              :bundle bndl}
                              (build-leaf cfg provider adapter))]
          (when-not (:session view)
            (throw (ex-info (str "no persisted session to resume: " sid)
                            {:error/type :fractal/unknown-session :session/id sid})))
-         (surface/assert-compatible! (get-in view [:session :session/surface-stamps])
-                                     (:surfaces cfg))
+         ;; yjy · ONE world-identity authority per session generation: sessions
+         ;; with a recorded bundle verify surfaces+doctrine through it (typed
+         ;; :bundle/*-mismatch; opts :bundle/allow-mismatch? is the explicit
+         ;; escape — e.g. resuming across an intentional doctrine upgrade);
+         ;; legacy sessions fall back to the surface-stamp check. Capability
+         ;; stays clamp-only (narrowing is legal) in both generations.
+         (if-let [recorded (get-in view [:session :session/bundle])]
+           (when-not (:bundle/allow-mismatch? opts)
+             (bundle/assert-resume-compatible! recorded bndl))
+           (surface/assert-compatible! (get-in view [:session :session/surface-stamps])
+                                       (:surfaces cfg)))
          (init-session-ctx! handle profile)
          (let [head (store/current-head view)
                snap (payload-io/read-payload store (or (:head/vars-ref head) (:vars-ref view)))]
@@ -435,6 +452,7 @@
                             :leaf-model     child-model
                             :leaf-provider  nil)
         child-adpt   (build-adapter child-cfg child-prov)
+        child-bndl   (bundle/stamp child-cfg child-prof)
         session-map  (with-meta
                        (assoc-surface-stamps
                          {:session/id             child-sid
@@ -442,6 +460,7 @@
                           :session/created-at     (time/now-str)
                           :session/provider       child-prov
                           :session/model          child-model
+                          :session/bundle         child-bndl
                           :session/capability     (:capability/name child-prof)
                           :session/capability-profile child-prof   ; full value (rehydration; see start-session!)
                           :session/cache-id       child-sid
@@ -452,7 +471,8 @@
         handle0      (store/create-session! store session-map)
         child        (merge handle0
                             {:cfg child-cfg :adapter child-adpt
-                             :capability child-prof :cache-id child-sid}
+                             :capability child-prof :cache-id child-sid
+                             :bundle child-bndl}
                             (build-leaf child-cfg child-prov child-adpt))]
     (init-session-ctx! child child-prof)
     (store/append-event! store child-sid {:event/type :session/started :session session-map})
@@ -554,6 +574,15 @@
                              :leaf-provider nil)
           child-adpt  (build-adapter child-cfg child-prov)
           source-head (:head source)
+          child-bndl  (bundle/stamp child-cfg child-prof)
+          ;; yjy · the attach bundle check: the derived child must re-present
+          ;; the SOURCE's surfaces (its restored vars were created against
+          ;; them); explicit :bundle/allow-mismatch? makes divergence a stated
+          ;; embedder choice instead of a silent wrong-world rehydration.
+          _           (bundle/assert-attach-compatible!
+                        (get-in source [:view :session :session/bundle])
+                        child-bndl
+                        (:bundle/allow-mismatch? child-opts))
           session-map (with-meta
                         (assoc-surface-stamps
                           {:session/id             child-sid
@@ -561,6 +590,7 @@
                            :session/created-at     (time/now-str)
                            :session/provider       child-prov
                            :session/model          child-model
+                           :session/bundle         child-bndl
                            :session/capability     (:capability/name child-prof)
                            :session/capability-profile child-prof   ; full value (rehydration; see start-session!)
                            :session/cache-id       child-sid
@@ -574,6 +604,7 @@
           child       (merge handle0
                              {:cfg child-cfg :adapter child-adpt
                               :capability child-prof :cache-id child-sid
+                              :bundle child-bndl
                               :attach/source {:session/id (:session/id source)
                                               :head source-head}}
                              (build-leaf child-cfg child-prov child-adpt))

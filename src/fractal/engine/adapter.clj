@@ -13,6 +13,14 @@
      opts: {:retry … :stream? bool :on-delta (fn [frag])}. Honest :unknown —
      absent usage/cost/cache are :unknown, never 0 (08)."))
 
+(defn first-user-content
+  "The first :user message's content in a wire-shape request — the replay
+   ROUTING KEY. Pure wire-shape fn (no engine deps): the leaf RECORDER
+   (recursion) and the REPLAYER (adapter.replay) must compute the same key,
+   so they both call THIS."
+  [request]
+  (->> (:messages request) (filter #(= :user (:role %))) first :content))
+
 ;; Honest-:unknown defaults (the call-record sub-shapes; 05 §1, 08).
 (def unknown-usage
   {:usage/status :unknown

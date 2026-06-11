@@ -23,7 +23,8 @@
   #{"help" "init" "config"
     "start" "run" "turn" "resume" "stop" "close" "compact" "wait"
     "status" "progress" "view" "events" "heads" "head" "edges" "tree"
-    "payload" "messages" "turns" "steps" "evals" "trace" "check" "report"})
+    "payload" "messages" "turns" "steps" "evals" "trace" "check" "report"
+    "pins" "facts" "delegation"})
 
 (def option-spec
   {"--config" :config
@@ -65,7 +66,9 @@
    "--pretty" [:pretty true]
    "--wait" [:wait true]
    "--create" [:create true]
-   "--force" [:force true]})
+   "--force" [:force true]
+   "--steal-lease" [:writer-lease-steal? true]
+   "--allow-bundle-mismatch" [:bundle/allow-mismatch? true]})
 
 (def int-options #{:max-turns :max-steps :max-fanout :fanout-pool
                    :leaf-concurrency :call-timeout-ms :since :turn
@@ -176,6 +179,7 @@
     (:leaf-concurrency opts) (assoc :leaf-concurrency (:leaf-concurrency opts))
     (:call-timeout-ms opts) (assoc :call-timeout-ms (:call-timeout-ms opts))
     (:cache-ttl opts) (assoc :cache-ttl (:cache-ttl opts))
+    (:writer-lease-steal? opts) (assoc :writer-lease-steal? true)
     (:fake-final opts) (assoc :fake-final (:fake-final opts))))
 
 (defn engine-config [opts]
@@ -255,19 +259,19 @@
   (when h
     (try (fe/close-session! h) (catch Throwable _ nil))))
 
-(defn- resume* [cfg sid]
-  (fe/resume-session! cfg sid))
+(defn- resume* [cfg sid resume-opts]
+  (fe/resume-session! cfg sid resume-opts))
 
-(defn- try-resume [cfg sid]
+(defn- try-resume [cfg sid resume-opts]
   (try
-    [:ok (resume* cfg sid)]
+    [:ok (resume* cfg sid resume-opts)]
     (catch clojure.lang.ExceptionInfo e
       (if (= :fractal/unknown-session (:error/type (ex-data e)))
         [:missing nil]
         (throw e)))))
 
-(defn- ensure-session [cfg sid create?]
-  (let [[status h] (try-resume cfg sid)]
+(defn- ensure-session [cfg sid create? resume-opts]
+  (let [[status h] (try-resume cfg sid resume-opts)]
     (case status
       :ok h
       :missing (if create?
@@ -275,8 +279,11 @@
                  (throw (ex-info (str "no persisted session: " sid)
                                  {:error/type :cli/session-not-found :session/id sid}))))))
 
-(defn- start-or-existing [cfg sid]
-  (let [[status h] (try-resume cfg sid)]
+(defn- resume-opts-of [opts]
+  (select-keys opts [:bundle/allow-mismatch?]))
+
+(defn- start-or-existing [cfg sid opts]
+  (let [[status h] (try-resume cfg sid (resume-opts-of opts))]
     (case status
       :ok [h false]
       :missing [(fe/start-session! cfg {:id sid}) true])))
@@ -288,7 +295,7 @@
   {:session/id sid
    :session/status (get-in v [:session :session/status])
    :current-head (:current-head v)
-   :event-count (count (:events v))
+   :event-count (get-in v [:counters :event])   ; counters survive snapshot reopen; (:events v) is a bounded window
    :turn-count (count (:turns v))
    :step-count (count (:steps v))
    :eval-count (count (:evals v))
@@ -419,6 +426,9 @@ Usage commands:
 
 Inspection commands:
   status progress view events heads head edges tree payload messages turns steps evals trace check report
+  pins        List the store's named pins.
+  facts       Store-scoped fact stream (--since N).
+  delegation  What a turn delegated + per-child cost (--turn N; default latest).
 
 Common options:
   --config FILE --profile NAME --session ID --store-dir DIR
@@ -465,14 +475,14 @@ Config files are EDN. They may be flat engine config maps or {:default-profile k
 (defn- with-open-session [opts create? f]
   (let [cfg (engine-config opts)
         sid (session-id opts)
-        h (ensure-session cfg sid create?)]
+        h (ensure-session cfg sid create? (resume-opts-of opts))]
     (try (f h)
          (finally (close-quietly! h)))))
 
 (defn- command-start [opts _args]
   (let [cfg (engine-config opts)
         sid (session-id opts)
-        [h created?] (start-or-existing cfg sid)]
+        [h created?] (start-or-existing cfg sid opts)]
     (try
       (assoc (summary h) :ok true :command :start :created created?)
       (finally (close-quietly! h)))))
@@ -625,6 +635,27 @@ Config files are EDN. They may be flat engine config maps or {:default-profile k
   (with-open-session opts false
     (fn [h] (assoc (report-view h) :ok true :command :report))))
 
+(defn- command-pins [opts _args]
+  (with-open-session opts false
+    (fn [h] {:ok true :command :pins :pins (fe/list-pins h)})))
+
+(defn- command-facts [opts _args]
+  (with-open-session opts false
+    (fn [h] {:ok true :command :facts :since (or (:since opts) 0)
+             :facts (fe/facts-since h (or (:since opts) 0))})))
+
+(defn- command-delegation [opts args]
+  (with-open-session opts false
+    (fn [h]
+      (let [turn-id (or (:turn opts)
+                        (some-> (first args) (parse-int* :turn))
+                        (:turn/id (last (:turns (fe/view h)))))]
+        (when-not turn-id
+          (throw (ex-info "delegation requires --turn (and the session has no turns yet)"
+                          {:error/type :cli/missing-turn})))
+        {:ok true :command :delegation
+         :delegation (fe/delegation-report h turn-id)}))))
+
 (def command-fns
   {"help" command-help
    "init" command-init
@@ -652,7 +683,10 @@ Config files are EDN. They may be flat engine config maps or {:default-profile k
    "evals" (partial command-collection :evals :evals)
    "trace" command-trace
    "check" command-check
-   "report" command-report})
+   "report" command-report
+   "pins" command-pins
+   "facts" command-facts
+   "delegation" command-delegation})
 
 (defn run-command
   "Run argv, emit to *out*/*err*, and return a process-style exit code."

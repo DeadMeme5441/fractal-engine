@@ -266,19 +266,33 @@ future self, in plain text. Do not include code fences.")
    :prompt/hash    (payload/content-id text)
    :prompt/text    text})
 
+(defn stamp-prompt
+  "Stamp embedder-supplied prompt text with the same name/version/hash
+   discipline the built-in prompts carry (12) — config uses this to stamp a
+   :doctrine override so injected doctrine is as auditable as baked doctrine."
+  [nm version text]
+  (stamp nm version text))
+
 (def repl-p1    (stamp :fractal-engine/repl-p1 1 repl-p1-text))
 (def repl-rlm   (stamp :fractal-engine/repl-rlm 1 repl-rlm-text))
 (def leaf       (stamp :fractal-engine/leaf 1 leaf-text))
 (def compaction (stamp :fractal-engine/compaction 1 compaction-text))
 
+(defn base-doctrine
+  "The FULL stamped built-in doctrine prompt for a harness mode — the single
+   home of the harness→prompt selection (bundle stamps and request assembly
+   both derive from this, so the recorded identity can never drift from the
+   text actually sent)."
+  [harness]
+  (case harness
+    :rlm repl-rlm
+    repl-p1))
+
 (defn system-prompt
   "The base doctrine prompt text for a harness mode (the system message base,
    05 §4). 0-arg defaults to :clojure (the Phase-1 prompt) for back-compat."
   ([] (system-prompt :clojure))
-  ([harness]
-   (case harness
-     :rlm (:prompt/text repl-rlm)
-     (:prompt/text repl-p1))))
+  ([harness] (:prompt/text (base-doctrine harness))))
 
 (defn leaf-prompt
   "The leaf system prompt text (one probabilistic transformation, 03/Phase 3)."

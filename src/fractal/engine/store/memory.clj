@@ -7,6 +7,7 @@
    (store.memory → live, the deliberate L1.5→L1 edge)."
   (:require [fractal.engine.store :as store]
             [fractal.engine.payload :as payload]
+            [fractal.engine.payload-io :as payload-io]
             [fractal.engine.live :as live]
             [fractal.engine.time :as time]))
 
@@ -48,7 +49,7 @@
 ;; The store
 ;; ---------------------------------------------------------------------------
 
-(defrecord MemoryStore [sessions blobs]
+(defrecord MemoryStore [sessions blobs facts pins]
   store/SessionStore
 
   (create-session! [this session-map]
@@ -119,12 +120,42 @@
 
   (events-since [_ sid event-id]
     (->> (:events @(:view (get @sessions sid)))
-         (filterv (fn [ev] (> (:event/id ev) event-id))))))
+         (filterv (fn [ev] (> (:event/id ev) event-id)))))
+
+  ;; --- 88j · store-scoped facts + pins --------------------------------------
+  ;; edn-safe coercion BEFORE persist (parity with the sqlite impl, which would
+  ;; otherwise poison its fact_edn/pin_edn columns) — a non-EDN member becomes
+  ;; the opaque marker, never a read-time failure. swap! fns stay PURE
+  ;; (timestamps precomputed; results derived from the swap return value).
+
+  (append-fact! [this fact]
+    (let [fact' (-> (payload-io/edn-safe (store/validate-fact! fact))
+                    (assoc :fact/at (time/now-str)))]
+      (store/assert-resolvable-refs! this (:fact/value fact'))
+      (peek (swap! facts (fn [v] (conj v (assoc fact' :fact/id (inc (count v)))))))))
+
+  (facts-since [_ fact-id]
+    (filterv (fn [f] (> (:fact/id f) fact-id)) @facts))
+
+  (pin! [this pin]
+    (let [pin' (payload-io/edn-safe (store/validate-pin! pin))
+          _    (store/assert-resolvable-refs! this (:pin/ref pin'))
+          _    (store/assert-pin-head! this pin')
+          k    (store/pin-key pin')
+          now  (time/now-str)]
+      (get (swap! pins (fn [m] (assoc m k (store/prepare-pin pin' (get m k) now)))) k)))
+
+  (read-pin [_ pin-name]
+    (get @pins (store/pin-key {:pin/name pin-name})))
+
+  (list-pins [_]
+    (->> (vals @pins) (sort-by store/pin-key) vec)))
 
 (defn memory-store
-  "Construct a fresh MemoryStore (empty sessions + global blob store)."
+  "Construct a fresh MemoryStore (empty sessions + global blob store + the
+   store-scoped fact/pin layer)."
   []
-  (->MemoryStore (atom {}) (atom {})))
+  (->MemoryStore (atom {}) (atom {}) (atom []) (atom {})))
 
 ;; The store-agnostic dispatcher-stop used by stop-session! lives in
 ;; `fractal.engine.store.slots` (it works on MemoryStore and SqliteStore alike,

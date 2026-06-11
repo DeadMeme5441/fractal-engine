@@ -51,10 +51,16 @@
        :cache/cached-tokens      (sum-field (map :cache/cached-tokens caches))
        :cache/cache-write-tokens (sum-field (map :cache/cache-write-tokens caches))})))
 
-(defn- roll-up [steps]
-  (let [responses (keep :step/response steps)]
-    {:usage (roll-usage (map :usage responses))
-     :cost  (roll-cost  (map :cost responses))
+(defn- roll-up
+  "Self-only turn totals — where 'self' includes the turn's OWN leaf calls
+   (their spend is this session's spend; only CHILD subtrees ride envelopes).
+   Cache rollup stays root-steps-only: leaf prompts sit below provider cache
+   minimums and would only blur the hit/miss signal."
+  [steps leaf-calls]
+  (let [responses      (keep :step/response steps)
+        leaf-responses (keep :leaf/response leaf-calls)]
+    {:usage (roll-usage (map :usage (concat responses leaf-responses)))
+     :cost  (roll-cost  (map :cost  (concat responses leaf-responses)))
      :cache (roll-cache (map :cache responses))}))
 
 ;; ---------------------------------------------------------------------------
@@ -82,6 +88,9 @@
 (defn- this-turn-steps [view turn-id]
   (filter #(= turn-id (:step/turn-id %)) (:steps view)))
 
+(defn- this-turn-leaf-calls [view turn-id]
+  (filter #(= turn-id (:leaf/turn-id %)) (:leaf-calls view)))
+
 ;; ---------------------------------------------------------------------------
 ;; commit-turn! / finalize-turn! (07 §3)
 ;; ---------------------------------------------------------------------------
@@ -98,7 +107,7 @@
         vars-ref (payload-io/maybe-intern store snap {:payload/kind :vars})]
     (store/append-event! store sid {:event/type :session/vars-snapshotted :vars-ref vars-ref})
     (let [view (store/current-view store sid)
-          rolled (roll-up (this-turn-steps view turn-id))
+          rolled (roll-up (this-turn-steps view turn-id) (this-turn-leaf-calls view turn-id))
           updated (assoc (turn-by-id view turn-id)
                          :turn/status :final
                          :turn/ended-at (time/now-str)
@@ -113,7 +122,11 @@
                             :head/to-event-id (:event/id turn-ev)
                             :head/turn-id turn-id
                             :head/vars-ref vars-ref
-                            :head/final-ref final-ref})
+                            :head/final-ref final-ref
+                            ;; yjy · the world this head was produced under —
+                            ;; attach/resume verify against it via the session
+                            ;; row's full bundle; the head carries the hash.
+                            :head/bundle-hash (get-in handle [:bundle :bundle/hash])})
       (turn-result handle turn-id :final updated (payload-io/read-payload store final-ref)))))
 
 (defn finalize-turn!
@@ -124,7 +137,7 @@
   [handle turn-id status error]
   (let [store (:store handle) sid (:session-id handle)
         view (store/current-view store sid)
-        rolled (roll-up (this-turn-steps view turn-id))
+        rolled (roll-up (this-turn-steps view turn-id) (this-turn-leaf-calls view turn-id))
         updated (assoc (turn-by-id view turn-id)
                        :turn/status status
                        :turn/ended-at (time/now-str)
@@ -234,7 +247,8 @@
                         (let [batch (kernel/eval-batch handle turn-id blocks)
                               final? (= :final (:status batch))]
                           (append-observation! handle turn-id step-id
-                            (observe/render-observation (:eval-records batch) {:final? final?}))
+                            (observe/render-observation (:eval-records batch)
+                                                        (assoc (:observe cfg) :final? final?)))
                           (if final?
                             {:control :final :final (:final batch) :eval-records (:eval-records batch)}
                             {:control :continue}))))))))))))))

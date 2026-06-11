@@ -131,23 +131,27 @@
   (str "No clojure block found in your reply. Emit a ```clojure …``` fenced block "
        "to run code, or call (FINAL v) inside one to end the turn."))
 
-(defn- block-section [rec]
+(defn- block-section [rec ok-cap final-cap]
   (let [bi     (:eval/block-index rec)
         out    (:eval/stdout rec)
         header (str "Block " bi ":")
         body   (case (:eval/status rec)
                  :error (str "ERROR: " (:error/message (:eval/error rec)))
-                 :final (str "=> " (value-display (:eval/raw-final rec) final-fit) "   (FINAL)")
-                 (str "=> " (value-display (:eval/raw-value rec) ok-fit)))]
+                 :final (str "=> " (value-display (:eval/raw-final rec) final-cap) "   (FINAL)")
+                 (str "=> " (value-display (:eval/raw-value rec) ok-cap)))]
     (str header "\n"
          (when (seq out) (str out (when-not (str/ends-with? out "\n") "\n")))
          body)))
 
 (defn render-observation
   "One combined observation for the whole batch, fit-or-stub from RAW values
-   (03 §5). `opts :final?` suppresses the still-open trailer."
-  [eval-records {:keys [final?]}]
-  (let [text (str/join "\n\n" (map block-section eval-records))]
+   (03 §5). `opts :final?` suppresses the still-open trailer; `opts :ok-fit` /
+   `:final-fit` override the whole-value caps (cfg `:observe` — the observation
+   window is the lever that shapes a blind-root discipline)."
+  [eval-records {:keys [final?] :as opts}]
+  (let [ok-cap    (or (:ok-fit opts) ok-fit)
+        final-cap (or (:final-fit opts) final-fit)
+        text (str/join "\n\n" (map #(block-section % ok-cap final-cap) eval-records))]
     (if final?
       text
       (str text (when (seq eval-records) "\n\n") "No FINAL was called; the turn is still open."))))

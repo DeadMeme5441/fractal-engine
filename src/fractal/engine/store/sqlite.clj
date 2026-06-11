@@ -24,6 +24,7 @@
             [clojure.java.io :as io]
             [fractal.engine.live :as live]
             [fractal.engine.payload :as payload]
+            [fractal.engine.payload-io :as payload-io]
             [fractal.engine.store :as store]
             [fractal.engine.store.blobstore :as blob]
             [fractal.engine.time :as time])
@@ -63,7 +64,26 @@
                    "session_id TEXT NOT NULL, event_id INTEGER NOT NULL, "
                    "event_type TEXT NOT NULL, event_at TEXT NOT NULL, "
                    "event_edn TEXT NOT NULL, "
-                   "PRIMARY KEY (session_id, event_id))")))
+                   "PRIMARY KEY (session_id, event_id))"))
+  ;; bj1 · advisory writer leases: one writer per scope (a session id, or
+  ;; store/store-lease-scope for facts/pins). heartbeat_ms is epoch millis.
+  (exec! conn (str "CREATE TABLE IF NOT EXISTS leases ("
+                   "scope TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+                   "acquired_at TEXT NOT NULL, heartbeat_ms INTEGER NOT NULL)"))
+  ;; 88j · the store-scoped embedder fact stream + named pins. Opaque to the
+  ;; engine: ordered, persisted, served — never interpreted.
+  (exec! conn (str "CREATE TABLE IF NOT EXISTS facts ("
+                   "fact_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                   "fact_tag TEXT NOT NULL, fact_at TEXT NOT NULL, "
+                   "fact_edn TEXT NOT NULL)"))
+  ;; ONE authority per pin: the edn (version/at live inside it; no shadow columns).
+  (exec! conn (str "CREATE TABLE IF NOT EXISTS pins ("
+                   "pin_name TEXT PRIMARY KEY, pin_edn TEXT NOT NULL)"))
+  ;; qbu · head-id → view-snapshot blob ref. An INDEX, deliberately outside the
+  ;; head content (head ids stay impl-agnostic semantic identities); orphan
+  ;; rows are harmless, reopen falls back to the full fold when absent.
+  (exec! conn (str "CREATE TABLE IF NOT EXISTS snapshots ("
+                   "head_id TEXT PRIMARY KEY, ref_edn TEXT NOT NULL)")))
 
 (def ^:private insert-event-sql
   "INSERT INTO events(session_id,event_id,event_type,event_at,event_edn) VALUES (?,?,?,?,?)")
@@ -124,6 +144,122 @@
     (.executeUpdate ps)))
 
 ;; ---------------------------------------------------------------------------
+;; qbu · view snapshots at heads (bounded reopen)
+;; ---------------------------------------------------------------------------
+
+(defn- put-snapshot-row!* [^Connection conn head-id ref]
+  (with-open [ps (.prepareStatement conn
+                   (str "INSERT INTO snapshots(head_id,ref_edn) VALUES (?,?) "
+                        "ON CONFLICT(head_id) DO UPDATE SET ref_edn=excluded.ref_edn"))]
+    (.setString ps 1 head-id)
+    (.setString ps 2 (ser ref))
+    (.executeUpdate ps)))
+
+(defn- snapshot-ref* [^Connection conn head-id]
+  (with-open [ps (.prepareStatement conn "SELECT ref_edn FROM snapshots WHERE head_id=?")]
+    (.setString ps 1 head-id)
+    (with-open [rs (.executeQuery ps)]
+      (when (.next rs) (deser (.getString rs 1))))))
+
+(defn- last-head-event* [^Connection conn sid]
+  (with-open [ps (.prepareStatement conn
+                   (str "SELECT event_edn FROM events WHERE session_id=? "
+                        "AND event_type=':head/published' ORDER BY event_id DESC LIMIT 1"))]
+    (.setString ps 1 sid)
+    (with-open [rs (.executeQuery ps)]
+      (when (.next rs) (deser (.getString rs 1))))))
+
+(defn- reopen-view*
+  "qbu · the bounded reopen: restore the latest head's view snapshot and fold
+   only the events AFTER its counter watermark, instead of O(total events).
+   Any missing piece (no head, no snapshot row, no blob — incl. logs recorded
+   before snapshots existed) falls back to the full fold."
+  [^Connection conn blobs sid]
+  (or (when-let [head-ev (last-head-event* conn sid)]
+        (when-let [ref (snapshot-ref* conn (get-in head-ev [:head :head/id]))]
+          (when-let [snap (blob/get* blobs ref)]
+            (let [watermark (get-in snap [:counters :event] 0)]
+              (reduce store/apply-event snap
+                      (load-events-since* conn sid watermark))))))
+      (when-let [events (seq (load-events* conn sid))]
+        (reduce store/apply-event (store/empty-view) events))))
+
+;; ---------------------------------------------------------------------------
+;; bj1 · advisory writer lease (every fn here runs under :db-lock)
+;;
+;; Protocol: insert-or-takeover on the FIRST write to a scope; verify-and-
+;; refresh on every later write. Two live writer processes on one scope fail
+;; LOUDLY (:fractal/writer-lease-held), and a writer whose lease was taken
+;; over after going stale detects it on its next write
+;; (:fractal/writer-lease-lost) instead of silently corrupting the log.
+;; Readers (read-state / events-since / reopen folds) never touch leases.
+;; ---------------------------------------------------------------------------
+
+(defn- lease-row* [^Connection conn scope]
+  (with-open [ps (.prepareStatement conn "SELECT owner, heartbeat_ms FROM leases WHERE scope=?")]
+    (.setString ps 1 scope)
+    (with-open [rs (.executeQuery ps)]
+      (when (.next rs)
+        {:owner (.getString rs 1) :heartbeat-ms (.getLong rs 2)}))))
+
+(defn- upsert-lease!* [^Connection conn scope owner]
+  (with-open [ps (.prepareStatement conn
+                   (str "INSERT INTO leases(scope,owner,acquired_at,heartbeat_ms) VALUES (?,?,?,?) "
+                        "ON CONFLICT(scope) DO UPDATE SET owner=excluded.owner, "
+                        "acquired_at=excluded.acquired_at, heartbeat_ms=excluded.heartbeat_ms"))]
+    (.setString ps 1 scope)
+    (.setString ps 2 owner)
+    (.setString ps 3 (time/now-str))
+    (.setLong   ps 4 (System/currentTimeMillis))
+    (.executeUpdate ps)))
+
+(defn- refresh-lease!* [^Connection conn scope owner]
+  (with-open [ps (.prepareStatement conn "UPDATE leases SET heartbeat_ms=? WHERE scope=? AND owner=?")]
+    (.setLong   ps 1 (System/currentTimeMillis))
+    (.setString ps 2 scope)
+    (.setString ps 3 owner)
+    (.executeUpdate ps)))
+
+(defn- delete-owner-leases!* [^Connection conn owner]
+  (with-open [ps (.prepareStatement conn "DELETE FROM leases WHERE owner=?")]
+    (.setString ps 1 owner)
+    (.executeUpdate ps)))
+
+(defn- ensure-lease!*
+  "Hold (or acquire) the advisory writer lease on `scope` for `owner`. Throws
+   :fractal/writer-lease-held when another live writer holds it (unless
+   `steal?` — the explicit crashed-writer escape hatch: take it anyway),
+   :fractal/writer-lease-lost when this writer's lease was taken over."
+  [^Connection conn leased scope owner ttl-ms steal?]
+  (if (contains? @leased scope)
+    (when (zero? (long (refresh-lease!* conn scope owner)))
+      (swap! leased disj scope)
+      (throw (ex-info (str "writer lease lost for scope " scope " (taken over after staleness)")
+                      {:error/type :fractal/writer-lease-lost
+                       :lease/scope scope :lease/owner owner})))
+    (let [row    (lease-row* conn scope)
+          holder (:owner row)
+          hb     (:heartbeat-ms row)]
+      (cond
+        (nil? row)
+        (upsert-lease!* conn scope owner)
+
+        (and (some? holder)
+             (not= holder owner)
+             (not steal?)
+             (< (- (System/currentTimeMillis) hb) ttl-ms))
+        (throw (ex-info (str "another writer holds the lease for scope " scope)
+                        {:error/type :fractal/writer-lease-held
+                         :lease/scope scope
+                         :lease/holder holder
+                         :lease/age-ms (- (System/currentTimeMillis) hb)
+                         :lease/ttl-ms ttl-ms}))
+
+        :else ; ours already, stale, or stolen explicitly ⇒ (re)take
+        (upsert-lease!* conn scope owner))
+      (swap! leased conj scope))))
+
+;; ---------------------------------------------------------------------------
 ;; Slots + handles + id/ts stamping (mirror store.memory — 02 §7)
 ;; ---------------------------------------------------------------------------
 
@@ -165,7 +301,8 @@
 ;; The store
 ;; ---------------------------------------------------------------------------
 
-(defrecord SqliteStore [conn db-lock sessions blobs live-opts create-lock]
+(defrecord SqliteStore [conn db-lock sessions blobs live-opts create-lock
+                        owner-id lease-ttl-ms lease-steal? leased]
   store/SessionStore
 
   (create-session! [this session-map]
@@ -173,12 +310,12 @@
       (locking create-lock                                   ; idempotent + atomic (02 §8.7)
         (if-let [slot (get @sessions sid)]
           (handle-for this sid slot)                         ; in-process re-create ⇒ existing slot
-          (let [events (locking db-lock (load-events* conn sid))]
-            (if (seq events)
-              ;; REOPEN (recovery): fold the durable log into a fresh in-process
-              ;; view cache — deterministic re-fold reproduces the same ids (02 §9).
-              (let [slot (new-slot sid live-opts
-                                   (reduce store/apply-event (store/empty-view) events))]
+          (let [view (locking db-lock (reopen-view* conn blobs sid))]
+            (if view
+              ;; REOPEN (recovery): the latest head's snapshot + a tail fold
+              ;; (qbu — O(tail)); full deterministic re-fold when no snapshot
+              ;; exists (02 §9). Either way the same ids reproduce.
+              (let [slot (new-slot sid live-opts view)]
                 (swap! sessions assoc sid slot)
                 (handle-for this sid slot))
               ;; FRESH: record the session row + an empty-view slot.
@@ -193,7 +330,9 @@
     (let [{:keys [view lock dispatch]} (get @sessions sid)]
       (locking lock
         (let [stamped (stamp-ids+ts @view ev)]
-          (locking db-lock (insert-event!* conn sid stamped))  ; ⛔ PERSIST first (committed)
+          (locking db-lock                                     ; ⛔ lease, then PERSIST (committed)
+            (ensure-lease!* conn leased sid owner-id lease-ttl-ms lease-steal?)
+            (insert-event!* conn sid stamped))
           (swap! view store/apply-event stamped)               ; …fold ONLY on success
           (live/schedule-notify dispatch stamped)              ; non-blocking; delivered off-lock
           stamped))))
@@ -203,7 +342,9 @@
     (let [{:keys [view lock dispatch]} (get @sessions sid)]
       (locking lock
         (let [stamped (stamp-batch @view evs)]
-          (locking db-lock (insert-events!* conn sid stamped)) ; ⛔ ONE durable txn, atomic
+          (locking db-lock                                     ; ⛔ lease, then ONE durable txn
+            (ensure-lease!* conn leased sid owner-id lease-ttl-ms lease-steal?)
+            (insert-events!* conn sid stamped))
           (swap! view (fn [v] (reduce store/apply-event v stamped)))
           (doseq [s stamped] (live/schedule-notify dispatch s))
           stamped))))
@@ -213,8 +354,20 @@
     (let [{:keys [view lock dispatch]} (get @sessions sid)]
       (locking lock
         (let [head*   (store/prepare-head @view sid head)
-              stamped (stamp-ids+ts @view {:event/type :head/published :head head*})]
-          (locking db-lock (insert-event!* conn sid stamped)) ; ⛔ PERSIST first
+              stamped (stamp-ids+ts @view {:event/type :head/published :head head*})
+              ;; qbu · the snapshot is a REOPEN ACCELERATOR, never a gate on head
+              ;; publication: best-effort blob first (blobs-before-references),
+              ;; then its index row; on ANY snapshot failure the head still
+              ;; publishes and reopen falls back to the full fold.
+              snap-ref (try (blob/put! blobs (store/snapshot-view @view)
+                                       {:payload/kind :view-snapshot})
+                            (catch Throwable _ nil))]
+          (locking db-lock                                    ; ⛔ lease, then PERSIST
+            (ensure-lease!* conn leased sid owner-id lease-ttl-ms lease-steal?)
+            (when snap-ref
+              (try (put-snapshot-row!* conn (:head/id head*) snap-ref)
+                   (catch Throwable _ nil)))
+            (insert-event!* conn sid stamped))
           (swap! view store/apply-event stamped)
           (live/schedule-notify dispatch stamped)
           head*))))
@@ -256,18 +409,96 @@
     ;; consumers (CLI wait, external subscribers catching up after a gap) see
     ;; events committed by another process. Persist-before-fold guarantees the
     ;; log is a superset of anything ever delivered live.
-    (locking db-lock (load-events-since* conn sid event-id))))
+    (locking db-lock (load-events-since* conn sid event-id)))
+
+  ;; --- 88j · store-scoped facts + pins (writes lease store/store-lease-scope)
+
+  (append-fact! [this fact]
+    (let [fact' (-> (payload-io/edn-safe (store/validate-fact! fact))
+                    (assoc :fact/at (time/now-str)))]
+      (store/assert-resolvable-refs! this (:fact/value fact'))
+      (locking db-lock
+        (ensure-lease!* conn leased store/store-lease-scope owner-id lease-ttl-ms lease-steal?)
+        (with-open [ps (.prepareStatement conn
+                         "INSERT INTO facts(fact_tag,fact_at,fact_edn) VALUES (?,?,?)"
+                         java.sql.Statement/RETURN_GENERATED_KEYS)]
+          (.setString ps 1 (str (:fact/tag fact')))
+          (.setString ps 2 (str (:fact/at fact')))
+          (.setString ps 3 (ser fact'))
+          (.executeUpdate ps)
+          (with-open [rs (.getGeneratedKeys ps)]
+            (.next rs)
+            (assoc fact' :fact/id (.getLong rs 1)))))))
+
+  (facts-since [_ fact-id]
+    (locking db-lock
+      (with-open [ps (.prepareStatement conn
+                       "SELECT fact_id, fact_edn FROM facts WHERE fact_id>? ORDER BY fact_id ASC")]
+        (.setLong ps 1 (long fact-id))
+        (with-open [rs (.executeQuery ps)]
+          (loop [acc (transient [])]
+            (if (.next rs)
+              (recur (conj! acc (assoc (deser (.getString rs 2)) :fact/id (.getLong rs 1))))
+              (persistent! acc)))))))
+
+  (pin! [this pin]
+    (let [pin' (payload-io/edn-safe (store/validate-pin! pin))]
+      (store/assert-resolvable-refs! this (:pin/ref pin'))
+      (store/assert-pin-head! this pin')
+      (locking db-lock
+        (ensure-lease!* conn leased store/store-lease-scope owner-id lease-ttl-ms lease-steal?)
+        (let [k   (store/pin-key pin')
+              cur (with-open [ps (.prepareStatement conn "SELECT pin_edn FROM pins WHERE pin_name=?")]
+                    (.setString ps 1 k)
+                    (with-open [rs (.executeQuery ps)]
+                      (when (.next rs) (deser (.getString rs 1)))))
+              p   (store/prepare-pin pin' cur (time/now-str))]
+          (with-open [ps (.prepareStatement conn
+                           (str "INSERT INTO pins(pin_name,pin_edn) VALUES (?,?) "
+                                "ON CONFLICT(pin_name) DO UPDATE SET pin_edn=excluded.pin_edn"))]
+            (.setString ps 1 k)
+            (.setString ps 2 (ser p))
+            (.executeUpdate ps))
+          p))))
+
+  (read-pin [_ pin-name]
+    (locking db-lock
+      (with-open [ps (.prepareStatement conn "SELECT pin_edn FROM pins WHERE pin_name=?")]
+        (.setString ps 1 (store/pin-key {:pin/name pin-name}))
+        (with-open [rs (.executeQuery ps)]
+          (when (.next rs) (deser (.getString rs 1)))))))
+
+  (list-pins [_]
+    (locking db-lock
+      (with-open [ps (.prepareStatement conn "SELECT pin_edn FROM pins ORDER BY pin_name ASC")]
+        (with-open [rs (.executeQuery ps)]
+          (loop [acc (transient [])]
+            (if (.next rs)
+              (recur (conj! acc (deser (.getString rs 1))))
+              (persistent! acc))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Construction / teardown
 ;; ---------------------------------------------------------------------------
 
+(def default-lease-ttl-ms
+  "bj1 · staleness window for the advisory writer lease. The heartbeat only
+   refreshes on appends, and appends can sit minutes apart behind a slow
+   provider call — so the TTL is deliberately generous. A crashed writer's
+   scope is reclaimable after this long."
+  600000)
+
 (defn sqlite-store
   "Open (creating if absent) a SqliteStore under `dir`: `<dir>/events.db` holds the
    per-session event log + sessions table; `<dir>/blobs/` is the GLOBAL blob store.
    `:live-opts` (`{:bound :drop}`) seed each session's live dispatch. Multiple stores
-   may open the same `dir` (e.g. a process restart reopening for resume)."
-  [{:keys [dir live-opts]}]
+   may open the same `dir` (e.g. a process restart reopening for resume) — READS are
+   cross-process-safe; WRITES are guarded by the advisory writer lease (bj1):
+   the second live writer on a scope fails with :fractal/writer-lease-held.
+   `:writer-lease-ttl-ms` overrides the staleness window; `:writer-lease-steal?`
+   is the explicit crashed-writer escape hatch (take ANY foreign lease — only
+   for an operator who knows the prior writer is dead)."
+  [{:keys [dir live-opts writer-lease-ttl-ms writer-lease-steal?]}]
   (let [root (io/file dir)]
     (.mkdirs root)
     (let [conn (DriverManager/getConnection
@@ -278,21 +509,26 @@
         (init-schema! conn)
         (->SqliteStore conn (Object.) (atom {})
                        (blob/open (io/file root "blobs"))
-                       (or live-opts {}) (Object.))
+                       (or live-opts {}) (Object.)
+                       (str (java.util.UUID/randomUUID))
+                       (or writer-lease-ttl-ms default-lease-ttl-ms)
+                       (boolean writer-lease-steal?)
+                       (atom #{}))
         (catch Throwable e
           (try (.close conn) (catch Throwable _ nil))
           (throw e))))))
 
 (defn close!
   "Release the store: stop every session's live dispatcher (idempotent; daemon
-   threads are JVM-exit-safe regardless) and close the JDBC connection. After this
-   a session can be durably reopened by constructing a fresh store on the same
-   `dir` (the recovery path) — this is what makes close+reopen behave like a
-   process restart in tests and resume."
+   threads are JVM-exit-safe regardless), RELEASE this writer's leases, and close
+   the JDBC connection. After this a session can be durably reopened by
+   constructing a fresh store on the same `dir` (the recovery path) — this is
+   what makes close+reopen behave like a process restart in tests and resume."
   [store]
   (doseq [[_ slot] @(:sessions store)]
     (live/stop-dispatch (:dispatch slot)))
   (locking (:db-lock store)
+    (try (delete-owner-leases!* (:conn store) (:owner-id store)) (catch Throwable _ nil))
     (try (exec! (:conn store) "PRAGMA wal_checkpoint(TRUNCATE)") (catch Throwable _ nil))
     (.close ^Connection (:conn store)))
   nil)
