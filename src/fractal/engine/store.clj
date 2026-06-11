@@ -127,6 +127,17 @@
   [view]
   (head-by-id view (:current-head view)))
 
+(defn current-resume-head
+  "The latest published head that is a valid DEFAULT basis for resume/attach/
+   fork — i.e. every head kind EXCEPT :turn-aborted (U2 wreckage). A wreckage
+   head carries a dead turn's vars and is reachable only by an explicit
+   :head/id; it must never silently become a restore source. (:heads is in
+   publish order — the fold conj's.)"
+  [view]
+  (->> (:heads view)
+       (remove #(= :turn-aborted (:head/kind %)))
+       last))
+
 (defn next-head-range
   "The event range a newly published head should cover, ending at `to-event-id`.
    The first head covers from event 1; later heads start after their basis range."

@@ -51,8 +51,10 @@
   :cli
   {:main-opts ["-m" "fractal.engine.cli"]}
 
-  ;; Build the library jar and CLI uberjar. Native-image is out because the
-  ;; engine evaluates model-written Clojure at runtime.
+  ;; Build the library jar and CLI uberjar. Native-image is UNVERIFIED (not
+  ;; impossible): the engine evaluates model Clojure via SCI, which is
+  ;; native-image-compatible (babashka is the proof); sqlite-jdbc and orchard
+  ;; reflection are the open questions. Jar + uberjar are the release targets.
   :build
   {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}}
    :ns-default build}
@@ -65,7 +67,7 @@
    :exec-args {:installer :remote
                :sign-releases? false
                :pom-file "target/classes/META-INF/maven/net.clojars.deadmeme5441/fractal-engine/pom.xml"
-               :artifact "target/fractal-engine-0.6.0.jar"}}}}
+               :artifact "target/fractal-engine-0.7.0.jar"}}}}
 
 ;; ---------------------------------------------------------------------------
 ;; org.xerial/sqlite-jdbc backs fractal.engine.store.sqlite: the durable event

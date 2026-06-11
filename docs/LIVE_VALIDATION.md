@@ -72,6 +72,17 @@ Interpret results carefully:
 
 Do not add live tests to the default `:test` alias.
 
+Run one live namespace in isolation (bounds spend to that namespace):
+
+```sh
+clojure -M:live-test -n fractal.engine.live-upstream-test
+```
+
+`live-upstream-test` (0.7) validates the host-fork and wreckage-head seams
+against codex OAuth: a fork answers from restored vars with the source
+unadvanced, and a max-steps abort publishes a wreckage head whose state a fork
+recovers. Both tests are creds-guarded and use tight step caps.
+
 ## Manual Run Shape
 
 For one-off live specimens, keep the config small and explicit. A typical shape:

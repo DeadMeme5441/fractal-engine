@@ -129,11 +129,27 @@
                             :head/bundle-hash (get-in handle [:bundle :bundle/hash])})
       (turn-result handle turn-id :final updated (payload-io/read-payload store final-ref)))))
 
+(defn- wreckage-vars-ref!
+  "U2 · best-effort vars snapshot for a NON-:final terminal turn. Interned only
+   — deliberately NO :session/vars-snapshotted event, because the legacy resume
+   fallback restores from the view's :vars-ref and a dead turn's vars must never
+   become a default restore source. nil when snapshotting fails (the abort must
+   still complete)."
+  [handle]
+  (try
+    (let [snap (kernel/snapshot-vars @(:sci-ctx handle) (:session-id handle))]
+      (payload-io/maybe-intern (:store handle) snap {:payload/kind :vars}))
+    (catch Throwable _ nil)))
+
 (defn finalize-turn!
   "Every NON-:final terminal outcome (timeout/budget-exceeded/error). Appends a
-   finalizing :turn/put (status + the same :unknown-aware rollups, no final-ref /
-   no vars snapshot) BEFORE building the TurnResult — so the live view never
-   shows a terminated turn still :running."
+   finalizing :turn/put (status + the same :unknown-aware rollups, no final-ref)
+   BEFORE building the TurnResult — so the live view never shows a terminated
+   turn still :running. U2: additionally publishes a best-effort :turn-aborted
+   WRECKAGE head carrying the vars snapshot at death, so an aborted turn's
+   accumulated state stays reachable (fork/attach by explicit :head/id) instead
+   of lost. Wreckage is never a default resume basis — see
+   store/current-resume-head. The TurnResult carries :turn/aborted-head."
   [handle turn-id status error]
   (let [store (:store handle) sid (:session-id handle)
         view (store/current-view store sid)
@@ -144,9 +160,21 @@
                        :turn/error error
                        :turn/usage (:usage rolled)
                        :turn/cost  (:cost rolled)
-                       :turn/cache (:cache rolled))]
-    (store/append-event! store sid {:event/type :turn/put :turn updated})
-    (turn-result handle turn-id status updated nil)))
+                       :turn/cache (:cache rolled))
+        turn-ev (store/append-event! store sid {:event/type :turn/put :turn updated})
+        wreck-ref (wreckage-vars-ref! handle)
+        wreck-head (when wreck-ref
+                     (try
+                       (store/publish-head! store sid
+                                            {:head/kind :turn-aborted
+                                             :head/to-event-id (:event/id turn-ev)
+                                             :head/turn-id turn-id
+                                             :head/vars-ref wreck-ref
+                                             :head/final-ref nil
+                                             :head/bundle-hash (get-in handle [:bundle :bundle/hash])})
+                       (catch Throwable _ nil)))]
+    (cond-> (turn-result handle turn-id status updated nil)
+      wreck-head (assoc :turn/aborted-head (:head/id wreck-head)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Step internals

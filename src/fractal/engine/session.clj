@@ -237,7 +237,9 @@
            (surface/assert-compatible! (get-in view [:session :session/surface-stamps])
                                        (:surfaces cfg)))
          (init-session-ctx! handle profile)
-         (let [head (store/current-head view)
+         ;; U2: restore from the latest NON-aborted head — wreckage heads
+         ;; (:turn-aborted) are reachable only by explicit :head/id (fork/attach).
+         (let [head (store/current-resume-head view)
                snap (payload-io/read-payload store (or (:head/vars-ref head) (:vars-ref view)))]
            (when (and (map? snap) (:vars snap))
              (kernel/restore-vars! @(:sci-ctx handle) sid snap)))
@@ -494,7 +496,9 @@
 (defn- source-head-id [view handle opts]
   (or (:head/id opts)
       (:head/id handle)
-      (:current-head view)))
+      ;; U2: the DEFAULT attach/fork basis skips :turn-aborted wreckage —
+      ;; explicit :head/id is the only way to materialize from a dead turn.
+      (:head/id (store/current-resume-head view))))
 
 (defn- resolve-attach-source
   "Resolve an attach handle to a loaded source session view + immutable source
@@ -614,3 +618,97 @@
         (kernel/restore-vars! @(:sci-ctx child) child-sid snap))
       (store/append-event! store child-sid {:event/type :session/started :session session-map})
       child)))
+
+;; ---------------------------------------------------------------------------
+;; fork-session! — U1 (hermes-fractal upstream): the HOST-side fork
+;; ---------------------------------------------------------------------------
+
+(defn fork-session!
+  "U1 · HOST-side fork: materialize a FRESH session from a selected immutable
+   head of a persisted source session, restoring that head's REPL vars, WITHOUT
+   a parent session and WITHOUT advancing the source. `:store :sqlite` only
+   (the source must be durable — mirrors resume-session!).
+
+   opts:
+     :head/id                explicit source head — the ONLY way to reach a
+                             :turn-aborted wreckage head (default = the latest
+                             non-aborted head, store/current-resume-head)
+     :id                     the fork's session id (default generated)
+     :capability             per-fork override (clamp-only, like start-session!)
+     :system-overlay         per-fork system prompt overlay
+     :bundle/allow-mismatch? skip the surface re-presentation check explicitly
+
+   Capability: the fork runs clamp(caller-resolved, source-profile); a source
+   MORE privileged than the caller's cfg is REJECTED
+   (:fractal/fork-capability-rejected) — a host may not lift a high-privilege
+   session's state under lower scrutiny (the spawn-attached! rule, host-side).
+   Bundle: the fork must re-present the source's surfaces
+   (bundle/assert-attach-compatible!; the restored vars were created against
+   them). Records a :derivation/:host-fork lineage edge in the FORK's own log —
+   the source log gains no events. Returns a normal session handle."
+  ([cfg source-sid] (fork-session! cfg source-sid {}))
+  ([cfg source-sid opts]
+   (when-not (= :sqlite (:store cfg))
+     (throw (ex-info "fork-session! requires :store :sqlite"
+                     {:error/type :config/unsupported-store :store (:store cfg)})))
+   (let [store (build-store cfg)]
+     (try
+       (let [source      (resolve-attach-source store (str source-sid) opts)
+             source-prof (source-profile source)
+             caller-prof (resolve-profile-for-session cfg opts)]
+         (when-not (capability/profile<=? source-prof caller-prof)
+           (throw (ex-info "fork source is more privileged than the caller's cfg"
+                           {:error/type :fractal/fork-capability-rejected
+                            :source/session-id (:session/id source)
+                            :source/capability (:capability/name source-prof)
+                            :caller/capability (:capability/name caller-prof)})))
+         (let [fork-prof   (capability/clamp caller-prof source-prof)
+               fork-sid    (or (:id opts) (gen-id))
+               provider    (resolve-provider cfg)
+               adapter     (build-adapter cfg provider)
+               source-head (:head source)
+               fork-bndl   (bundle/stamp cfg fork-prof)
+               _           (bundle/assert-attach-compatible!
+                             (get-in source [:view :session :session/bundle])
+                             fork-bndl
+                             (:bundle/allow-mismatch? opts))
+               session-map (with-meta
+                             (assoc-surface-stamps
+                               {:session/id             fork-sid
+                                :session/status         :running
+                                :session/created-at     (time/now-str)
+                                :session/provider       provider
+                                :session/model          (:model cfg)
+                                :session/bundle         fork-bndl
+                                :session/capability     (:capability/name fork-prof)
+                                :session/capability-profile fork-prof
+                                :session/cache-id       fork-sid
+                                :session/kind           :host-fork
+                                :session/source-session (:session/id source)
+                                :session/source-head-id (:head/id source-head)
+                                :session/system-overlay (:system-overlay opts)}
+                               cfg)
+                             (live-meta cfg))
+               handle0     (store/create-session! store session-map)
+               handle      (merge handle0
+                                  {:cfg cfg :adapter adapter :capability fork-prof
+                                   :cache-id fork-sid :bundle fork-bndl}
+                                  (build-leaf cfg provider adapter))
+               snap        (payload-io/read-payload store (:head/vars-ref source-head))]
+           (init-session-ctx! handle fork-prof)
+           (when (and (map? snap) (:vars snap))
+             (kernel/restore-vars! @(:sci-ctx handle) fork-sid snap))
+           (store/append-event! store fork-sid {:event/type :session/started :session session-map})
+           (store/append-lineage-edge! store fork-sid
+                                       {:edge/type :derivation
+                                        :edge/kind :host-fork
+                                        :edge/from-session (:session/id source)
+                                        :edge/to-session fork-sid
+                                        :edge/from-head (:head/id source-head)
+                                        :edge/source {:session/id (:session/id source)
+                                                      :head/id (:head/id source-head)}
+                                        :edge/target {:session/id fork-sid}})
+           handle))
+       (catch Throwable e
+         (close-store-quietly! store)
+         (throw e))))))

@@ -190,7 +190,9 @@ store directory when the session should survive process restart.
 
 Durable state is not reconstructed by replaying provider calls. The SQLite event
 store is folded, payloads are read through the BlobStore, and the live REPL vars
-are restored from the published current head when one exists.
+are restored from the latest successful head when one exists (a `:turn-aborted`
+wreckage head left by a failed turn is never the resume basis — reach it
+explicitly with `fork-session!` if you want the dead turn's state).
 
 ## 5. Try the Recursive Harness Offline
 

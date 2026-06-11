@@ -53,11 +53,15 @@
   (edn-safe* v 0))
 
 (defn- inline?
-  "Small enough to embed directly in an event (no content-addressing)."
+  "Small enough to embed directly in an event (no content-addressing). R2
+   (hermes-fractal upstream): the string fast-path counts UTF-8 BYTES, not
+   chars — the policy is a byte budget, and a 300-char CJK string is ~900
+   bytes. (Char count silently over-inlined multibyte strings.)"
   [value]
   (cond
     (nil? value)    true
-    (string? value) (<= (count value) inline-limit)
+    (string? value) (<= (alength (.getBytes ^String value java.nio.charset.StandardCharsets/UTF_8))
+                        inline-limit)
     :else           (<= (alength (payload/canonical-bytes value)) inline-limit)))
 
 (defn maybe-intern
