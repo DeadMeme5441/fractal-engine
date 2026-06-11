@@ -12,9 +12,18 @@
 (defn- system-message
   "Base doctrine ++ generated SDK surface card ++ cfg :system-overlay ++
    session :session/system-overlay (05 §4, GD32). Surface cards describe only
-   functions that are both configured and capability-allowed."
+   functions that are both configured and capability-allowed. A stamped cfg
+   :doctrine override (37i) REPLACES the harness-selected base — the embedder
+   owns the words; the engine keeps the stamp."
   [view cfg profile]
-  (let [text (->> [(prompt/system-prompt (:harness cfg))   ; the harness mode selects the base doctrine
+  (when (and (:doctrine cfg) (not (:prompt/text (:doctrine cfg))))
+    ;; an un-normalized doctrine (assoc'd onto cfg after make-config) would
+    ;; silently fall back to the built-in prompt while the bundle records a
+    ;; doctrine stamp of nils — fail loudly instead of running the wrong world.
+    (throw (ex-info "cfg :doctrine is not a stamped prompt — pass doctrine through make-config"
+                    {:error/type :config/invalid-doctrine :doctrine (:doctrine cfg)})))
+  (let [text (->> [(or (:prompt/text (:doctrine cfg))
+                       (prompt/system-prompt (:harness cfg)))   ; harness selects the base doctrine
                    (surface/prompt-card (:surfaces cfg) profile)
                    (:system-overlay cfg)
                    (:session/system-overlay (:session view))]

@@ -10,6 +10,13 @@
 ;; Request: narrowed engine wire request → canonical SDK request (verified shape)
 ;; ---------------------------------------------------------------------------
 
+(def ^:private sdk-cache-keys
+  "The SDK Request's CLOSED cache-opts contract (its schema rejects unknown
+   keys — verified live: an extra key fails the whole request as 'Invalid
+   llm.sdk chat request'). The engine's cache map may carry richer data
+   (e.g. :purpose, which replay routes by); THIS seam narrows to the contract."
+  [:enabled? :ttl :scope-id :breakpoints])
+
 (defn ->sdk-request
   "The §1 narrowed wire request ({:model :messages [{:role :content}] :cache}) →
    the SDK's canonical Request. NB: the SDK Message uses NAMESPACED keys
@@ -19,7 +26,7 @@
            :request/messages (mapv (fn [m] {:message/role    (:role m)
                                             :message/content (:content m)})
                                    (:messages request))}
-    (:cache request) (assoc :request/cache (:cache request))))
+    (:cache request) (assoc :request/cache (select-keys (:cache request) sdk-cache-keys))))
 
 ;; ---------------------------------------------------------------------------
 ;; Response: SDK Response → the §1 call record (honest :unknown)

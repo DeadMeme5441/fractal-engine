@@ -32,6 +32,7 @@
   ([view cfg {:keys [dynamic-request?]}]
    (cond-> {:enabled? true
             :ttl      (:cache-ttl cfg)
+            :purpose  :agent     ; explicit DATA — never re-derived by parsing scope-id
             :scope-id (scope-id (cache-id (:session view)) :agent)}
      dynamic-request? (assoc :breakpoints 1))))
 
@@ -43,4 +44,5 @@
   [caller-cache-id cfg]
   {:enabled? true
    :ttl      (:cache-ttl cfg)
+   :purpose  :leaf      ; explicit DATA — replay routes leaf requests by this
    :scope-id (scope-id caller-cache-id :leaf)})

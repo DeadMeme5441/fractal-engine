@@ -220,14 +220,14 @@
         (is (= :final (:status r2)))
         (is (= {:surface :jira :query "auth" :limit 1} (:turn/final-value r2)))
         (fe/close-session! h2))
-      (testing "omitting the configured surface fails loudly"
+      (testing "omitting the configured surface fails loudly (the bundle gate, yjy)"
         (let [missing (cfg respond :store :sqlite :store/dir dir :surfaces [])]
-          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"configured SDK surfaces"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"surfaces"
                 (fe/resume-session! missing sid)))))
-      (testing "changing the public surface stamp fails loudly"
+      (testing "changing the public surface stamp fails loudly (the bundle gate, yjy)"
         (let [changed (cfg respond :store :sqlite :store/dir dir
                            :surfaces [(jira-surface 1 "Changed doc.")])]
-          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"configured SDK surfaces"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"surfaces"
                 (fe/resume-session! changed sid)))))
       (finally (rm-rf! dir)))))
 

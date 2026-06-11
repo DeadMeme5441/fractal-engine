@@ -102,6 +102,9 @@ engine-free, and capability profiles take host function implementations as data.
 | `fractal.engine.adapter.request` | Request assembly from the folded view, compaction boundary, system overlays, and cache metadata. |
 | `fractal.engine.capability` | Capability profile lattice, clamp/validation rules, and SCI options. |
 | `fractal.engine.surface` | SDK surface descriptor validation, public stamps, stable/dynamic prompt rendering, and namespaced SCI function assembly. |
+| `fractal.engine.bundle` | The stamped content-addressed bundle identity ({harness, doctrine, surfaces, capability}) recorded on sessions and heads; resume/attach verification. |
+| `fractal.engine.adapter.replay` | Recorded-replay responder: serves a prior run's step and leaf responses from the durable log for deterministic re-execution. |
+| `fractal.engine.projection` | Read projections over the log: per-turn delegation report and claim verification (payload/head/edge/session existence). |
 | `fractal.engine.compaction` | Context assessment and transcript compaction. |
 | `fractal.engine.live` | Per-session live dispatch, transient notifications, backlog recovery, and progress projection. |
 | `fractal.engine.concurrent` | Deadlines, bounded fan-out workers, dynamic-binding propagation, and the global leaf-call semaphore. |
@@ -281,6 +284,7 @@ The folded view is advanced by a small event taxonomy:
 | Turn lifecycle | `:turn/started`, `:turn/put` |
 | Step lifecycle | `:step/started`, `:step/put` |
 | Transcript and evals | `:message/appended`, `:eval/added` |
+| Leaf and surface calls | `:leaf/called` (always — leaf spend is never invisible), `:surface/called` (opt-in via `:surface/record?`) |
 | Snapshots and compaction | `:session/vars-snapshotted`, `:session/compacted` |
 | Heads and lineage | `:head/published`, `:lineage/edge-added` |
 | Live transient only | `:delta/token`, `:subscribe/gap` |
@@ -290,7 +294,11 @@ items are never persisted and are recoverable only through later durable state.
 
 ## Failure Semantics
 
-- Store writes are single-writer per session under the store lock.
+- Store writes are single-writer per session under the store lock. Across
+  processes, the sqlite store holds an advisory writer lease per scope: a
+  second live writer fails with `:fractal/writer-lease-held`; a writer whose
+  stale lease was taken over fails its next write with
+  `:fractal/writer-lease-lost`. Reads never take leases.
 - SQLite persists before fold. A failed durable insert does not advance the
   in-process view.
 - SQLite batch appends are one transaction. A failed batch folds nothing.

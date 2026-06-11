@@ -23,7 +23,8 @@
    a full session. Partial fan-out NEVER throws — failed slots become
    {:fractal/failed true …} sentinels in the :fractal/ ns. Accounting stays
    honest: a child's usage/cost/cache rides its envelope's :rlm/meta; the root
-   turn's :turn/usage/:turn/cost remain SELF-ONLY (06 §6).
+   turn's :turn/usage/:turn/cost are SELF-ONLY where self = the turn's own
+   steps PLUS its own leaf calls (durable :leaf/called events; 06 §6 amended).
 
    Phase 4 adds the durable recursion data model here: invocation/derivation
    edges, cross-session lineage, immutable heads, and attach-rlm. The envelope's
@@ -35,6 +36,7 @@
             [fractal.engine.concurrent :as concurrent]
             [fractal.engine.kernel :as kernel]
             [fractal.engine.payload :as payload]
+            [fractal.engine.payload-io :as payload-io]
             [fractal.engine.prompt :as prompt]
             [fractal.engine.store :as store]
             [fractal.engine.surface :as surface]))
@@ -153,31 +155,82 @@
                                  "\n\nReturn ONLY one schema-shaped EDN value: no prose, no Markdown, no code fence."))}]
      :cache    (cache/build-leaf-cache-opts (:cache-id handle) cfg)}))
 
+(defn- record-leaf!
+  "Append the durable :leaf/called event for ONE leaf provider call — success,
+   parse failure, or call failure alike. Leaf spend is never invisible: the
+   event carries the request user content (replay routing key + audit, via
+   adapter/first-user-content — the SAME fn the replayer routes by), the
+   response record (usage/cost/cache — rolled into the turn totals), and the
+   response text (interned).
+
+   Persist failures are LOUD on the paths where money was spent and a value is
+   in hand (a result the log cannot account for must not be returned — incl.
+   :fractal/writer-lease-lost, which would otherwise be silently eaten here
+   and only surface at the next root append). `best-effort?` is set ONLY when
+   recording a call that ITSELF failed — the original error must propagate,
+   not be masked by a recording error."
+  [handle req mode outcome best-effort?]
+  (try
+    (let [store (:store handle) sid (:session-id handle)
+          rec   (:rec outcome)]
+      (store/append-event! store sid
+        {:event/type :leaf/called
+         :leaf (cond-> {:leaf/turn-id kernel/*current-turn-id*
+                        :leaf/step-id kernel/*current-step-id*
+                        :leaf/model   (:model req)
+                        :leaf/mode    mode
+                        :leaf/user-content-or-ref
+                        (payload-io/maybe-intern store (adapter/first-user-content req)
+                                                 {:payload/kind :leaf-request})}
+                 rec (assoc :leaf/status   (if (:parse-error? outcome) :parse-error :ok)
+                            :leaf/text-or-ref (payload-io/maybe-intern store (:text rec)
+                                                                       {:payload/kind :leaf-response})
+                            :leaf/response (dissoc rec :text))
+                 (:error outcome) (assoc :leaf/status :error
+                                         :leaf/error (:error outcome)))}))
+    (catch Throwable t
+      (when-not best-effort? (throw t)))))
+
 (defn- leaf-call
   "ONE bounded provider call with the leaf prompt, under the call deadline and
-   the GLOBAL leaf semaphore. Parses per mode; a parse failure throws
-   :fractal/leaf-parse-failed (→ a sentinel inside map-lm; the error observation
-   for a bare lm)."
+   the GLOBAL leaf semaphore. Every call is recorded as a durable :leaf/called
+   event in the calling session's log (spend, response, routing key). Parses
+   per mode; a parse failure throws :fractal/leaf-parse-failed (→ a sentinel
+   inside map-lm; the error observation for a bare lm)."
   [handle input query mode]
   (let [cfg        (:cfg handle)
         adpt       (:leaf-adapter handle)
         req        (leaf-request handle input query mode)
-        rec        (concurrent/with-permit (leaf-sem (:leaf-concurrency cfg))
-                     (fn []
-                       (concurrent/with-deadline (:call-timeout-ms cfg)
-                         (adapter/-complete adpt req
-                                            {:retry    (when-not (:stream? cfg) (:retry cfg))
-                                             :stream?  false
-                                             :on-delta nil}))))
-        text       (:text rec)]
-    (try
-      (parse-leaf text mode)
-      (catch Throwable t
+        rec        (try
+                     (concurrent/with-permit (leaf-sem (:leaf-concurrency cfg))
+                       (fn []
+                         (concurrent/with-deadline (:call-timeout-ms cfg)
+                           (adapter/-complete adpt req
+                                              {:retry    (when-not (:stream? cfg) (:retry cfg))
+                                               :stream?  false
+                                               :on-delta nil}))))
+                     (catch Throwable t
+                       ;; the call itself failed — record best-effort so the
+                       ;; ORIGINAL error propagates, never a recording error
+                       (record-leaf! handle req mode {:error (kernel/err->map t)} true)
+                       (throw t)))
+        text       (:text rec)
+        ;; parse OUTCOME first (pure), record SECOND (effect) — decomplected,
+        ;; so a recording failure (e.g. lease lost) propagates unmasked in
+        ;; either branch: money was spent and the log could not account for it.
+        parsed     (try {:ok (parse-leaf text mode)}
+                        (catch Throwable t {:parse-error t}))]
+    (if-let [t (:parse-error parsed)]
+      (do
+        (record-leaf! handle req mode {:rec rec :parse-error? true} false)
         (throw (ex-info "leaf response did not parse into the requested shape"
                         {:error/type :fractal/leaf-parse-failed
                          :leaf/mode mode
                          :leaf/text-preview (compact-preview text 240)}
-                        t))))))
+                        t)))
+      (do
+        (record-leaf! handle req mode {:rec rec} false)
+        (:ok parsed)))))
 
 (defn- map-leaf [handle inputs query mode]
   (let [cfg     (:cfg handle)

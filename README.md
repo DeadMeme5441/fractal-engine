@@ -254,6 +254,7 @@ Inspection commands:
 
 ```text
 status progress view events heads head edges tree payload messages turns steps evals trace check report
+pins facts delegation
 ```
 
 The CLI is designed for agents and scripts first. It is non-interactive by
@@ -370,7 +371,7 @@ The release version is derived from the tag name without the leading `v`.
 After a release is published, depend on the Clojars coordinate:
 
 ```clojure
-{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.5.5"}}}
+{:deps {net.clojars.deadmeme5441/fractal-engine {:mvn/version "0.6.0"}}}
 ```
 
 Then use the public facade:

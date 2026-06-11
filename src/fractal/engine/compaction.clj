@@ -109,5 +109,6 @@
                             :head/to-event-id (:event/id compact-ev)
                             :head/vars-ref vars-ref
                             :head/final-ref nil
-                            :head/compact-from-event-id boundary}))
+                            :head/compact-from-event-id boundary
+                            :head/bundle-hash (get-in handle [:bundle :bundle/hash])}))
     handle))
